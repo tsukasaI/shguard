@@ -98,21 +98,18 @@ impl LexWord {
     }
 }
 
-/// A redirect the subset accepts.
+/// A redirect the subset accepts: the same closed set as the kernel's
+/// `Redir`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LexRedir {
-    /// `[N]>&M`; `from` defaults to 1.
-    Dup {
-        /// The descriptor being redirected.
-        from: u8,
-        /// The descriptor it becomes a copy of.
-        to: u8,
-    },
-    /// `[N]>/dev/null`; `fd` defaults to 1.
-    DevNull {
-        /// The descriptor being redirected.
-        fd: u8,
-    },
+    /// `2>&1`.
+    ErrToOut,
+    /// `>&2` or `1>&2`.
+    OutToErr,
+    /// `>/dev/null` or `1>/dev/null`.
+    OutDevNull,
+    /// `2>/dev/null`.
+    ErrDevNull,
 }
 
 /// A lexed token. Blanks are not tokens.
@@ -226,6 +223,11 @@ pub enum UnsupportedKind {
     /// A `>&` operand that is not a single digit followed by a token end.
     #[error("`>&` operand other than one digit")]
     DupOperand,
+    /// A well-formed `>&D` or `>/dev/null` redirect that is not one of the
+    /// four the subset accepts: `2>&1`, `>&2` / `1>&2`, `>/dev/null` /
+    /// `1>/dev/null` and `2>/dev/null`.
+    #[error("redirect other than 2>&1, >&2, >/dev/null or 2>/dev/null")]
+    RedirectDescriptor,
     /// A `>` target other than `/dev/null`.
     #[error("redirect target other than /dev/null")]
     RedirectTarget,
@@ -567,8 +569,13 @@ impl Lexer<'_> {
                 // named `1x` for `>&1x`, and `>&-` closes the descriptor.
                 match self.peek_at(2) {
                     Some(d) if d.is_ascii_digit() && is_token_end(self.peek_at(3)) => {
+                        let redir = match (from, d - b'0') {
+                            (2, 1) => LexRedir::ErrToOut,
+                            (1, 2) => LexRedir::OutToErr,
+                            _ => return Err(fail(UnsupportedKind::RedirectDescriptor, start)),
+                        };
                         self.pos += 3;
-                        Ok(Token::Redir(LexRedir::Dup { from, to: d - b'0' }))
+                        Ok(Token::Redir(redir))
                     }
                     Some(_) | None => Err(fail(UnsupportedKind::DupOperand, start)),
                 }
@@ -580,10 +587,13 @@ impl Lexer<'_> {
                 }
                 match self.peek() {
                     Some(b) if !is_word_terminator(b) => {
-                        if self.word(b)?.is_dev_null() {
-                            Ok(Token::Redir(LexRedir::DevNull { fd: from }))
-                        } else {
-                            Err(fail(UnsupportedKind::RedirectTarget, start))
+                        if !self.word(b)?.is_dev_null() {
+                            return Err(fail(UnsupportedKind::RedirectTarget, start));
+                        }
+                        match from {
+                            1 => Ok(Token::Redir(LexRedir::OutDevNull)),
+                            2 => Ok(Token::Redir(LexRedir::ErrDevNull)),
+                            _ => Err(fail(UnsupportedKind::RedirectDescriptor, start)),
                         }
                     }
                     Some(_) | None => Err(fail(UnsupportedKind::RedirectTarget, start)),

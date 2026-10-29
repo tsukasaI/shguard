@@ -50,7 +50,7 @@ fn lexemes_carry_start_and_end_offsets() {
         got,
         vec![
             (0, 2, bare("ab")),
-            (4, 8, Token::Redir(LexRedir::Dup { from: 2, to: 1 })),
+            (4, 8, Token::Redir(LexRedir::ErrToOut)),
             (9, 10, SEMI),
             (11, 12, bare("c")),
             (12, 13, NL),
@@ -125,61 +125,55 @@ fn accepted_inputs() {
             "cmd 2>&1 >/dev/null",
             vec![
                 bare("cmd"),
-                Token::Redir(LexRedir::Dup { from: 2, to: 1 }),
-                Token::Redir(LexRedir::DevNull { fd: 1 }),
+                Token::Redir(LexRedir::ErrToOut),
+                Token::Redir(LexRedir::OutDevNull),
             ],
         ),
         (
             "cmd 2>&1>/dev/null",
             vec![
                 bare("cmd"),
-                Token::Redir(LexRedir::Dup { from: 2, to: 1 }),
-                Token::Redir(LexRedir::DevNull { fd: 1 }),
+                Token::Redir(LexRedir::ErrToOut),
+                Token::Redir(LexRedir::OutDevNull),
             ],
         ),
         (
             "cmd > /dev/null",
-            vec![bare("cmd"), Token::Redir(LexRedir::DevNull { fd: 1 })],
+            vec![bare("cmd"), Token::Redir(LexRedir::OutDevNull)],
         ),
         (
             "cmd 2>/dev/null",
-            vec![bare("cmd"), Token::Redir(LexRedir::DevNull { fd: 2 })],
+            vec![bare("cmd"), Token::Redir(LexRedir::ErrDevNull)],
         ),
         (
             "cmd >\"/dev/null\"",
-            vec![bare("cmd"), Token::Redir(LexRedir::DevNull { fd: 1 })],
+            vec![bare("cmd"), Token::Redir(LexRedir::OutDevNull)],
         ),
         (
             "cmd >/dev/'null'",
-            vec![bare("cmd"), Token::Redir(LexRedir::DevNull { fd: 1 })],
+            vec![bare("cmd"), Token::Redir(LexRedir::OutDevNull)],
         ),
         (
             "cmd >&2",
-            vec![bare("cmd"), Token::Redir(LexRedir::Dup { from: 1, to: 2 })],
+            vec![bare("cmd"), Token::Redir(LexRedir::OutToErr)],
         ),
         (
             "cmd >&2;ls",
             vec![
                 bare("cmd"),
-                Token::Redir(LexRedir::Dup { from: 1, to: 2 }),
+                Token::Redir(LexRedir::OutToErr),
                 SEMI,
                 bare("ls"),
             ],
         ),
         (
             "a>/dev/null",
-            vec![bare("a"), Token::Redir(LexRedir::DevNull { fd: 1 })],
+            vec![bare("a"), Token::Redir(LexRedir::OutDevNull)],
         ),
+        ("a2>&2", vec![bare("a2"), Token::Redir(LexRedir::OutToErr)]),
         (
-            "a2>&1",
-            vec![bare("a2"), Token::Redir(LexRedir::Dup { from: 1, to: 1 })],
-        ),
-        (
-            "\"2\">&1",
-            vec![
-                word(vec![quo("2")]),
-                Token::Redir(LexRedir::Dup { from: 1, to: 1 }),
-            ],
+            "\"2\">&2",
+            vec![word(vec![quo("2")]), Token::Redir(LexRedir::OutToErr)],
         ),
         (
             "rm -rf ~/x",
@@ -333,6 +327,16 @@ fn unsupported_inputs() {
         (b"x > ; y", K::RedirectTarget, 2),
         (b"x > > y", K::RedirectTarget, 2),
         (b"x 2>f", K::RedirectTarget, 2),
+        (b"x 3>&1", K::RedirectDescriptor, 2),
+        (b"x 2>&2", K::RedirectDescriptor, 2),
+        (b"x >&1", K::RedirectDescriptor, 2),
+        (b"x 1>&1", K::RedirectDescriptor, 2),
+        (b"x 1>&3", K::RedirectDescriptor, 2),
+        (b"x 2>&0", K::RedirectDescriptor, 2),
+        (b"x 0>&1", K::RedirectDescriptor, 2),
+        (b"x 0>/dev/null", K::RedirectDescriptor, 2),
+        (b"x 3>/dev/null", K::RedirectDescriptor, 2),
+        (b"a2>&1", K::RedirectDescriptor, 2),
     ];
     for (input, kind, offset) in cases {
         assert_eq!(
@@ -414,8 +418,16 @@ fn gen_token() -> impl Strategy<Value = Gen> {
             Just(Op::Pipe)
         ]
         .prop_map(Gen::Op),
-        1 => (0u8..10, 0u8..10, 0u8..6).prop_map(|(from, to, style)| Gen::Redir(LexRedir::Dup { from, to }, style)),
-        1 => (0u8..10, 0u8..6).prop_map(|(fd, style)| Gen::Redir(LexRedir::DevNull { fd }, style)),
+        1 => (
+            prop_oneof![
+                Just(LexRedir::ErrToOut),
+                Just(LexRedir::OutToErr),
+                Just(LexRedir::OutDevNull),
+                Just(LexRedir::ErrDevNull),
+            ],
+            0u8..6,
+        )
+        .prop_map(|(r, style)| Gen::Redir(r, style)),
     ]
 }
 
@@ -458,19 +470,13 @@ fn render(g: &Gen) -> String {
         Gen::Op(Op::AndIf) => "&&".into(),
         Gen::Op(Op::OrIf) => "||".into(),
         Gen::Op(Op::Pipe) => "|".into(),
-        Gen::Redir(LexRedir::Dup { from, to }, style) => {
-            let fd = if *style >= 3 && *from == 1 {
-                String::new()
-            } else {
-                from.to_string()
-            };
-            format!("{fd}>&{to}")
-        }
-        Gen::Redir(LexRedir::DevNull { fd }, style) => {
-            let fd_text = if *style >= 3 && *fd == 1 {
-                String::new()
-            } else {
-                fd.to_string()
+        Gen::Redir(LexRedir::ErrToOut, _) => "2>&1".into(),
+        Gen::Redir(LexRedir::OutToErr, style) => if *style >= 3 { ">&2" } else { "1>&2" }.into(),
+        Gen::Redir(r @ (LexRedir::OutDevNull | LexRedir::ErrDevNull), style) => {
+            let fd_text = match r {
+                LexRedir::ErrDevNull => "2",
+                LexRedir::OutDevNull if *style >= 3 => "",
+                LexRedir::OutDevNull | LexRedir::ErrToOut | LexRedir::OutToErr => "1",
             };
             let target = match style % 3 {
                 0 => ">/dev/null",

@@ -107,7 +107,7 @@ use crate::classify::{covered_script, covered_simple, key_matches, row_covers};
 use crate::decision::Decision;
 #[cfg(creusot)]
 use crate::decision::le;
-use crate::rule::{Outcome, Pat, PatKind, Rule, Scope};
+use crate::rule::{OptAlts, Outcome, Pat, PatKind, Rule, Scope};
 use crate::verdict::{Addr, Reason, UnknownKind};
 #[cfg(creusot)]
 use crate::verdict::{simple_at_l, valid_addr};
@@ -350,11 +350,21 @@ pub fn opt_seen_l(n: OptName, gopts: Seq<Opt>, seen: Seq<Int>) -> bool {
     }
 }
 
-/// Every option name of the rule overlaps an option the parse saw.
+/// Some name of the alias set `names` overlaps an option the parse saw.
 #[cfg(creusot)]
 #[logic(open(crate))]
-pub fn opts_hit(ropts: Seq<OptName>, gopts: Seq<Opt>, seen: Seq<Int>) -> bool {
-    pearlite! { forall<t> 0 <= t && t < ropts.len() ==> opt_seen_l(ropts[t], gopts, seen) }
+pub fn alts_seen_l(names: Seq<OptName>, gopts: Seq<Opt>, seen: Seq<Int>) -> bool {
+    pearlite! {
+        exists<a> 0 <= a && a < names.len() && opt_seen_l(names[a], gopts, seen)
+    }
+}
+
+/// Every entry of the rule has some alternative name that overlaps an option
+/// the parse saw: entries are conjoined, the names inside an entry disjoined.
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn opts_hit(ropts: Seq<OptAlts>, gopts: Seq<Opt>, seen: Seq<Int>) -> bool {
+    pearlite! { forall<t> 0 <= t && t < ropts.len() ==> alts_seen_l(ropts[t].names@, gopts, seen) }
 }
 
 /// `rule` hits the command with words `ws`, read by a grammar with options
@@ -1063,19 +1073,37 @@ fn opt_seen(n: &OptName, gopts: &[Opt], seen: &[usize]) -> bool {
     false
 }
 
-/// Every option name of the rule overlaps an option in `seen`.
+/// Some name of the alias set overlaps an option in `seen`.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result == alts_seen_l(alts.names@, gopts@, ints(seen@))))]
+fn alts_seen(alts: &OptAlts, gopts: &[Opt], seen: &[usize]) -> bool {
+    let mut a: usize = 0;
+    #[cfg_attr(creusot, variant(alts.names@.len() - a@))]
+    #[cfg_attr(creusot, invariant(a@ <= alts.names@.len()))]
+    #[cfg_attr(creusot, invariant(forall<x> 0 <= x && x < a@
+        ==> !opt_seen_l(alts.names@[x], gopts@, ints(seen@))))]
+    while a < alts.names.len() {
+        #[cfg(creusot)]
+        proof_assert! { lemma_ints_index(seen@); true };
+        if opt_seen(&alts.names[a], gopts, seen) {
+            return true;
+        }
+        a += 1;
+    }
+    false
+}
+
+/// Every entry of the rule has a name that overlaps an option in `seen`.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result == opts_hit(ropts@, gopts@, ints(seen@))))]
-fn opts_present(ropts: &[OptName], gopts: &[Opt], seen: &[usize]) -> bool {
+fn opts_present(ropts: &[OptAlts], gopts: &[Opt], seen: &[usize]) -> bool {
     let mut t: usize = 0;
     #[cfg_attr(creusot, variant(ropts@.len() - t@))]
     #[cfg_attr(creusot, invariant(t@ <= ropts@.len()))]
     #[cfg_attr(creusot, invariant(forall<x> 0 <= x && x < t@
-        ==> opt_seen_l(ropts@[x], gopts@, ints(seen@))))]
+        ==> alts_seen_l(ropts@[x].names@, gopts@, ints(seen@))))]
     while t < ropts.len() {
-        #[cfg(creusot)]
-        proof_assert! { lemma_ints_index(seen@); true };
-        if !opt_seen(&ropts[t], gopts, seen) {
+        if !alts_seen(&ropts[t], gopts, seen) {
             return false;
         }
         t += 1;
@@ -1406,7 +1434,7 @@ pub fn decide(cat: &Catalog, rules: &[Rule], sc: Script) -> Verdict {
 
 #[cfg(test)]
 mod tests {
-    use super::{Verdict, decide};
+    use super::{OptAlts, Verdict, decide};
     use crate::ast::{AndOr, Connector, Link, Opaque, Part, Pipeline, Script, Simple, Word};
     use crate::catalog::{
         Catalog, Grammar, LongName, Opt, OptName, OptValue, PlusWords, Role, Row,
@@ -1489,9 +1517,17 @@ mod tests {
         Part::Lit(bytes(s))
     }
 
+    fn any_of(names: Vec<OptName>) -> OptAlts {
+        OptAlts::new(names).expect("non-empty")
+    }
+
+    fn one(name: OptName) -> OptAlts {
+        any_of(vec![name])
+    }
+
     fn rule(id: u32, scope: Scope, k: &str, targets: Vec<Pat>) -> Rule {
         let opts = match scope {
-            Scope::Simple => vec![OptName::Short(b'r')],
+            Scope::Simple => vec![one(OptName::Short(b'r'))],
             Scope::PipeInto => Vec::new(),
         };
         Rule::new(RuleId(id), scope, key(&[k]), opts, targets, Outcome::Block).expect("valid")
@@ -1713,7 +1749,7 @@ mod tests {
         ])])
     }
 
-    fn block_rule(k: &str, opts: Vec<OptName>, targets: Vec<Pat>) -> Rule {
+    fn block_rule(k: &str, opts: Vec<OptAlts>, targets: Vec<Pat>) -> Rule {
         Rule::new(
             RuleId(9),
             Scope::Simple,
@@ -1737,7 +1773,11 @@ mod tests {
     fn bare_tilde_pattern_is_home() {
         // `[Tilde]` Exact vs `rm -r -- ~/` and `rm -r -- ~`.
         let home = Pat::new(vec![Part::Opaque(Opaque::Tilde)], PatKind::Exact).expect("non-empty");
-        let r = [block_rule("rm", vec![OptName::Short(b'r')], vec![home])];
+        let r = [block_rule(
+            "rm",
+            vec![one(OptName::Short(b'r'))],
+            vec![home],
+        )];
         check_with(&r, rm_r_dashdash(tilde_word("/")), Decision::Block);
         check_with(&r, rm_r_dashdash(tilde_word("")), Decision::Block);
         check_with(&r, rm_r_dashdash(tilde_word("/x")), Decision::Allow);
@@ -1747,7 +1787,7 @@ mod tests {
     fn patterns_are_normalized() {
         // `/etc/` Exact vs `rm -r /etc/` and `rm -r /etc`.
         let etc = Pat::new(vec![lit("/etc/")], PatKind::Exact).expect("non-empty");
-        let r = [block_rule("rm", vec![OptName::Short(b'r')], vec![etc])];
+        let r = [block_rule("rm", vec![one(OptName::Short(b'r'))], vec![etc])];
         check_with(&r, seq(vec![cmd(&["rm", "-r", "/etc/"])]), Decision::Block);
         check_with(&r, seq(vec![cmd(&["rm", "-r", "/etc"])]), Decision::Block);
         check_with(&r, seq(vec![cmd(&["rm", "-r", "/etc/x"])]), Decision::Allow);
@@ -1759,7 +1799,7 @@ mod tests {
             RuleId(10),
             Scope::Simple,
             key(&["rm"]),
-            vec![OptName::Short(b'r')],
+            vec![one(OptName::Short(b'r'))],
             Vec::new(),
             Outcome::Ask,
         )
@@ -1872,6 +1912,91 @@ mod tests {
     }
 
     #[test]
+    fn alias_set_hits_any_spelling_the_catalog_lists_separately() {
+        // The catalog lists `-r`, `-R` and `--recursive` as three options.
+        let rm = row(
+            &["rm"],
+            gnu(
+                vec![
+                    flag(OptName::Short(b'r')),
+                    flag(OptName::Short(b'R')),
+                    flag(OptName::Long(long("recursive"))),
+                    flag(OptName::Short(b'f')),
+                ],
+                Role::Path,
+            ),
+            false,
+        );
+        let cat = Catalog::new(vec![rm], Vec::new());
+        let root = Pat::new(vec![lit("/")], PatKind::Exact).expect("non-empty");
+        let r = [block_rule(
+            "rm",
+            vec![any_of(vec![
+                OptName::Short(b'r'),
+                OptName::Short(b'R'),
+                OptName::Long(long("recursive")),
+            ])],
+            vec![root],
+        )];
+        for argv in [
+            ["rm", "-r", "/"],
+            ["rm", "-R", "/"],
+            ["rm", "--recursive", "/"],
+        ] {
+            check_in(&cat, &r, seq(vec![cmd(&argv)]), Decision::Block);
+        }
+        check_in(
+            &cat,
+            &r,
+            seq(vec![cmd(&["rm", "-f", "/"])]),
+            Decision::Allow,
+        );
+    }
+
+    #[test]
+    fn entries_are_conjoined_and_alternatives_disjoined() {
+        let rm = row(
+            &["rm"],
+            gnu(
+                vec![
+                    flag(OptName::Short(b'r')),
+                    flag(OptName::Short(b'R')),
+                    flag(OptName::Short(b'f')),
+                ],
+                Role::Path,
+            ),
+            false,
+        );
+        let cat = Catalog::new(vec![rm], Vec::new());
+        let r = [block_rule(
+            "rm",
+            vec![
+                any_of(vec![OptName::Short(b'r'), OptName::Short(b'R')]),
+                one(OptName::Short(b'f')),
+            ],
+            Vec::new(),
+        )];
+        check_in(
+            &cat,
+            &r,
+            seq(vec![cmd(&["rm", "-R", "-f", "x"])]),
+            Decision::Block,
+        );
+        check_in(
+            &cat,
+            &r,
+            seq(vec![cmd(&["rm", "-R", "x"])]),
+            Decision::Allow,
+        );
+        check_in(
+            &cat,
+            &r,
+            seq(vec![cmd(&["rm", "-f", "x"])]),
+            Decision::Allow,
+        );
+    }
+
+    #[test]
     fn rules_see_the_first_covering_row() {
         let short_only = row(
             &["rm"],
@@ -1889,7 +2014,7 @@ mod tests {
         // The rule names only `--recursive`, so it overlaps `both` alone.
         let r = [block_rule(
             "rm",
-            vec![OptName::Long(long("recursive"))],
+            vec![one(OptName::Long(long("recursive")))],
             Vec::new(),
         )];
         let sc = seq(vec![cmd(&["rm", "-r", "x"])]);

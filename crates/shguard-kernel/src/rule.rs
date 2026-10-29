@@ -1,7 +1,8 @@
 //! Rules: patterns that raise a decision for a matching simple command.
 //!
 //! Matching is defined in [`crate::decide`]. A rule hits a simple command when
-//! the command's key matches `key`, every entry of `opts` is present, and any
+//! the command's key matches `key`, every entry of `opts` is present (an
+//! entry is a set of alias names, present when any one of them is), and any
 //! target matches (an empty `targets` means any). Rules only raise the
 //! verdict; user allows are catalog rows, never rules.
 
@@ -124,6 +125,57 @@ pub fn outcome_decision(o: Outcome) -> Decision {
     }
 }
 
+/// A set of alternative option names: the rule entry holds when the command
+/// uses any one of them (`-r`, `-R` or `--recursive`).
+///
+/// The set is non-empty. An empty set could never be seen, so a Block rule
+/// holding one would be silently dead; the checked constructor refuses it.
+#[derive(Clone, Debug)]
+#[cfg_attr(not(creusot), derive(PartialEq, Eq))]
+pub struct OptAlts {
+    pub(crate) names: Vec<OptName>,
+}
+
+/// An alias set has at least one name.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn alts_wf(names: Seq<OptName>) -> bool {
+    names.len() > 0
+}
+
+#[cfg(creusot)]
+impl Invariant for OptAlts {
+    #[logic(open(crate))]
+    fn invariant(self) -> bool {
+        pearlite! { alts_wf(self.names@) }
+    }
+}
+
+impl OptAlts {
+    /// Builds an alias set, or `None` when `names` is empty.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(match result {
+        Some(a) => a.names@ == names@,
+        None => !alts_wf(names@),
+    }))]
+    #[must_use]
+    pub fn new(names: Vec<OptName>) -> Option<OptAlts> {
+        if <[_]>::is_empty(&names) {
+            None
+        } else {
+            Some(OptAlts { names })
+        }
+    }
+
+    /// The alternative names.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(result@ == self.names@))]
+    #[must_use]
+    pub fn names(&self) -> &[OptName] {
+        &self.names
+    }
+}
+
 /// A rule.
 #[derive(Clone, Debug)]
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
@@ -131,7 +183,7 @@ pub struct Rule {
     pub(crate) id: RuleId,
     pub(crate) scope: Scope,
     pub(crate) key: Vec<Vec<u8>>,
-    pub(crate) opts: Vec<OptName>,
+    pub(crate) opts: Vec<OptAlts>,
     pub(crate) targets: Vec<Pat>,
     pub(crate) outcome: Outcome,
 }
@@ -157,7 +209,7 @@ impl Rule {
         id: RuleId,
         scope: Scope,
         key: Vec<Vec<u8>>,
-        opts: Vec<OptName>,
+        opts: Vec<OptAlts>,
         targets: Vec<Pat>,
         outcome: Outcome,
     ) -> Option<Rule> {
@@ -199,11 +251,12 @@ impl Rule {
         &self.key
     }
 
-    /// The options that must all be present.
+    /// The option entries that must all hold; each holds when any one of its
+    /// alternative names is present.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(result@ == self.opts@))]
     #[must_use]
-    pub fn opts(&self) -> &[OptName] {
+    pub fn opts(&self) -> &[OptAlts] {
         &self.opts
     }
 
@@ -237,7 +290,7 @@ impl Rule {
 
 #[cfg(test)]
 mod tests {
-    use super::{Outcome, Pat, PatKind, Rule, RuleId, Scope};
+    use super::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
     use crate::ast::{Opaque, Part};
     use crate::catalog::OptName;
     use crate::decision::Decision;
@@ -246,12 +299,23 @@ mod tests {
         s.as_bytes().to_vec()
     }
 
+    fn alts() -> OptAlts {
+        OptAlts::new(vec![OptName::Short(b'r'), OptName::Short(b'R')]).expect("non-empty")
+    }
+
+    #[test]
+    fn opt_alts_constructor() {
+        let a = alts();
+        assert_eq!(a.names(), [OptName::Short(b'r'), OptName::Short(b'R')]);
+        assert!(OptAlts::new(Vec::new()).is_none());
+    }
+
     fn rule(key: Vec<Vec<u8>>, outcome: Outcome) -> Option<Rule> {
         Rule::new(
             RuleId(7),
             Scope::Simple,
             key,
-            vec![OptName::Short(b'r')],
+            vec![alts()],
             Vec::new(),
             outcome,
         )
@@ -272,7 +336,7 @@ mod tests {
         assert_eq!(r.id(), RuleId(7));
         assert_eq!(r.scope(), Scope::Simple);
         assert_eq!(r.key(), [bytes("rm")]);
-        assert_eq!(r.opts(), [OptName::Short(b'r')]);
+        assert_eq!(r.opts(), [alts()]);
         assert!(r.targets().is_empty());
         assert_eq!(r.outcome(), Outcome::Block);
 

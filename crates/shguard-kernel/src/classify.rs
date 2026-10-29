@@ -7,14 +7,18 @@
 //! - its key matches: the first `key.len()` words are literal (every part is
 //!   `Lit`; the bytes are their concatenation, the view of [`crate::argv`])
 //!   and equal the key segments, in order and contiguous;
-//! - it does not run code;
+//! - it does not run code, and no row with a longer key that also matches
+//!   the command runs code: `["python"]` must not cover `python -c x` when
+//!   `["python", "-c"]` runs code (#1042);
 //! - the words after the key parse against its grammar ([`parse_argv`]);
 //! - it is not a parent row, or the parse has no operand. A parent row is
 //!   one whose key another row strictly extends (derived, not stored), so
 //!   `["git"]` covers `git --version` but not `git push`, where `push` would
 //!   otherwise read as an inert operand.
 //!
-//! Redirects never affect coverage. The catalog's global grammars (words
+//! Redirects never affect coverage: every [`Redir`](crate::ast::Redir) value
+//! only moves or discards descriptors 1 and 2, so none can write a file,
+//! read input or run code. The catalog's global grammars (words
 //! between key segments, as in `git -C x status`) are NOT used in v1: such a
 //! command matches no row with the longer key, which is conservative (it
 //! ends in Ask, never Allow).
@@ -79,6 +83,17 @@ pub fn is_parent_l(rows: Seq<Row>, j: Int) -> bool {
     }
 }
 
+/// Some row whose key strictly extends the key of `rows[j]` matches the words
+/// `ws` and runs code: the command is that row's, not `rows[j]`'s (#1042).
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn code_child_l(rows: Seq<Row>, j: Int, ws: Seq<Word>) -> bool {
+    pearlite! {
+        exists<m> 0 <= m && m < rows.len() && extends_l(rows[m].key@, rows[j].key@)
+            && key_matches(rows[m].key@, ws) && rows[m].runs_code
+    }
+}
+
 /// `s` is an operand slot.
 #[cfg(creusot)]
 #[logic(open)]
@@ -104,6 +119,7 @@ pub fn row_covers(rows: Seq<Row>, j: Int, ws: Seq<Word>) -> bool {
         0 <= j && j < rows.len()
             && key_matches(rows[j].key@, ws)
             && !rows[j].runs_code
+            && !code_child_l(rows, j, ws)
             && match argv_spec(rows[j].grammar, ws, rows[j].key@.len()) {
                 ArgvL::Parsed(slots, _) => !is_parent_l(rows, j) || !has_operand(slots),
                 ArgvL::Unknown(_, _) => false,
@@ -253,6 +269,27 @@ fn is_parent(rows: &[Row], j: usize) -> bool {
     false
 }
 
+/// Some row whose key strictly extends the key of `rows[j]` matches `ws` and
+/// runs code.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, requires(j@ < rows@.len()))]
+#[cfg_attr(creusot, ensures(result == code_child_l(rows@, j@, ws@)))]
+fn code_child(rows: &[Row], j: usize, ws: &[Word]) -> bool {
+    let mut m: usize = 0;
+    #[cfg_attr(creusot, variant(rows@.len() - m@))]
+    #[cfg_attr(creusot, invariant(m@ <= rows@.len()))]
+    #[cfg_attr(creusot, invariant(forall<n> 0 <= n && n < m@
+        ==> !(extends_l(rows@[n].key@, rows@[j@].key@)
+            && key_matches(rows@[n].key@, ws@) && rows@[n].runs_code)))]
+    while m < rows.len() {
+        if rows[m].runs_code && extends(&rows[m].key, &rows[j].key) && key_match(&rows[m].key, ws) {
+            return true;
+        }
+        m += 1;
+    }
+    false
+}
+
 /// The index of the first operand slot, if any.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(match result {
@@ -299,6 +336,10 @@ fn row_fit(rows: &[Row], j: usize, ws: &[Word]) -> RowFit {
     }
     if row.runs_code {
         return RowFit::Miss(UnknownKind::RunsCode, 0);
+    }
+    if code_child(rows, j, ws) {
+        // The longer key matches, so `ws` has a word past this row's key.
+        return RowFit::Miss(UnknownKind::RunsCode, row.key.len());
     }
     match parse_argv(&row.grammar, ws, row.key.len()) {
         ArgvResult::Unknown(u, i) => RowFit::Miss(u, i),
@@ -636,6 +677,85 @@ mod tests {
         );
     }
 
+    /// `python [--version] [-c CMD]` with no operands.
+    fn python_grammar() -> Grammar {
+        Grammar::new(
+            vec![
+                long_flag("version"),
+                Opt::new(OptName::Short(b'c'), OptValue::Takes(Role::Inert)),
+            ],
+            Vec::new(),
+            None,
+            false,
+            true,
+            PlusWords::Reject,
+        )
+    }
+
+    #[test]
+    fn a_runs_code_child_blocks_its_parent() {
+        // Without the child row, `["python"]` would cover `python -c x`.
+        let alone = Catalog::new(vec![row(&["python"], python_grammar(), false)], Vec::new());
+        assert_eq!(
+            classify_simple(&alone, &cmd(&["python", "-c", "x"])),
+            SimpleClass::Covered { row: 0 }
+        );
+        // (rows, index of the parent row)
+        for (rows, parent) in [
+            (
+                vec![
+                    row(&["python"], python_grammar(), false),
+                    row(&["python", "-c"], no_args(), true),
+                ],
+                0,
+            ),
+            (
+                vec![
+                    row(&["python", "-c"], no_args(), true),
+                    row(&["python"], python_grammar(), false),
+                ],
+                1,
+            ),
+        ] {
+            let cat = Catalog::new(rows, Vec::new());
+            assert!(matches!(
+                classify_simple(&cat, &cmd(&["python", "-c", "x"])),
+                SimpleClass::Unknown(UnknownKind::RunsCode, _)
+            ));
+            // No child key matches, so the parent still covers.
+            assert_eq!(
+                classify_simple(&cat, &cmd(&["python", "--version"])),
+                SimpleClass::Covered { row: parent }
+            );
+        }
+        let cat = Catalog::new(
+            vec![
+                row(&["python"], python_grammar(), false),
+                row(&["python", "-c"], no_args(), true),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            classify_simple(&cat, &cmd(&["python", "-c", "x"])),
+            unknown(UnknownKind::RunsCode, 1)
+        );
+    }
+
+    #[test]
+    fn a_child_that_does_not_run_code_leaves_its_parent_covering() {
+        let cat = Catalog::new(
+            vec![
+                row(&["python"], python_grammar(), false),
+                row(&["python", "-c"], no_args(), false),
+            ],
+            Vec::new(),
+        );
+        assert_eq!(
+            classify_simple(&cat, &cmd(&["python", "-c", "x"])),
+            SimpleClass::Covered { row: 0 }
+        );
+    }
+
     #[test]
     fn argv_unknown_is_propagated() {
         assert_eq!(
@@ -793,9 +913,10 @@ mod tests {
         use crate::ast::Redir;
         let words = || vec![lit_word("ls"), lit_word("-la")];
         let redirs = [
-            Redir::Dup { from: 2, to: 1 },
-            Redir::Dup { from: 1, to: 2 },
-            Redir::DevNull { fd: 1 },
+            Redir::ErrToOut,
+            Redir::OutToErr,
+            Redir::OutDevNull,
+            Redir::ErrDevNull,
         ];
         for r in redirs {
             let s = Simple::new(words(), vec![r]).expect("non-empty");

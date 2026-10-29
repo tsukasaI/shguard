@@ -109,29 +109,23 @@ fn accepted_inputs() {
             "cmd 2>&1 >/dev/null",
             script(vec![single(cmd_r(
                 &["cmd"],
-                vec![Redir::Dup { from: 2, to: 1 }, Redir::DevNull { fd: 1 }],
+                vec![Redir::ErrToOut, Redir::OutDevNull],
             ))]),
         ),
         (
             "cmd >/dev/null 2>&1",
             script(vec![single(cmd_r(
                 &["cmd"],
-                vec![Redir::DevNull { fd: 1 }, Redir::Dup { from: 2, to: 1 }],
+                vec![Redir::OutDevNull, Redir::ErrToOut],
             ))]),
         ),
         (
             ">/dev/null cmd",
-            script(vec![single(cmd_r(
-                &["cmd"],
-                vec![Redir::DevNull { fd: 1 }],
-            ))]),
+            script(vec![single(cmd_r(&["cmd"], vec![Redir::OutDevNull]))]),
         ),
         (
             "echo >&2 hi",
-            script(vec![single(cmd_r(
-                &["echo", "hi"],
-                vec![Redir::Dup { from: 1, to: 2 }],
-            ))]),
+            script(vec![single(cmd_r(&["echo", "hi"], vec![Redir::OutToErr]))]),
         ),
         ("'FOO=1' cmd", script(vec![single(cmd(&["FOO=1", "cmd"]))])),
         ("'if' x", script(vec![single(cmd(&["if", "x"]))])),
@@ -231,6 +225,10 @@ fn rejected_inputs() {
         ("do x", K::ReservedWord, 0),
         ("]] x", K::ReservedWord, 0),
         ("a\nwhile x", K::ReservedWord, 2),
+        ("a 3>&1", K::RedirectDescriptor, 2),
+        ("a 2>&2", K::RedirectDescriptor, 2),
+        ("a 0>/dev/null", K::RedirectDescriptor, 2),
+        ("a 3>/dev/null", K::RedirectDescriptor, 2),
         // Lexer findings win over earlier parser findings.
         ("if x; echo $(y)", K::UnquotedDollar, 11),
         (";a $(b)", K::UnquotedDollar, 3),

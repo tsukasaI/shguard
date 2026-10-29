@@ -275,7 +275,9 @@ fn convert_word(word: LexWord) -> Word {
 
 fn convert_redir(redir: LexRedir) -> Redir {
     match redir {
-        LexRedir::Dup { from, to } => Redir::Dup { from, to },
-        LexRedir::DevNull { fd } => Redir::DevNull { fd },
+        LexRedir::ErrToOut => Redir::ErrToOut,
+        LexRedir::OutToErr => Redir::OutToErr,
+        LexRedir::OutDevNull => Redir::OutDevNull,
+        LexRedir::ErrDevNull => Redir::ErrDevNull,
     }
 }

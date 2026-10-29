@@ -80,6 +80,25 @@ fn fd_digits(text: &[u8]) -> Option<u8> {
     std::str::from_utf8(text).ok()?.parse().ok()
 }
 
+/// `from>&to` as one of the four accepted redirects; any other descriptor
+/// pair is outside the subset.
+fn redir_dup(from: u8, to: u8) -> Result<Redir, String> {
+    match (from, to) {
+        (2, 1) => Ok(Redir::ErrToOut),
+        (1, 2) => Ok(Redir::OutToErr),
+        _ => Err(format!("unmappable duplicate {from}>&{to}")),
+    }
+}
+
+/// `fd>/dev/null` as one of the four accepted redirects.
+fn redir_dev_null(fd: u8) -> Result<Redir, String> {
+    match fd {
+        1 => Ok(Redir::OutDevNull),
+        2 => Ok(Redir::ErrDevNull),
+        _ => Err(format!("unmappable /dev/null redirect on descriptor {fd}")),
+    }
+}
+
 /// `[A-Za-z_][A-Za-z0-9_]*`
 fn is_name(text: &[u8]) -> bool {
     match text.split_first() {

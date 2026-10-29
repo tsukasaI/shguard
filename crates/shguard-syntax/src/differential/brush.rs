@@ -7,7 +7,10 @@
 //! extended globbing off, because non-interactive bash starts with `extglob`
 //! off.
 
-use super::{AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus, fd_digits, is_name};
+use super::{
+    AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus, fd_digits, is_name, redir_dev_null,
+    redir_dup,
+};
 use brush_parser::ast::{
     AndOr, AndOrList, Assignment, AssignmentValue, Command, CommandPrefixOrSuffixItem,
     IoFileRedirectKind, IoFileRedirectTarget, IoRedirect, Pipeline, SeparatorOperator,
@@ -146,24 +149,23 @@ fn redirect(redirect: &IoRedirect) -> Result<Redir, String> {
         None => 1,
     };
     match (kind, target) {
-        (IoFileRedirectKind::DuplicateOutput, IoFileRedirectTarget::Fd(to)) => Ok(Redir::Dup {
-            from,
-            to: fd_number(*to)?,
-        }),
+        (IoFileRedirectKind::DuplicateOutput, IoFileRedirectTarget::Fd(to)) => {
+            redir_dup(from, fd_number(*to)?)
+        }
         (IoFileRedirectKind::DuplicateOutput, IoFileRedirectTarget::Duplicate(target)) => {
             let value = word(target)?;
             match value.as_slice() {
                 [CPart::Lit(digits)] => {
                     let to = fd_digits(digits)
                         .ok_or_else(|| format!("duplicate target {target:?} is not a number"))?;
-                    Ok(Redir::Dup { from, to })
+                    redir_dup(from, to)
                 }
                 _ => Err(format!("unmappable duplicate target {target:?}")),
             }
         }
         (IoFileRedirectKind::Write, IoFileRedirectTarget::Filename(target)) => {
             if word(target)? == [CPart::Lit(b"/dev/null".to_vec())] {
-                Ok(Redir::DevNull { fd: from })
+                redir_dev_null(from)
             } else {
                 Err(format!("unmappable file redirect target {target:?}"))
             }

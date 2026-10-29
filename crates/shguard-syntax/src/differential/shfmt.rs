@@ -7,8 +7,8 @@
 //! and `a 2>&1` 68. Any other code is a disagreement.
 
 use super::{
-    AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus, fd_digits, is_name, run, unescape_double,
-    unescape_unquoted,
+    AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus, fd_digits, is_name, redir_dev_null,
+    redir_dup, run, unescape_double, unescape_unquoted,
 };
 use serde_json::Value;
 use shguard_kernel::ast::Redir;
@@ -160,13 +160,11 @@ fn redirect(node: &Value) -> Result<Redir, String> {
         Some(OP_DUP_OUT) => match target.as_slice() {
             [CPart::Lit(digits)] => {
                 let to = fd_digits(digits).ok_or("duplicate target is not a number")?;
-                Ok(Redir::Dup { from, to })
+                redir_dup(from, to)
             }
             _ => Err(format!("unmappable duplicate target {target:?}")),
         },
-        Some(OP_REDIR_OUT) if target == [CPart::Lit(b"/dev/null".to_vec())] => {
-            Ok(Redir::DevNull { fd: from })
-        }
+        Some(OP_REDIR_OUT) if target == [CPart::Lit(b"/dev/null".to_vec())] => redir_dev_null(from),
         op => Err(format!("unmappable redirect Op {op:?} to {target:?}")),
     }
 }
