@@ -12,9 +12,10 @@
 //! tests instead.
 //!
 //! Bounds: a small symbolic input length per harness. Each harness's length
-//! const records its measured CI time once known. The unwind value is the
-//! input length plus two: the longest byte loop in the unit runs once per
-//! byte, plus the exit check and the one extra step of `take_while`/`get`.
+//! const records its measured CI time (Kani's "Verification Time", run
+//! 40857677457). The unwind value is the input length plus two: the longest
+//! byte loop in the unit runs once per byte, plus the exit check and the one
+//! extra step of `take_while`/`get`.
 
 use super::{Lexer, is_name_byte, is_name_start, starts_with_assignment};
 
@@ -26,7 +27,7 @@ fn symbolic_input<const N: usize>() -> ([u8; N], usize) {
     (bytes, len)
 }
 
-/// Longest input of `io_number_any`. Measured CI time: not yet known.
+/// Longest input of `io_number_any`. Measured CI time: 1.5 s.
 const IO_NUMBER_LEN: usize = 4;
 
 // Unwind: input length 4 plus 2.
@@ -59,7 +60,7 @@ fn io_number_any() {
     }
 }
 
-/// Longest input of `escaped_byte_any`. Measured CI time: not yet known.
+/// Longest input of `escaped_byte_any`. Measured CI time: 0.3 s.
 const ESCAPED_BYTE_LEN: usize = 3;
 
 // Unwind: input length 3 plus 2 (the unit has no loop; the margin covers the
@@ -85,7 +86,7 @@ fn escaped_byte_any() {
     }
 }
 
-/// Longest input of `name_at_any`. Measured CI time: not yet known.
+/// Longest input of `name_at_any`. Measured CI time: 1.5 s.
 const NAME_AT_LEN: usize = 4;
 
 // Unwind: input length 4 plus 2 (`take_while` visits each byte once).
@@ -118,8 +119,7 @@ fn name_at_any() {
     }
 }
 
-/// Longest input of `starts_with_assignment_any`. Measured CI time: not yet
-/// known.
+/// Longest input of `starts_with_assignment_any`. Measured CI time: 1.2 s.
 const STARTS_WITH_ASSIGNMENT_LEN: usize = 5;
 
 // Unwind: input length 5 plus 2 (`take_while` visits each byte once), plus 1
@@ -145,7 +145,7 @@ fn starts_with_assignment_any() {
     }
 }
 
-/// Longest input of `single_quoted_any`. Measured CI time: not yet known.
+/// Longest input of `single_quoted_any`. Measured CI time: 2.2 s.
 const SINGLE_QUOTED_LEN: usize = 4;
 
 // Unwind: input length 4 plus 2 (the scan loop runs once per byte; the
@@ -174,7 +174,7 @@ fn single_quoted_any() {
     }
 }
 
-/// Longest input of `dollar_in_quotes_any`. Measured CI time: not yet known.
+/// Longest input of `dollar_in_quotes_any`. Measured CI time: 5.1 s.
 const DOLLAR_IN_QUOTES_LEN: usize = 4;
 
 // Unwind: input length 4 plus 2 (`name_at` visits each byte once; the
