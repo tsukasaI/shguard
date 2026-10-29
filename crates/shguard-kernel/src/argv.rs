@@ -1074,7 +1074,7 @@ mod tests {
     }
 
     fn long(s: &str) -> LongName {
-        LongName::new(s.as_bytes().to_vec()).expect("non-empty")
+        LongName::new(s.as_bytes().to_vec()).expect("well-formed long name")
     }
 
     fn opts() -> Vec<Opt> {

@@ -1460,15 +1460,10 @@ mod tests {
     }
 
     fn long(s: &str) -> LongName {
-        LongName::new(bytes(s)).expect("non-empty")
+        LongName::new(bytes(s)).expect("well-formed long name")
     }
 
-    fn row(segs: &[&str], g: Grammar, changes_cwd: bool) -> Row {
-        let cwd = if changes_cwd {
-            Cwd::Changes
-        } else {
-            Cwd::Keeps
-        };
+    fn row(segs: &[&str], g: Grammar, cwd: Cwd) -> Row {
         Row::new(key(segs), g, RunsCode::No, cwd).expect("valid key")
     }
 
@@ -1496,7 +1491,7 @@ mod tests {
                         ],
                         Role::Path,
                     ),
-                    false,
+                    Cwd::Keeps,
                 ),
                 row(
                     &["rm"],
@@ -1507,7 +1502,7 @@ mod tests {
                         ],
                         Role::Path,
                     ),
-                    false,
+                    Cwd::Keeps,
                 ),
                 row(
                     &["cd"],
@@ -1519,10 +1514,10 @@ mod tests {
                         DashDash::Ends,
                         PlusWords::Reject,
                     ),
-                    true,
+                    Cwd::Changes,
                 ),
-                row(&["echo"], gnu(Vec::new(), Role::Inert), false),
-                row(&["cat"], gnu(Vec::new(), Role::Path), false),
+                row(&["echo"], gnu(Vec::new(), Role::Inert), Cwd::Keeps),
+                row(&["cat"], gnu(Vec::new(), Role::Path), Cwd::Keeps),
                 row(
                     &["sh"],
                     Grammar::new(
@@ -1533,7 +1528,7 @@ mod tests {
                         DashDash::Ends,
                         PlusWords::Reject,
                     ),
-                    false,
+                    Cwd::Keeps,
                 ),
             ],
             Vec::new(),
@@ -1848,7 +1843,7 @@ mod tests {
         );
         let o = Opt::new(OptName::Long(long("opt")), OptValue::Optional(Role::Path));
         cat.rows
-            .push(row(&["cp"], gnu(vec![t, o], Role::Path), false));
+            .push(row(&["cp"], gnu(vec![t, o], Role::Path), Cwd::Keeps));
         cat
     }
 
@@ -1956,7 +1951,7 @@ mod tests {
                 ],
                 Role::Path,
             ),
-            false,
+            Cwd::Keeps,
         );
         let cat = Catalog::new(vec![rm], Vec::new());
         let root = Pat::new(vec![lit("/")], PatKind::Exact).expect("non-empty");
@@ -1996,7 +1991,7 @@ mod tests {
                 ],
                 Role::Path,
             ),
-            false,
+            Cwd::Keeps,
         );
         let cat = Catalog::new(vec![rm], Vec::new());
         let r = [block_rule(
@@ -2035,7 +2030,7 @@ mod tests {
         let short_only = row(
             &["rm"],
             gnu(vec![flag(OptName::Short(short(b'r')))], Role::Path),
-            false,
+            Cwd::Keeps,
         );
         let both = row(
             &["rm"],
@@ -2043,7 +2038,7 @@ mod tests {
                 vec![flag(OptName::Both(short(b'r'), long("recursive")))],
                 Role::Path,
             ),
-            false,
+            Cwd::Keeps,
         );
         // The rule names only `--recursive`, so it overlaps `both` alone.
         let r = [block_rule(

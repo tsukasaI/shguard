@@ -542,16 +542,11 @@ mod tests {
     }
 
     fn long_flag(name: &str) -> Opt {
-        let name = LongName::new(name.as_bytes().to_vec()).expect("non-empty");
+        let name = LongName::new(name.as_bytes().to_vec()).expect("well-formed long name");
         Opt::new(OptName::Long(name), OptValue::Flag)
     }
 
-    fn row(segs: &[&str], g: Grammar, runs_code: bool) -> Row {
-        let runs_code = if runs_code {
-            RunsCode::Yes
-        } else {
-            RunsCode::No
-        };
+    fn row(segs: &[&str], g: Grammar, runs_code: RunsCode) -> Row {
         Row::new(key(segs), g, runs_code, Cwd::Keeps).expect("valid key")
     }
 
@@ -593,10 +588,10 @@ mod tests {
     fn catalog() -> Catalog {
         Catalog::new(
             vec![
-                row(&["ls"], ls_grammar(), false),
-                row(&["git"], git_grammar(), false),
-                row(&["git", "status"], no_args(), false),
-                row(&["sh"], ls_grammar(), true),
+                row(&["ls"], ls_grammar(), RunsCode::No),
+                row(&["git"], git_grammar(), RunsCode::No),
+                row(&["git", "status"], no_args(), RunsCode::No),
+                row(&["sh"], ls_grammar(), RunsCode::Yes),
             ],
             Vec::new(),
         )
@@ -712,7 +707,10 @@ mod tests {
     #[test]
     fn a_runs_code_child_blocks_its_parent() {
         // Without the child row, `["python"]` would cover `python -c x`.
-        let alone = Catalog::new(vec![row(&["python"], python_grammar(), false)], Vec::new());
+        let alone = Catalog::new(
+            vec![row(&["python"], python_grammar(), RunsCode::No)],
+            Vec::new(),
+        );
         assert_eq!(
             classify_simple(&alone, &cmd(&["python", "-c", "x"])),
             SimpleClass::Covered { row: 0 }
@@ -721,15 +719,15 @@ mod tests {
         for (rows, parent) in [
             (
                 vec![
-                    row(&["python"], python_grammar(), false),
-                    row(&["python", "-c"], no_args(), true),
+                    row(&["python"], python_grammar(), RunsCode::No),
+                    row(&["python", "-c"], no_args(), RunsCode::Yes),
                 ],
                 0,
             ),
             (
                 vec![
-                    row(&["python", "-c"], no_args(), true),
-                    row(&["python"], python_grammar(), false),
+                    row(&["python", "-c"], no_args(), RunsCode::Yes),
+                    row(&["python"], python_grammar(), RunsCode::No),
                 ],
                 1,
             ),
@@ -747,8 +745,8 @@ mod tests {
         }
         let cat = Catalog::new(
             vec![
-                row(&["python"], python_grammar(), false),
-                row(&["python", "-c"], no_args(), true),
+                row(&["python"], python_grammar(), RunsCode::No),
+                row(&["python", "-c"], no_args(), RunsCode::Yes),
             ],
             Vec::new(),
         );
@@ -762,8 +760,8 @@ mod tests {
     fn a_child_that_does_not_run_code_leaves_its_parent_covering() {
         let cat = Catalog::new(
             vec![
-                row(&["python"], python_grammar(), false),
-                row(&["python", "-c"], no_args(), false),
+                row(&["python"], python_grammar(), RunsCode::No),
+                row(&["python", "-c"], no_args(), RunsCode::No),
             ],
             Vec::new(),
         );
@@ -803,8 +801,8 @@ mod tests {
     fn duplicate_rows_second_covers() {
         let cat = Catalog::new(
             vec![
-                row(&["ls"], no_args(), false),
-                row(&["ls"], ls_grammar(), false),
+                row(&["ls"], no_args(), RunsCode::No),
+                row(&["ls"], ls_grammar(), RunsCode::No),
             ],
             Vec::new(),
         );

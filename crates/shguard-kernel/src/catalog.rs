@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn long_name_constructor() {
-        let name = LongName::new(bytes("verbose")).expect("non-empty");
+        let name = LongName::new(bytes("verbose")).expect("well-formed long name");
         assert_eq!(name.bytes(), b"verbose");
         assert!(LongName::new(Vec::new()).is_none());
         assert!(LongName::new(bytes("-x")).is_none());
@@ -653,6 +653,11 @@ mod tests {
         assert_eq!(*row.grammar(), grammar());
         assert!(!row.runs_code());
         assert!(row.changes_cwd());
+
+        let other =
+            Row::new(vec![bytes("sh")], grammar(), RunsCode::Yes, Cwd::Keeps).expect("valid key");
+        assert!(other.runs_code());
+        assert!(!other.changes_cwd());
 
         assert!(Row::new(Vec::new(), grammar(), RunsCode::No, Cwd::Keeps).is_none());
         assert!(Row::new(vec![Vec::new()], grammar(), RunsCode::No, Cwd::Keeps).is_none());
@@ -695,6 +700,17 @@ mod tests {
         assert!(g.permute());
         assert!(!g.dashdash());
         assert_eq!(g.plus_words(), PlusWords::Operand);
+
+        let strict = Grammar::new(
+            Vec::new(),
+            Vec::new(),
+            None,
+            Order::Strict,
+            DashDash::Ends,
+            PlusWords::Reject,
+        );
+        assert!(!strict.permute());
+        assert!(strict.dashdash());
 
         let row = Row::new(vec![bytes("ls")], g, RunsCode::No, Cwd::Keeps).expect("valid key");
         let global = Global::new(bytes("git"), grammar()).expect("valid head");
