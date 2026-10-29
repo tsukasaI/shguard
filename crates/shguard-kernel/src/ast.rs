@@ -30,6 +30,19 @@ pub enum Part {
 }
 
 /// A shell word: one or more parts.
+///
+/// A `Word` is exactly one argv word after expansion (#1036). The kernel
+/// relies on this without checking it; it is an obligation on the parser
+/// that builds the AST:
+/// - `Lit` bytes reach the program verbatim;
+/// - unquoted expansions, globs and brace expansion are rejected, never
+///   built, so no word splits, vanishes or multiplies;
+/// - `Opaque(Var)` only ever comes from a quoted `"$X"`.
+///
+/// `crates/shguard-syntax` meets it: its lexer rejects unquoted `$`, glob
+/// bytes and braces, and its differential tests (`src/differential/`, M10)
+/// check that brush-parser, shfmt and bash read every accepted input as the
+/// same words.
 #[derive(Clone, Debug)]
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub struct Word {

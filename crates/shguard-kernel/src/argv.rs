@@ -10,10 +10,19 @@
 //!   first `Opaque`) and `has_opaque`. Empty `Lit` parts add nothing, so
 //!   `''-x` reads as `-x`.
 //! - Options end at `--` (when the grammar has `dashdash`) and, when it does
-//!   not `permute`, at the first operand. After that every word is an
-//!   operand.
+//!   not `permute`, at the first operand (the walk's [`Phase`]). After `--`
+//!   every word is an operand. After the first operand, a word the real
+//!   tool might still read as an option is Unknown (`after_operand_l`,
+//!   #1032): a literal of two or more bytes starting with `-`, or an opaque
+//!   word whose known prefix is empty or starts with `-`. A bare `-` stays
+//!   an operand.
+//! - With [`PlusWords::Reject`], a word whose known bytes start with `+` is
+//!   Unknown wherever options are still read, and after the first operand
+//!   (#1035).
 //! - A long option matches a long name byte for byte (no abbreviation); a
 //!   short cluster is walked byte by byte (`cluster_l`).
+//! - An `Optional` option takes its value only inline (`--opt=v`, `-ov`),
+//!   never from the next word (#1033).
 //! - The k-th operand gets `positionals[k]`, else `rest`.
 //! - A `Code` role on an operand or an option value is Unknown. The first
 //!   Unknown, left to right, wins.
@@ -22,7 +31,7 @@ use crate::ast::{Part, Word};
 use crate::bytes::bytes_eq;
 #[cfg(creusot)]
 use crate::bytes::{lemma_concat_laws, lemma_snoc_pop, lemma_sub_snoc};
-use crate::catalog::{Grammar, Opt, OptName, OptValue, Role};
+use crate::catalog::{Grammar, Opt, OptName, OptValue, PlusWords, Role};
 use crate::verdict::UnknownKind;
 #[cfg(creusot)]
 use creusot_std::prelude::{Clone, PartialEq, *};
@@ -33,6 +42,20 @@ use creusot_std::prelude::{Clone, PartialEq, *};
 pub const DASH: u8 = b'-';
 /// The separator between a long option and its inline value.
 pub const EQ: u8 = b'=';
+/// The marker of a `+word` (vim's `+cmd`).
+pub const PLUS: u8 = b'+';
+
+/// Where the walk over the words is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(DeepModel))]
+pub enum Phase {
+    /// Options are still read.
+    Options,
+    /// Options ended at an operand (a grammar without `permute`).
+    AfterOperand,
+    /// Options ended at `--`.
+    AfterDashDash,
+}
 
 /// What one argument word is in a successful parse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,13 +279,22 @@ pub fn long_l(opts: Seq<Opt>, b: Seq<u8>, seen: Seq<Int>) -> WordL {
                     WordL::Opts(seen.push_back(o), Tail::Next(r))
                 }
             }
+            OptValue::Optional(r) => {
+                if e < b.len() {
+                    WordL::Opts(seen.push_back(o), Tail::Inline(r))
+                } else {
+                    WordL::Opts(seen.push_back(o), Tail::Done)
+                }
+            }
         }
     }
 }
 
 /// The short cluster `b` (`-abc`) from byte `j` on, given the `seen` list
 /// so far. A flag continues the walk; an option that takes a value takes
-/// the rest of the cluster if any bytes remain, else the next word.
+/// the rest of the cluster if any bytes remain, else the next word; an
+/// `Optional` one takes the rest of the cluster if any bytes remain, else
+/// nothing.
 #[cfg(creusot)]
 #[logic(open(crate))]
 #[variant(b.len() - j)]
@@ -283,6 +315,13 @@ pub fn cluster_l(opts: Seq<Opt>, b: Seq<u8>, j: Int, seen: Seq<Int>) -> WordL {
                         WordL::Opts(seen.push_back(o), Tail::Next(r))
                     }
                 }
+                OptValue::Optional(r) => {
+                    if j + 1 < b.len() {
+                        WordL::Opts(seen.push_back(o), Tail::Inline(r))
+                    } else {
+                        WordL::Opts(seen.push_back(o), Tail::Done)
+                    }
+                }
             }
         }
     }
@@ -297,6 +336,8 @@ pub fn word_l(g: Grammar, b: Seq<u8>, opaque: bool, seen: Seq<Int>) -> WordL {
         // `foo$X` cannot be an option; `$X` and `-$X` might be.
         if b.len() == 0 || b[0] == DASH {
             WordL::Fail(UnknownKind::OpaqueOption)
+        } else if plus_l(g, b) {
+            WordL::Fail(UnknownKind::PlusWord)
         } else {
             WordL::Operand
         }
@@ -312,10 +353,79 @@ pub fn word_l(g: Grammar, b: Seq<u8>, opaque: bool, seen: Seq<Int>) -> WordL {
         }
     } else if b.len() >= 2 && b[0] == DASH {
         cluster_l(g.opts@, b, 1, seen)
+    } else if plus_l(g, b) {
+        WordL::Fail(UnknownKind::PlusWord)
     } else {
-        // `-`, the empty word and words without a leading `-`.
+        // `-`, the empty word and words without a leading `-` or `+`.
         WordL::Operand
     } }
+}
+
+/// `b`, the known bytes of a word, start with `+` and the grammar rejects
+/// such words.
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn plus_l(g: Grammar, b: Seq<u8>) -> bool {
+    pearlite! {
+        match g.plus {
+            PlusWords::Reject => b.len() > 0 && b[0] == PLUS,
+            PlusWords::Operand => false,
+        }
+    }
+}
+
+/// A word after options ended at an operand, given its literal view: an
+/// operand, unless the real tool might still read it as an option (or as a
+/// rejected `+word`).
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn after_operand_l(g: Grammar, b: Seq<u8>, opaque: bool) -> WordL {
+    pearlite! { if opaque {
+        if b.len() == 0 || b[0] == DASH {
+            WordL::Fail(UnknownKind::OptionAfterOperand)
+        } else if plus_l(g, b) {
+            WordL::Fail(UnknownKind::PlusWord)
+        } else {
+            WordL::Operand
+        }
+    } else if b.len() >= 2 && b[0] == DASH {
+        WordL::Fail(UnknownKind::OptionAfterOperand)
+    } else if plus_l(g, b) {
+        WordL::Fail(UnknownKind::PlusWord)
+    } else {
+        WordL::Operand
+    } }
+}
+
+/// The phase after an operand read in phase `ph`.
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn operand_phase_l(ph: Phase, permute: bool) -> Phase {
+    match ph {
+        Phase::Options => {
+            if permute {
+                Phase::Options
+            } else {
+                Phase::AfterOperand
+            }
+        }
+        Phase::AfterOperand => Phase::AfterOperand,
+        Phase::AfterDashDash => Phase::AfterDashDash,
+    }
+}
+
+/// The reading of word `w` in phase `ph`, given the `seen` list before it.
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn phase_word_l(g: Grammar, w: Word, ph: Phase, seen: Seq<Int>) -> WordL {
+    pearlite! {
+        match ph {
+            Phase::Options => word_l(g, lit_prefix(w.parts@, 0), has_opaque(w.parts@, 0), seen),
+            Phase::AfterOperand => after_operand_l(g, lit_prefix(w.parts@, 0),
+                has_opaque(w.parts@, 0)),
+            Phase::AfterDashDash => WordL::Operand,
+        }
+    }
 }
 
 /// The role of the operand with index `k` among operands, or `None` when
@@ -332,8 +442,8 @@ pub fn operand_role_l(g: Grammar, k: Int) -> Option<Role> {
     }
 }
 
-/// The parse of `ws[i..]`, given whether options have `ended`, the number
-/// `k` of operands so far, and the `slots` and `seen` lists so far.
+/// The parse of `ws[i..]`, given the phase `ph`, the number `k` of operands
+/// so far, and the `slots` and `seen` lists so far.
 #[cfg(creusot)]
 #[logic(open(crate))]
 #[variant(ws.len() - i)]
@@ -341,7 +451,7 @@ pub fn argv_go(
     g: Grammar,
     ws: Seq<Word>,
     i: Int,
-    ended: bool,
+    ph: Phase,
     k: Int,
     slots: Seq<Slot>,
     seen: Seq<Int>,
@@ -350,34 +460,29 @@ pub fn argv_go(
         if i >= ws.len() {
             ArgvL::Parsed(slots, seen)
         } else {
-            let w = if ended {
-                WordL::Operand
-            } else {
-                word_l(g, lit_prefix(ws[i].parts@, 0), has_opaque(ws[i].parts@, 0), seen)
-            };
-            match w {
+            match phase_word_l(g, ws[i], ph, seen) {
                 WordL::Operand => match operand_role_l(g, k) {
                     None => ArgvL::Unknown(UnknownKind::ExtraOperand, i),
                     Some(Role::Code) => ArgvL::Unknown(UnknownKind::CodeRole, i),
-                    Some(r) => argv_go(g, ws, i + 1, ended || !g.permute, k + 1,
+                    Some(r) => argv_go(g, ws, i + 1, operand_phase_l(ph, g.permute), k + 1,
                         slots.push_back(Slot::Operand(r)), seen),
                 },
                 WordL::Fail(u) => ArgvL::Unknown(u, i),
-                WordL::EndOpts => argv_go(g, ws, i + 1, true, k,
+                WordL::EndOpts => argv_go(g, ws, i + 1, Phase::AfterDashDash, k,
                     slots.push_back(Slot::DashDash), seen),
-                WordL::Opts(s, Tail::Done) => argv_go(g, ws, i + 1, ended, k,
+                WordL::Opts(s, Tail::Done) => argv_go(g, ws, i + 1, ph, k,
                     slots.push_back(Slot::Opts(None)), s),
                 WordL::Opts(s, Tail::Inline(r)) => if r == Role::Code {
                     ArgvL::Unknown(UnknownKind::CodeRole, i)
                 } else {
-                    argv_go(g, ws, i + 1, ended, k, slots.push_back(Slot::Opts(Some(r))), s)
+                    argv_go(g, ws, i + 1, ph, k, slots.push_back(Slot::Opts(Some(r))), s)
                 },
                 WordL::Opts(s, Tail::Next(r)) => if i + 1 >= ws.len() {
                     ArgvL::Unknown(UnknownKind::MissingValue, i)
                 } else if r == Role::Code {
                     ArgvL::Unknown(UnknownKind::CodeRole, i + 1)
                 } else {
-                    argv_go(g, ws, i + 2, ended, k,
+                    argv_go(g, ws, i + 2, ph, k,
                         slots.push_back(Slot::Opts(None)).push_back(Slot::OptValue(r)), s)
                 },
             }
@@ -390,7 +495,7 @@ pub fn argv_go(
 #[cfg(creusot)]
 #[logic(open(crate))]
 pub fn argv_spec(g: Grammar, ws: Seq<Word>, start: Int) -> ArgvL {
-    argv_go(g, ws, start, false, 0, Seq::empty(), Seq::empty())
+    argv_go(g, ws, start, Phase::Options, 0, Seq::empty(), Seq::empty())
 }
 
 /// The `Int` views of `s`, in order.
@@ -464,7 +569,7 @@ pub fn no_code(slots: Seq<Slot>) -> bool {
 #[logic(open(crate))]
 #[variant(ws.len() - i)]
 #[requires(no_code(slots))]
-#[ensures(match argv_go(g, ws, i, ended, k, slots, seen) {
+#[ensures(match argv_go(g, ws, i, ph, k, slots, seen) {
     ArgvL::Parsed(s2, _) => no_code(s2),
     ArgvL::Unknown(_, _) => true,
 })]
@@ -472,39 +577,34 @@ pub fn lemma_go_no_code(
     g: Grammar,
     ws: Seq<Word>,
     i: Int,
-    ended: bool,
+    ph: Phase,
     k: Int,
     slots: Seq<Slot>,
     seen: Seq<Int>,
 ) {
     pearlite! {
         if i < ws.len() {
-            let w = if ended {
-                WordL::Operand
-            } else {
-                word_l(g, lit_prefix(ws[i].parts@, 0), has_opaque(ws[i].parts@, 0), seen)
-            };
-            match w {
+            match phase_word_l(g, ws[i], ph, seen) {
                 WordL::Operand => match operand_role_l(g, k) {
                     None => (),
                     Some(Role::Code) => (),
-                    Some(r) => lemma_go_no_code(g, ws, i + 1, ended || !g.permute, k + 1,
-                        slots.push_back(Slot::Operand(r)), seen),
+                    Some(r) => lemma_go_no_code(g, ws, i + 1, operand_phase_l(ph, g.permute),
+                        k + 1, slots.push_back(Slot::Operand(r)), seen),
                 },
                 WordL::Fail(_) => (),
-                WordL::EndOpts => lemma_go_no_code(g, ws, i + 1, true, k,
+                WordL::EndOpts => lemma_go_no_code(g, ws, i + 1, Phase::AfterDashDash, k,
                     slots.push_back(Slot::DashDash), seen),
-                WordL::Opts(s, Tail::Done) => lemma_go_no_code(g, ws, i + 1, ended, k,
+                WordL::Opts(s, Tail::Done) => lemma_go_no_code(g, ws, i + 1, ph, k,
                     slots.push_back(Slot::Opts(None)), s),
                 WordL::Opts(s, Tail::Inline(r)) => if r == Role::Code {
                     ()
                 } else {
-                    lemma_go_no_code(g, ws, i + 1, ended, k, slots.push_back(Slot::Opts(Some(r))), s)
+                    lemma_go_no_code(g, ws, i + 1, ph, k, slots.push_back(Slot::Opts(Some(r))), s)
                 },
                 WordL::Opts(s, Tail::Next(r)) => if i + 1 >= ws.len() || r == Role::Code {
                     ()
                 } else {
-                    lemma_go_no_code(g, ws, i + 2, ended, k,
+                    lemma_go_no_code(g, ws, i + 2, ph, k,
                         slots.push_back(Slot::Opts(None)).push_back(Slot::OptValue(r)), s)
                 },
             }
@@ -715,6 +815,14 @@ fn long_opt(opts: &[Opt], b: &[u8], seen: &mut Vec<usize>) -> Kind {
                 Kind::Opts(Tail::Next(r))
             }
         }
+        OptValue::Optional(r) => {
+            push_ix(seen, o);
+            if e < b.len() {
+                Kind::Opts(Tail::Inline(r))
+            } else {
+                Kind::Opts(Tail::Done)
+            }
+        }
     }
 }
 
@@ -747,6 +855,14 @@ fn cluster(opts: &[Opt], b: &[u8], seen: &mut Vec<usize>) -> Kind {
                     Kind::Opts(Tail::Next(r))
                 };
             }
+            OptValue::Optional(r) => {
+                push_ix(seen, o);
+                return if j + 1 < b.len() {
+                    Kind::Opts(Tail::Inline(r))
+                } else {
+                    Kind::Opts(Tail::Done)
+                };
+            }
         }
     }
     Kind::Opts(Tail::Done)
@@ -759,6 +875,9 @@ fn word_kind(g: &Grammar, b: &[u8], opaque: bool, seen: &mut Vec<usize>) -> Kind
     if opaque {
         if <[_]>::is_empty(b) || b[0] == DASH {
             return Kind::Fail(UnknownKind::OpaqueOption);
+        }
+        if plus_rejected(g, b) {
+            return Kind::Fail(UnknownKind::PlusWord);
         }
         return Kind::Operand;
     }
@@ -774,7 +893,59 @@ fn word_kind(g: &Grammar, b: &[u8], opaque: bool, seen: &mut Vec<usize>) -> Kind
     if b.len() >= 2 && b[0] == DASH {
         return cluster(&g.opts, b, seen);
     }
+    if plus_rejected(g, b) {
+        return Kind::Fail(UnknownKind::PlusWord);
+    }
     Kind::Operand
+}
+
+/// The known bytes `b` of a word start with `+` and `g` rejects such words.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result == plus_l(*g, b@)))]
+fn plus_rejected(g: &Grammar, b: &[u8]) -> bool {
+    match g.plus {
+        PlusWords::Reject => !<[_]>::is_empty(b) && b[0] == PLUS,
+        PlusWords::Operand => false,
+    }
+}
+
+/// Reads a word after options ended at an operand, from its literal view.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(match result {
+    Kind::Operand => after_operand_l(*g, b@, opaque) == WordL::Operand,
+    Kind::Fail(u) => after_operand_l(*g, b@, opaque) == WordL::Fail(u),
+    Kind::EndOpts | Kind::Opts(_) => false,
+}))]
+fn after_operand_kind(g: &Grammar, b: &[u8], opaque: bool) -> Kind {
+    let dash = if opaque {
+        <[_]>::is_empty(b) || b[0] == DASH
+    } else {
+        b.len() >= 2 && b[0] == DASH
+    };
+    if dash {
+        return Kind::Fail(UnknownKind::OptionAfterOperand);
+    }
+    if plus_rejected(g, b) {
+        return Kind::Fail(UnknownKind::PlusWord);
+    }
+    Kind::Operand
+}
+
+/// The phase after an operand read in phase `ph`.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result == operand_phase_l(ph, permute)))]
+fn operand_phase(ph: Phase, permute: bool) -> Phase {
+    match ph {
+        Phase::Options => {
+            if permute {
+                Phase::Options
+            } else {
+                Phase::AfterOperand
+            }
+        }
+        Phase::AfterOperand => Phase::AfterOperand,
+        Phase::AfterDashDash => Phase::AfterDashDash,
+    }
 }
 
 /// The role of the operand with index `k`, or `None` when there is none.
@@ -813,7 +984,7 @@ fn operand_role(g: &Grammar, k: usize) -> Option<Role> {
 pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
     let mut slots: Vec<Slot> = Vec::new();
     let mut seen: Vec<usize> = Vec::new();
-    let mut ended = false;
+    let mut ph = Phase::Options;
     let mut k: usize = 0;
     let mut i = start;
     #[cfg(creusot)]
@@ -826,13 +997,18 @@ pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
     #[cfg_attr(creusot, invariant(start@ <= ws@.len() ==>
         i@ <= ws@.len() && slots@.len() == i@ - start@))]
     #[cfg_attr(creusot, invariant(
-        argv_go(*g, ws@, i@, ended, k@, slots@, ints(seen@)) == argv_spec(*g, ws@, start@)))]
+        argv_go(*g, ws@, i@, ph, k@, slots@, ints(seen@)) == argv_spec(*g, ws@, start@)))]
     while i < ws.len() {
-        let kind = if ended {
-            Kind::Operand
-        } else {
-            let (b, opaque) = word_view(&ws[i]);
-            word_kind(g, &b, opaque, &mut seen)
+        let kind = match ph {
+            Phase::Options => {
+                let (b, opaque) = word_view(&ws[i]);
+                word_kind(g, &b, opaque, &mut seen)
+            }
+            Phase::AfterOperand => {
+                let (b, opaque) = word_view(&ws[i]);
+                after_operand_kind(g, &b, opaque)
+            }
+            Phase::AfterDashDash => Kind::Operand,
         };
         match kind {
             Kind::Operand => match operand_role(g, k) {
@@ -841,16 +1017,14 @@ pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
                 Some(r @ (Role::Inert | Role::Path)) => {
                     slots.push(Slot::Operand(r));
                     k += 1;
-                    if !g.permute {
-                        ended = true;
-                    }
+                    ph = operand_phase(ph, g.permute);
                     i += 1;
                 }
             },
             Kind::Fail(u) => return ArgvResult::Unknown(u, i),
             Kind::EndOpts => {
                 slots.push(Slot::DashDash);
-                ended = true;
+                ph = Phase::AfterDashDash;
                 i += 1;
             }
             Kind::Opts(Tail::Done) => {
@@ -884,7 +1058,7 @@ pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
 mod tests {
     use super::{ArgvResult, Parse, Slot, parse_argv};
     use crate::ast::{Opaque, Part, Word};
-    use crate::catalog::{Grammar, LongName, Opt, OptName, OptValue, Role};
+    use crate::catalog::{Grammar, LongName, Opt, OptName, OptValue, PlusWords, Role};
     use crate::verdict::UnknownKind;
 
     const R: usize = 0; // -r / --recursive, flag
@@ -912,7 +1086,14 @@ mod tests {
 
     /// GNU style: options anywhere, `--` ends them, any number of paths.
     fn gnu() -> Grammar {
-        Grammar::new(opts(), Vec::new(), Some(Role::Path), true, true)
+        Grammar::new(
+            opts(),
+            Vec::new(),
+            Some(Role::Path),
+            true,
+            true,
+            PlusWords::Reject,
+        )
     }
 
     fn word(parts: Vec<Part>) -> Word {
@@ -1071,7 +1252,14 @@ mod tests {
             parse(&g, &argv(&["--", "-r", "--"])),
             parsed(&[Slot::DashDash, PATH, PATH], &[])
         );
-        let strict = Grammar::new(opts(), Vec::new(), Some(Role::Path), true, false);
+        let strict = Grammar::new(
+            opts(),
+            Vec::new(),
+            Some(Role::Path),
+            true,
+            false,
+            PlusWords::Reject,
+        );
         assert_eq!(
             parse(&strict, &argv(&["a", "--"])),
             unknown(UnknownKind::DashDashNotAllowed, 2)
@@ -1136,24 +1324,231 @@ mod tests {
 
     #[test]
     fn permute_vs_not() {
-        let ls = |permute| Grammar::new(opts(), Vec::new(), Some(Role::Path), permute, true);
+        let ls = |permute| {
+            Grammar::new(
+                opts(),
+                Vec::new(),
+                Some(Role::Path),
+                permute,
+                true,
+                PlusWords::Reject,
+            )
+        };
         assert_eq!(
             parse(&ls(true), &argv(&["a", "-r"])),
             parsed(&[PATH, OPTS], &[R])
         );
         assert_eq!(
-            parse(&ls(false), &argv(&["a", "-r", "--"])),
-            parsed(&[PATH, PATH, PATH], &[])
+            parse(&ls(false), &argv(&["a", "b"])),
+            parsed(&[PATH, PATH], &[])
         );
-        // Not even an unknown option or an opaque word is read after the end.
-        let mut ws = argv(&["a", "-z"]);
+    }
+
+    /// `rm` without `permute`, as BSD rm reads its argv (#1032).
+    fn rm_strict() -> Grammar {
+        Grammar::new(
+            opts(),
+            Vec::new(),
+            Some(Role::Path),
+            false,
+            true,
+            PlusWords::Reject,
+        )
+    }
+
+    #[test]
+    fn option_after_operand_is_unknown() {
+        let g = rm_strict();
+        // GNU rm would read `-rf` as options.
+        assert_eq!(
+            parse(&g, &argv(&["a", "-rf"])),
+            unknown(UnknownKind::OptionAfterOperand, 2)
+        );
+        assert_eq!(
+            parse(&g, &argv(&["a", "b", "-z"])),
+            unknown(UnknownKind::OptionAfterOperand, 3)
+        );
+        // A `--` after an operand might still be read as the end of options.
+        assert_eq!(
+            parse(&g, &argv(&["a", "--"])),
+            unknown(UnknownKind::OptionAfterOperand, 2)
+        );
+        // An opaque word with an empty or `-` prefix might expand to `-rf`.
+        for parts in [vec![var()], vec![lit("-"), var()], vec![lit(""), var()]] {
+            let mut ws = argv(&["a"]);
+            ws.push(word(parts));
+            assert_eq!(parse(&g, &ws), unknown(UnknownKind::OptionAfterOperand, 2));
+        }
+    }
+
+    #[test]
+    fn operands_after_operand() {
+        let g = rm_strict();
+        assert_eq!(parse(&g, &argv(&["a", "-"])), parsed(&[PATH, PATH], &[]));
+        assert_eq!(parse(&g, &argv(&["a", ""])), parsed(&[PATH, PATH], &[]));
+        let mut ws = argv(&["a"]);
+        ws.push(word(vec![lit("foo"), var()]));
+        assert_eq!(parse(&g, &ws), parsed(&[PATH, PATH], &[]));
+        // After `--`, every word is an operand.
+        assert_eq!(
+            parse(&g, &argv(&["--", "a", "-rf"])),
+            parsed(&[Slot::DashDash, PATH, PATH], &[])
+        );
+        let mut ws = argv(&["-r", "--", "a", "-f"]);
         ws.push(word(vec![var()]));
-        assert_eq!(parse(&ls(false), &ws), parsed(&[PATH, PATH, PATH], &[]));
+        assert_eq!(
+            parse(&g, &ws),
+            parsed(&[OPTS, Slot::DashDash, PATH, PATH, PATH], &[R])
+        );
+    }
+
+    #[test]
+    fn permute_reads_options_after_operands() {
+        let g = gnu();
+        assert_eq!(
+            parse(&g, &argv(&["a", "-rf"])),
+            parsed(&[PATH, OPTS], &[R, F])
+        );
+    }
+
+    const I: usize = 0; // -i / --interactive, optional inert value
+    const E: usize = 1; // -E, flag
+    const B: usize = 2; // --backup, optional path value
+    // Index 3: --exec, optional code value.
+
+    /// Options with an optional value (#1033).
+    fn optional() -> Grammar {
+        Grammar::new(
+            vec![
+                Opt::new(
+                    OptName::Both(b'i', long("interactive")),
+                    OptValue::Optional(Role::Inert),
+                ),
+                Opt::new(OptName::Short(b'E'), OptValue::Flag),
+                Opt::new(
+                    OptName::Long(long("backup")),
+                    OptValue::Optional(Role::Path),
+                ),
+                Opt::new(OptName::Long(long("exec")), OptValue::Optional(Role::Code)),
+            ],
+            Vec::new(),
+            Some(Role::Path),
+            true,
+            true,
+            PlusWords::Reject,
+        )
+    }
+
+    #[test]
+    fn optional_value_long() {
+        let g = optional();
+        // The next word is never the value.
+        assert_eq!(
+            parse(&g, &argv(&["--interactive", "x"])),
+            parsed(&[OPTS, PATH], &[I])
+        );
+        // `~/x` is read as a word in option position, not as a value; its
+        // empty known prefix fails closed there.
+        let ws = vec![
+            word(vec![lit("cmd")]),
+            word(vec![lit("--interactive")]),
+            word(vec![Part::Opaque(Opaque::Tilde), lit("/x")]),
+        ];
+        assert_eq!(parse(&g, &ws), unknown(UnknownKind::OpaqueOption, 2));
+        assert_eq!(
+            parse(&g, &argv(&["--interactive=always", "x"])),
+            parsed(&[Slot::Opts(Some(Role::Inert)), PATH], &[I])
+        );
+        assert_eq!(
+            parse(&g, &argv(&["--backup=x"])),
+            parsed(&[Slot::Opts(Some(Role::Path))], &[B])
+        );
+        assert_eq!(
+            parse(&g, &argv(&["--exec", "x"])),
+            parsed(&[OPTS, PATH], &[3])
+        );
+        assert_eq!(
+            parse(&g, &argv(&["--exec=x"])),
+            unknown(UnknownKind::CodeRole, 1)
+        );
+    }
+
+    #[test]
+    fn optional_value_short() {
+        let g = optional();
+        assert_eq!(
+            parse(&g, &argv(&["-iSUF"])),
+            parsed(&[Slot::Opts(Some(Role::Inert))], &[I])
+        );
+        assert_eq!(
+            parse(&g, &argv(&["-i", "SUF"])),
+            parsed(&[OPTS, PATH], &[I])
+        );
+        // The suffix `E`, not `-i -E`.
+        assert_eq!(
+            parse(&g, &argv(&["-iE"])),
+            parsed(&[Slot::Opts(Some(Role::Inert))], &[I])
+        );
+        assert_eq!(parse(&g, &argv(&["-Ei"])), parsed(&[OPTS], &[E, I]));
+    }
+
+    /// `vim [file...]`, reading `+word`s as `plus` says (#1035).
+    fn vim(permute: bool, plus: PlusWords) -> Grammar {
+        Grammar::new(
+            Vec::new(),
+            Vec::new(),
+            Some(Role::Path),
+            permute,
+            true,
+            plus,
+        )
+    }
+
+    #[test]
+    fn plus_word_rejected() {
+        let g = vim(true, PlusWords::Reject);
+        assert_eq!(
+            parse(&g, &argv(&["+cmd", "f"])),
+            unknown(UnknownKind::PlusWord, 1)
+        );
+        assert_eq!(
+            parse(&g, &argv(&["f", "+cmd"])),
+            unknown(UnknownKind::PlusWord, 2)
+        );
+        assert_eq!(parse(&g, &argv(&["+"])), unknown(UnknownKind::PlusWord, 1));
+        let ws = vec![word(vec![lit("cmd")]), word(vec![lit("+"), var()])];
+        assert_eq!(parse(&g, &ws), unknown(UnknownKind::PlusWord, 1));
+        // Without `permute`, after an operand too.
+        assert_eq!(
+            parse(&vim(false, PlusWords::Reject), &argv(&["f", "+cmd"])),
+            unknown(UnknownKind::PlusWord, 2)
+        );
+        // After `--`, an operand.
+        assert_eq!(
+            parse(&g, &argv(&["--", "+cmd"])),
+            parsed(&[Slot::DashDash, PATH], &[])
+        );
+    }
+
+    #[test]
+    fn plus_word_operand() {
+        for permute in [true, false] {
+            let g = vim(permute, PlusWords::Operand);
+            assert_eq!(parse(&g, &argv(&["+cmd", "f"])), parsed(&[PATH, PATH], &[]));
+            assert_eq!(parse(&g, &argv(&["f", "+cmd"])), parsed(&[PATH, PATH], &[]));
+        }
     }
 
     #[test]
     fn operand_roles() {
-        let g = Grammar::new(opts(), vec![Role::Inert, Role::Path], None, true, true);
+        let g = Grammar::new(
+            opts(),
+            vec![Role::Inert, Role::Path],
+            None,
+            true,
+            true,
+            PlusWords::Reject,
+        );
         assert_eq!(
             parse(&g, &argv(&["a", "-r", "b"])),
             parsed(&[Slot::Operand(Role::Inert), OPTS, PATH], &[R])
@@ -1170,7 +1565,14 @@ mod tests {
 
     #[test]
     fn code_role() {
-        let g = Grammar::new(opts(), vec![Role::Code], None, true, true);
+        let g = Grammar::new(
+            opts(),
+            vec![Role::Code],
+            None,
+            true,
+            true,
+            PlusWords::Reject,
+        );
         assert_eq!(
             parse(&g, &argv(&["-r", "x"])),
             unknown(UnknownKind::CodeRole, 2)
@@ -1192,7 +1594,7 @@ mod tests {
 
     #[test]
     fn first_unknown_wins() {
-        let g = Grammar::new(opts(), Vec::new(), None, true, true);
+        let g = Grammar::new(opts(), Vec::new(), None, true, true, PlusWords::Reject);
         assert_eq!(
             parse(&g, &argv(&["--bogus", "a"])),
             unknown(UnknownKind::UnknownOption, 1)
@@ -1235,10 +1637,11 @@ mod tests {
             parsed(&[Slot::Opts(Some(Role::Inert))], &[N])
         );
 
-        let strict = Grammar::new(opts(), Vec::new(), Some(Role::Path), false, true);
+        let strict = rm_strict();
+        // A bare `-` is an operand, so options end there.
         assert_eq!(
             parse(&strict, &argv(&["-", "-r"])),
-            parsed(&[PATH, PATH], &[])
+            unknown(UnknownKind::OptionAfterOperand, 2)
         );
         assert_eq!(
             parse(&strict, &argv(&["--", "-r"])),
@@ -1254,6 +1657,7 @@ mod tests {
             None,
             true,
             true,
+            PlusWords::Reject,
         );
         assert_eq!(
             parse(&out, &argv(&["-o", "x"])),
@@ -1265,7 +1669,14 @@ mod tests {
         );
 
         // An option value is not counted as an operand.
-        let one = Grammar::new(opts(), vec![Role::Inert], None, true, true);
+        let one = Grammar::new(
+            opts(),
+            vec![Role::Inert],
+            None,
+            true,
+            true,
+            PlusWords::Reject,
+        );
         assert_eq!(
             parse(&one, &argv(&["-n", "5", "a"])),
             parsed(
@@ -1298,6 +1709,7 @@ mod tests {
             Some(Role::Path),
             true,
             true,
+            PlusWords::Reject,
         );
         assert_eq!(
             parse(&clash, &argv(&["-f", "a"])),

@@ -88,8 +88,8 @@
 
 #[cfg(creusot)]
 use crate::argv::{
-    ArgvL, argv_spec, has_long, has_opaque, has_short, ints, lemma_go_no_code, lemma_ints_index,
-    lit_prefix, no_code,
+    ArgvL, Phase, argv_spec, has_long, has_opaque, has_short, ints, lemma_go_no_code,
+    lemma_ints_index, lit_prefix, no_code,
 };
 use crate::argv::{ArgvResult, Parse, Slot, long_is, parse_argv, parts_view, short_is};
 use crate::ast::{Opaque, Part, Script, Simple, Word};
@@ -666,8 +666,8 @@ pub fn lemma_hit_finding(c: Catalog, r: Seq<Rule>, s: Script) {}
 })]
 pub fn lemma_covered_no_code(rows: Seq<Row>, j: Int, ws: Seq<Word>) {
     pearlite! {
-        lemma_go_no_code(rows[j].grammar, ws, rows[j].key@.len(), false, 0, Seq::empty(),
-            Seq::empty())
+        lemma_go_no_code(rows[j].grammar, ws, rows[j].key@.len(), Phase::Options, 0,
+            Seq::empty(), Seq::empty())
     }
 }
 
@@ -1408,7 +1408,9 @@ pub fn decide(cat: &Catalog, rules: &[Rule], sc: Script) -> Verdict {
 mod tests {
     use super::{Verdict, decide};
     use crate::ast::{AndOr, Connector, Link, Opaque, Part, Pipeline, Script, Simple, Word};
-    use crate::catalog::{Catalog, Grammar, LongName, Opt, OptName, OptValue, Role, Row};
+    use crate::catalog::{
+        Catalog, Grammar, LongName, Opt, OptName, OptValue, PlusWords, Role, Row,
+    };
     use crate::decision::Decision;
     use crate::rule::{Outcome, Pat, PatKind, Rule, RuleId, Scope};
 
@@ -1434,7 +1436,7 @@ mod tests {
 
     /// GNU style: options anywhere, `--` ends them, any number of operands.
     fn gnu(opts: Vec<Opt>, rest: Role) -> Grammar {
-        Grammar::new(opts, Vec::new(), Some(rest), true, true)
+        Grammar::new(opts, Vec::new(), Some(rest), true, true, PlusWords::Reject)
     }
 
     fn catalog() -> Catalog {
@@ -1461,14 +1463,21 @@ mod tests {
                 ),
                 row(
                     &["cd"],
-                    Grammar::new(Vec::new(), vec![Role::Path], None, false, true),
+                    Grammar::new(
+                        Vec::new(),
+                        vec![Role::Path],
+                        None,
+                        false,
+                        true,
+                        PlusWords::Reject,
+                    ),
                     true,
                 ),
                 row(&["echo"], gnu(Vec::new(), Role::Inert), false),
                 row(&["cat"], gnu(Vec::new(), Role::Path), false),
                 row(
                     &["sh"],
-                    Grammar::new(Vec::new(), Vec::new(), None, false, true),
+                    Grammar::new(Vec::new(), Vec::new(), None, false, true, PlusWords::Reject),
                     false,
                 ),
             ],
@@ -1759,14 +1768,16 @@ mod tests {
         check_with(&[], seq(vec![cmd(&["rm", "-r", "x"])]), Decision::Allow);
     }
 
-    /// The test catalog plus `cp [-t DIR] path...`.
+    /// The test catalog plus `cp [-t DIR] [--opt[=DIR]] path...`.
     fn catalog_with_cp() -> Catalog {
         let mut cat = catalog();
         let t = Opt::new(
             OptName::Both(b't', long("target-directory")),
             OptValue::Takes(Role::Path),
         );
-        cat.rows.push(row(&["cp"], gnu(vec![t], Role::Path), false));
+        let o = Opt::new(OptName::Long(long("opt")), OptValue::Optional(Role::Path));
+        cat.rows
+            .push(row(&["cp"], gnu(vec![t, o], Role::Path), false));
         cat
     }
 
@@ -1785,6 +1796,23 @@ mod tests {
             seq(vec![cmd(&["cp", "-t", "/x", "a"])]),
             Decision::Allow,
         );
+    }
+
+    #[test]
+    fn optional_inline_path_is_ask_like_takes() {
+        let cat = catalog_with_cp();
+        let cp = |w: &str, want| check_in(&cat, &[], seq(vec![cmd(&["cp", w, "a"])]), want);
+        // An empty inline value is still an inline path slot, as with `Takes`.
+        for w in [
+            "--opt=x",
+            "--target-directory=x",
+            "--opt=",
+            "--target-directory=",
+        ] {
+            cp(w, Decision::Ask);
+        }
+        // Without an inline value, there is no path slot at all.
+        cp("--opt", Decision::Allow);
     }
 
     #[test]

@@ -97,8 +97,27 @@ pub enum OptName {
 pub enum OptValue {
     /// A flag: no value.
     Flag,
-    /// The option consumes a value with this role.
+    /// The option consumes a value with this role: inline (`--lines=5`,
+    /// `-n5`) or, failing that, the next word.
     Takes(Role),
+    /// The option has an optional value with this role, taken only inline:
+    /// after `=` in a long option, or the rest of a short cluster (`-iSUF`).
+    /// It never takes the next word: `--interactive x` has no value and `x`
+    /// is an operand.
+    Optional(Role),
+}
+
+/// How a grammar reads a word whose known bytes start with `+`, where it
+/// would still read options (and after the first operand, without
+/// `permute`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(DeepModel))]
+pub enum PlusWords {
+    /// The word is Unknown: tools such as vim and less run a `+cmd` word as
+    /// a command. The choice for every tool not known to read it as data.
+    Reject,
+    /// The word is an ordinary operand.
+    Operand,
 }
 
 /// One option of a grammar.
@@ -144,6 +163,7 @@ pub struct Grammar {
     pub(crate) rest: Option<Role>,
     pub(crate) permute: bool,
     pub(crate) dashdash: bool,
+    pub(crate) plus: PlusWords,
 }
 
 impl Grammar {
@@ -152,11 +172,16 @@ impl Grammar {
     /// - `positionals`: roles of the leading operands, in order.
     /// - `rest`: the role of every operand after them; `None` means there are
     ///   none.
-    /// - `permute`: options may follow operands (GNU style).
+    /// - `permute`: options may follow operands (GNU style). Without it, an
+    ///   option-looking word after the first operand is Unknown, because
+    ///   the real tool may still read it as an option.
     /// - `dashdash`: `--` ends option parsing.
+    /// - `plus`: how a `+word` is read where options are still read, and
+    ///   after the first operand without `permute`.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(result.opts@ == opts@ && result.positionals@ == positionals@
-        && result.rest == rest && result.permute == permute && result.dashdash == dashdash))]
+        && result.rest == rest && result.permute == permute && result.dashdash == dashdash
+        && result.plus == plus))]
     #[must_use]
     pub fn new(
         opts: Vec<Opt>,
@@ -164,6 +189,7 @@ impl Grammar {
         rest: Option<Role>,
         permute: bool,
         dashdash: bool,
+        plus: PlusWords,
     ) -> Grammar {
         Grammar {
             opts,
@@ -171,6 +197,7 @@ impl Grammar {
             rest,
             permute,
             dashdash,
+            plus,
         }
     }
 
@@ -212,6 +239,14 @@ impl Grammar {
     #[must_use]
     pub fn dashdash(&self) -> bool {
         self.dashdash
+    }
+
+    /// How a `+word` in option position is read.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(result == self.plus))]
+    #[must_use]
+    pub fn plus_words(&self) -> PlusWords {
+        self.plus
     }
 }
 
@@ -417,14 +452,16 @@ impl Catalog {
 
 #[cfg(test)]
 mod tests {
-    use super::{Catalog, Global, Grammar, LongName, Opt, OptName, OptValue, Role, Row, key_ok};
+    use super::{
+        Catalog, Global, Grammar, LongName, Opt, OptName, OptValue, PlusWords, Role, Row, key_ok,
+    };
 
     fn bytes(s: &str) -> Vec<u8> {
         s.as_bytes().to_vec()
     }
 
     fn grammar() -> Grammar {
-        Grammar::new(Vec::new(), Vec::new(), None, false, true)
+        Grammar::new(Vec::new(), Vec::new(), None, false, true, PlusWords::Reject)
     }
 
     #[test]
@@ -481,12 +518,14 @@ mod tests {
             Some(Role::Path),
             true,
             false,
+            PlusWords::Operand,
         );
         assert_eq!(g.opts(), [opt]);
         assert_eq!(g.positionals(), [Role::Inert]);
         assert_eq!(g.rest(), Some(Role::Path));
         assert!(g.permute());
         assert!(!g.dashdash());
+        assert_eq!(g.plus_words(), PlusWords::Operand);
 
         let row = Row::new(vec![bytes("ls")], g, false, false).expect("valid key");
         let global = Global::new(bytes("git"), grammar()).expect("valid head");
