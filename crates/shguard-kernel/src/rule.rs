@@ -292,21 +292,32 @@ impl Rule {
 mod tests {
     use super::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
     use crate::ast::{Opaque, Part};
-    use crate::catalog::OptName;
+    use crate::catalog::{OptName, ShortName};
     use crate::decision::Decision;
+
+    fn short(b: u8) -> ShortName {
+        ShortName::new(b).expect("printable, not '-'")
+    }
 
     fn bytes(s: &str) -> Vec<u8> {
         s.as_bytes().to_vec()
     }
 
     fn alts() -> OptAlts {
-        OptAlts::new(vec![OptName::Short(b'r'), OptName::Short(b'R')]).expect("non-empty")
+        OptAlts::new(vec![
+            OptName::Short(short(b'r')),
+            OptName::Short(short(b'R')),
+        ])
+        .expect("non-empty")
     }
 
     #[test]
     fn opt_alts_constructor() {
         let a = alts();
-        assert_eq!(a.names(), [OptName::Short(b'r'), OptName::Short(b'R')]);
+        assert_eq!(
+            a.names(),
+            [OptName::Short(short(b'r')), OptName::Short(short(b'R'))]
+        );
         assert!(OptAlts::new(Vec::new()).is_none());
     }
 

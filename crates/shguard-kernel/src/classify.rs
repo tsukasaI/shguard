@@ -524,7 +524,8 @@ mod tests {
     use super::{Classified, SimpleClass, classify_script, classify_simple};
     use crate::ast::{AndOr, Connector, Link, Opaque, Part, Pipeline, Script, Simple, Word};
     use crate::catalog::{
-        Catalog, Grammar, LongName, Opt, OptName, OptValue, PlusWords, Role, Row,
+        Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role,
+        Row, RunsCode, ShortName,
     };
     use crate::verdict::{Addr, Reason, UnknownKind};
 
@@ -532,8 +533,12 @@ mod tests {
         segs.iter().map(|s| s.as_bytes().to_vec()).collect()
     }
 
+    fn short(b: u8) -> ShortName {
+        ShortName::new(b).expect("printable, not '-'")
+    }
+
     fn flag(c: u8) -> Opt {
-        Opt::new(OptName::Short(c), OptValue::Flag)
+        Opt::new(OptName::Short(short(c)), OptValue::Flag)
     }
 
     fn long_flag(name: &str) -> Opt {
@@ -542,7 +547,12 @@ mod tests {
     }
 
     fn row(segs: &[&str], g: Grammar, runs_code: bool) -> Row {
-        Row::new(key(segs), g, runs_code, false).expect("valid key")
+        let runs_code = if runs_code {
+            RunsCode::Yes
+        } else {
+            RunsCode::No
+        };
+        Row::new(key(segs), g, runs_code, Cwd::Keeps).expect("valid key")
     }
 
     /// `ls [-l] [-a] [path...]`
@@ -551,8 +561,8 @@ mod tests {
             vec![flag(b'l'), flag(b'a')],
             Vec::new(),
             Some(Role::Path),
-            true,
-            true,
+            Order::Permute,
+            DashDash::Ends,
             PlusWords::Reject,
         )
     }
@@ -563,14 +573,21 @@ mod tests {
             vec![long_flag("version")],
             Vec::new(),
             Some(Role::Inert),
-            false,
-            true,
+            Order::Strict,
+            DashDash::Ends,
             PlusWords::Reject,
         )
     }
 
     fn no_args() -> Grammar {
-        Grammar::new(Vec::new(), Vec::new(), None, false, true, PlusWords::Reject)
+        Grammar::new(
+            Vec::new(),
+            Vec::new(),
+            None,
+            Order::Strict,
+            DashDash::Ends,
+            PlusWords::Reject,
+        )
     }
 
     fn catalog() -> Catalog {
@@ -682,12 +699,12 @@ mod tests {
         Grammar::new(
             vec![
                 long_flag("version"),
-                Opt::new(OptName::Short(b'c'), OptValue::Takes(Role::Inert)),
+                Opt::new(OptName::Short(short(b'c')), OptValue::Takes(Role::Inert)),
             ],
             Vec::new(),
             None,
-            false,
-            true,
+            Order::Strict,
+            DashDash::Ends,
             PlusWords::Reject,
         )
     }
