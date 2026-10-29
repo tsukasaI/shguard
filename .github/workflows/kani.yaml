@@ -38,17 +38,17 @@ env:
 jobs:
   kani:
     runs-on: ubuntu-latest
-    # TEMPORARY (#1061 measurement): exact-length harnesses only, short cap.
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         harness:
-          - lex_exact_0
-          - lex_exact_1
-          - lex_exact_2
-          - parse_exact_1
-          - parse_exact_2
+          - io_number_any
+          - escaped_byte_any
+          - name_at_any
+          - starts_with_assignment_any
+          - single_quoted_any
+          - dollar_in_quotes_any
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

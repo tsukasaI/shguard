@@ -34,8 +34,7 @@ const MAX_WORDS: usize = 4096;
 /// and `}` never reach the parser (the lexer rejects them); they stay so the
 /// list equals bash's `word_token_alist`.
 ///
-/// A `matches!` rather than a slice search, so it has no loop for Kani to
-/// unwind.
+/// A `matches!` rather than a slice search.
 fn is_reserved(bytes: &[u8]) -> bool {
     matches!(
         bytes,

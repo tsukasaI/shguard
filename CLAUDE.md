@@ -148,7 +148,8 @@ singletons, newtypes and enums instead of flag structs.
 - Kani harnesses (`crates/shguard-syntax/src/kani.rs`) are not in the flake or
   pre-push. Locally: `cargo install --locked kani-verifier --version 0.68.0 &&
   cargo kani setup`, then `cargo kani -p shguard-syntax`. CI runs them in
-  `kani.yaml`.
+  `kani.yaml`. They cover inner lexer units only; whole-input `lex`/`parse`
+  stay with proptest and the differential tests (#1067).
 - `git commit --no-verify` and `SKIP=` bypasses are banned except as a
   documented emergency recorded in the commit message.
 - `rustfmt.toml` is intentionally absent: stable rustfmt (1.10 with rustc
