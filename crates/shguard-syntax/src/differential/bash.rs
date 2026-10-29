@@ -4,34 +4,18 @@
 //! bash 5 or newer: macOS `/bin/bash` is 3.2 and parses differently, so an
 //! older bash fails the test instead of skipping it.
 
-use super::{corpus, run};
-
-fn bash_program() -> String {
-    std::env::var("SHGUARD_DIFF_BASH").unwrap_or_else(|_| "bash".to_string())
-}
-
-fn require_bash5(program: &str) {
-    let output = run(program, &["-c", "echo \"${BASH_VERSINFO[0]}\""], "");
-    assert!(output.status.success(), "{program} -c failed");
-    let major: u32 = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("{program} did not print a bash major version"));
-    assert!(
-        major >= 5,
-        "{program} is bash {major}; bash 5 or newer is required (use `nix develop`)"
-    );
-}
+use super::{bash_program, corpus, require_bash5, run};
 
 #[test]
 #[ignore = "needs shfmt and bash 5 (nix develop)"]
 fn bash_n_accepts_accepted_inputs() {
-    let program = bash_program();
-    require_bash5(&program);
+    let path = bash_program();
+    require_bash5(&path);
+    let program = path.to_str().expect("bash path is UTF-8");
     let corpus = corpus();
     let mut failures = Vec::new();
     for case in &corpus.cases {
-        let output = run(&program, &["-n"], &case.input);
+        let output = run(program, &["-n"], &case.input);
         if !output.status.success() {
             failures.push(format!(
                 "input: {:?}\n  bash -n exited with {}: {}",
