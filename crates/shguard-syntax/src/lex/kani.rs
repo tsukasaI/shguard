@@ -6,7 +6,7 @@
 //! `cargo test`; the module exists only under `cfg(kani)`, so it indexes
 //! freely because Kani proves every index in bounds.
 //!
-//! Whole-input [`lex`](crate::lex) and [`parse`](crate::parse) are out of
+//! Whole-input [`lex`](crate::lex()) and [`parse`](crate::parse) are out of
 //! Kani's reach (#1067): even a fixed one-byte symbolic input did not finish
 //! in 20 minutes. Their totality is covered by the proptest and differential
 //! tests instead.
@@ -16,7 +16,7 @@
 //! input length plus two: the longest byte loop in the unit runs once per
 //! byte, plus the exit check and the one extra step of `take_while`/`get`.
 
-use crate::lex::{Lexer, is_name_byte, is_name_start, starts_with_assignment};
+use super::{Lexer, is_name_byte, is_name_start, starts_with_assignment};
 
 /// A symbolic byte string of length at most `N`, together with its length.
 fn symbolic_input<const N: usize>() -> ([u8; N], usize) {

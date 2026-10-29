@@ -8,6 +8,9 @@
 #[cfg(test)]
 pub(crate) mod tests;
 
+#[cfg(kani)]
+mod kani;
+
 /// Longest input the lexer looks at, in bytes.
 const MAX_INPUT_LEN: usize = 64 * 1024;
 
@@ -319,11 +322,11 @@ fn is_token_end(b: Option<u8>) -> bool {
     }
 }
 
-pub(crate) fn is_name_start(b: u8) -> bool {
+fn is_name_start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_'
 }
 
-pub(crate) fn is_name_byte(b: u8) -> bool {
+fn is_name_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
@@ -350,7 +353,7 @@ pub(crate) fn starts_with_assignment(bytes: &[u8]) -> bool {
 /// last one, so the value is never empty. Adjacent literals with the same
 /// quoting merge: `'a''b'` is one literal, while `a'b'` keeps the boundary
 /// between the unquoted and the quoted part.
-pub(crate) struct Parts {
+struct Parts {
     init: Vec<LexPart>,
     last: LexPart,
 }
@@ -445,9 +448,9 @@ impl Parts {
     }
 }
 
-pub(crate) struct Lexer<'a> {
-    pub(crate) input: &'a [u8],
-    pub(crate) pos: usize,
+struct Lexer<'a> {
+    input: &'a [u8],
+    pos: usize,
 }
 
 impl Lexer<'_> {
@@ -537,7 +540,7 @@ impl Lexer<'_> {
     /// A digit run that starts a token and is directly followed by `>` is a
     /// descriptor; `a2>&1` never gets here because `a2` is lexed as a word.
     /// Consumes the digits when it returns `Some`.
-    pub(crate) fn io_number(&mut self) -> Result<Option<u8>, Unsupported> {
+    fn io_number(&mut self) -> Result<Option<u8>, Unsupported> {
         let start = self.pos;
         let rest = self.input.get(start..).unwrap_or_default();
         let len = rest.iter().take_while(|b| b.is_ascii_digit()).count();
@@ -661,7 +664,7 @@ impl Lexer<'_> {
 
     /// The byte after the backslash at `self.pos`, after checking that it is
     /// neither the end of input, a newline nor a control byte.
-    pub(crate) fn escaped_byte(&self) -> Result<u8, Unsupported> {
+    fn escaped_byte(&self) -> Result<u8, Unsupported> {
         match self.peek_at(1) {
             None => Err(fail(UnsupportedKind::BackslashAtEnd, self.pos)),
             Some(b'\n') => Err(fail(UnsupportedKind::LineContinuation, self.pos)),
@@ -670,7 +673,7 @@ impl Lexer<'_> {
         }
     }
 
-    pub(crate) fn single_quoted(&mut self) -> Result<Parts, Unsupported> {
+    fn single_quoted(&mut self) -> Result<Parts, Unsupported> {
         let start = self.pos;
         self.pos += 1;
         let body_start = self.pos;
@@ -732,7 +735,7 @@ impl Lexer<'_> {
     /// `self.pos` is at a `$` inside double quotes. Returns the variable name
     /// for `$NAME`/`${NAME}`; a `$` right before the closing quote is a
     /// literal `$` and yields `None`.
-    pub(crate) fn dollar_in_quotes(&mut self) -> Result<Option<Vec<u8>>, Unsupported> {
+    fn dollar_in_quotes(&mut self) -> Result<Option<Vec<u8>>, Unsupported> {
         let at = self.pos;
         match self.peek_at(1) {
             Some(b'"') => {
@@ -775,7 +778,7 @@ impl Lexer<'_> {
     }
 
     /// The longest `[A-Za-z_][A-Za-z0-9_]*` starting at `from`, or empty.
-    pub(crate) fn name_at(&self, from: usize) -> &[u8] {
+    fn name_at(&self, from: usize) -> &[u8] {
         let rest = self.input.get(from..).unwrap_or_default();
         match rest.split_first() {
             Some((&first, tail)) if is_name_start(first) => {
