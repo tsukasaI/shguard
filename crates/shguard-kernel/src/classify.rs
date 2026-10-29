@@ -34,6 +34,12 @@
 //! order (`RunsCode` at 0, the argv parse's Unknown, or `UnknownSubcommand`
 //! at a parent row's first operand). The contracts pin only that the reason
 //! sits at a valid address of an uncovered command, not which reason it is.
+//!
+//! `code_child_l` guards only the exact key spelling: `python -cx` and
+//! `python --version -c x` are not caught by it. The primary defence is giving
+//! the parent's option the `Code` role, and the catalog loader rejects a
+//! parent option that spells a `runs_code` child's last key segment without a
+//! `Code` value (#1070).
 
 #[cfg(creusot)]
 use crate::argv::{ArgvL, argv_spec, has_opaque, lit_prefix};
