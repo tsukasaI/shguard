@@ -223,10 +223,10 @@ pub enum UnsupportedKind {
     /// A `>&` operand that is not a single digit followed by a token end.
     #[error("`>&` operand other than one digit")]
     DupOperand,
-    /// A well-formed redirect that is not one of the four the subset accepts:
-    /// `>&D` other than `2>&1` and `>&2`, or `/dev/null` on a descriptor
-    /// other than 1 or 2.
-    #[error("redirect on a descriptor other than 1 or 2")]
+    /// A well-formed `>&D` or `>/dev/null` redirect that is not one of the
+    /// four the subset accepts: `2>&1`, `>&2` / `1>&2`, `>/dev/null` /
+    /// `1>/dev/null` and `2>/dev/null`.
+    #[error("redirect other than 2>&1, >&2, >/dev/null or 2>/dev/null")]
     RedirectDescriptor,
     /// A `>` target other than `/dev/null`.
     #[error("redirect target other than /dev/null")]
