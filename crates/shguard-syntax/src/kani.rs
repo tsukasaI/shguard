@@ -174,3 +174,46 @@ fn lex_any_bytes() {
         }
     }
 }
+
+// TEMPORARY (#1061 measurement): exact-length inputs, no symbolic length.
+// Each byte is still symbolic. Removed before merge.
+
+#[::kani::proof]
+#[::kani::unwind(4)]
+#[::kani::solver(cadical)]
+fn lex_exact_0() {
+    let bytes: [u8; 0] = [];
+    let _ = lex(&bytes);
+}
+
+#[::kani::proof]
+#[::kani::unwind(4)]
+#[::kani::solver(cadical)]
+fn lex_exact_1() {
+    let bytes: [u8; 1] = ::kani::any();
+    let _ = lex(&bytes);
+}
+
+#[::kani::proof]
+#[::kani::unwind(4)]
+#[::kani::solver(cadical)]
+fn lex_exact_2() {
+    let bytes: [u8; 2] = ::kani::any();
+    let _ = lex(&bytes);
+}
+
+#[::kani::proof]
+#[::kani::unwind(4)]
+#[::kani::solver(cadical)]
+fn parse_exact_1() {
+    let bytes: [u8; 1] = ::kani::any();
+    let _ = parse(&bytes);
+}
+
+#[::kani::proof]
+#[::kani::unwind(4)]
+#[::kani::solver(cadical)]
+fn parse_exact_2() {
+    let bytes: [u8; 2] = ::kani::any();
+    let _ = parse(&bytes);
+}
