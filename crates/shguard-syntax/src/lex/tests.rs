@@ -40,24 +40,36 @@ fn ok(input: &str) -> Vec<Token> {
 }
 
 #[test]
-fn lexemes_carry_start_offsets() {
-    let got: Vec<(usize, Token)> = lex(b"ab  2>&1 ; c\n|d")
+fn lexemes_carry_start_and_end_offsets() {
+    let got: Vec<(usize, usize, Token)> = lex(b"ab  2>&1 ; c\n|d")
         .unwrap()
         .into_iter()
-        .map(|l| (l.offset, l.token))
+        .map(|l| (l.offset, l.end, l.token))
         .collect();
     assert_eq!(
         got,
         vec![
-            (0, bare("ab")),
-            (4, Token::Redir(LexRedir::Dup { from: 2, to: 1 })),
-            (9, SEMI),
-            (11, bare("c")),
-            (12, NL),
-            (13, PIPE),
-            (14, bare("d")),
+            (0, 2, bare("ab")),
+            (4, 8, Token::Redir(LexRedir::Dup { from: 2, to: 1 })),
+            (9, 10, SEMI),
+            (11, 12, bare("c")),
+            (12, 13, NL),
+            (13, 14, PIPE),
+            (14, 15, bare("d")),
         ]
     );
+}
+
+#[test]
+fn word_end_spans_quotes_and_escapes() {
+    let input = br#"x 'a b'"c"\  >/dev/null  y"#;
+    let texts: Vec<&[u8]> = lex(input)
+        .unwrap()
+        .iter()
+        .map(|l| &input[l.offset..l.end])
+        .collect();
+    let expected: [&[u8]; 4] = [b"x", br#"'a b'"c"\ "#, b">/dev/null", b"y"];
+    assert_eq!(texts, expected);
 }
 
 fn err(input: &[u8]) -> (K, usize) {
@@ -189,11 +201,20 @@ fn accepted_inputs() {
         ("''", vec![word(vec![quo("")])]),
         ("\"$X\"", vec![word(vec![var("X")])]),
         ("\"${X}y\"", vec![word(vec![var("X"), quo("y")])]),
+        (
+            "echo \"${HOME}日\"",
+            vec![bare("echo"), word(vec![var("HOME"), quo("日")])],
+        ),
+        (
+            "echo \"日$HOME\"",
+            vec![bare("echo"), word(vec![quo("日"), var("HOME")])],
+        ),
         ("\"$X_1-\"", vec![word(vec![var("X_1"), quo("-")])]),
         ("\"a$X\"\"\"", vec![word(vec![quo("a"), var("X"), quo("")])]),
         ("\"$\"", vec![word(vec![quo("$")])]),
         (r#""\$x \q \\ \"""#, vec![word(vec![quo(r#"$x \q \ ""#)])]),
         ("a\\ b", vec![word(vec![unq("a"), quo(" "), unq("b")])]),
+        ("echo 日 本", vec![bare("echo"), bare("日"), bare("本")]),
         (
             "echo \"日本語\"",
             vec![bare("echo"), word(vec![quo("日本語")])],
@@ -258,6 +279,8 @@ fn unsupported_inputs() {
         (b"echo a$", K::UnquotedDollar, 6),
         (b"echo `x`", K::Backquote, 5),
         (b"echo \"`x`\"", K::Backquote, 6),
+        ("echo \"$HOME日\"".as_bytes(), K::NameBeforeNonAscii, 6),
+        ("echo \"a$Xé\"".as_bytes(), K::NameBeforeNonAscii, 7),
         (b"echo \"$(x)\"", K::DollarParen, 6),
         (b"echo \"$((1))\"", K::DollarParen, 6),
         (b"echo \"${X:-y}\"", K::BracedParameter, 6),
@@ -285,6 +308,12 @@ fn unsupported_inputs() {
         (b"a=b:~/c", K::TildeAssignment, 4),
         (b"a=~", K::TildeAssignment, 2),
         (b"a+=~", K::TildeAssignment, 3),
+        ("echo ê=~".as_bytes(), K::TildeAssignment, 8),
+        ("echo ê=a:~/x".as_bytes(), K::TildeAssignment, 10),
+        ("echo ê+=~".as_bytes(), K::TildeAssignment, 9),
+        ("echo xê=~".as_bytes(), K::TildeAssignment, 9),
+        ("echo 日\\ 本".as_bytes(), K::BackslashAfterNonAscii, 8),
+        ("echo \"é\\$X\"".as_bytes(), K::BackslashAfterNonAscii, 8),
         (b"make CFLAGS+=~/x", K::TildeAssignment, 13),
         (b"a+=b:~/c", K::TildeAssignment, 5),
         (b"a 12>&1", K::MultiDigitFd, 2),

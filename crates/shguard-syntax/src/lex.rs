@@ -192,6 +192,14 @@ pub enum UnsupportedKind {
     /// A special or positional parameter inside double quotes.
     #[error("special or positional parameter")]
     SpecialParameter,
+    /// `$NAME` inside double quotes with a non-ASCII byte right after the
+    /// name: bash may count that byte as part of the name.
+    #[error("`$NAME` followed by a non-ASCII byte")]
+    NameBeforeNonAscii,
+    /// A backslash right after a byte >= 0x80: in some multibyte locales the
+    /// backslash is part of that character and escapes nothing.
+    #[error("backslash after a non-ASCII byte")]
+    BackslashAfterNonAscii,
     /// A `$` inside double quotes that starts no variable and is not followed
     /// by the closing quote.
     #[error("bare `$` in double quotes")]
@@ -262,6 +270,10 @@ pub struct Lexeme {
     /// Byte index in the input where the token starts. For a redirect it is
     /// the start of the whole redirect, descriptor included.
     pub offset: usize,
+    /// Byte index in the input just past the token (exclusive), so
+    /// `input[offset..end]` is its exact source text. A word's text spans
+    /// its quotes and escapes.
+    pub end: usize,
     /// The token.
     pub token: Token,
 }
@@ -317,14 +329,20 @@ fn is_name_byte(b: u8) -> bool {
 
 /// True when `bytes` starts with `NAME=` or `NAME+=` (bash's `assignment()`
 /// accepts both, and tilde-expands after either).
+///
+/// A byte >= 0x80 counts as a possible name byte: whether it is one depends on
+/// the locale and the bash build (bash 5.3p9 took Latin-1 letter bytes into
+/// names), so `ê=~` must not be read as a plain word.
 pub(crate) fn starts_with_assignment(bytes: &[u8]) -> bool {
+    let may_be_name_start = |b: u8| is_name_start(b) || b >= 0x80;
+    let may_be_name_byte = |b: u8| is_name_byte(b) || b >= 0x80;
     let Some((&first, rest)) = bytes.split_first() else {
         return false;
     };
-    if !is_name_start(first) {
+    if !may_be_name_start(first) {
         return false;
     }
-    let name_len = rest.iter().take_while(|&&b| is_name_byte(b)).count();
+    let name_len = rest.iter().take_while(|&&b| may_be_name_byte(b)).count();
     matches!(rest.get(name_len..), Some([b'=', ..] | [b'+', b'=', ..]))
 }
 
@@ -470,6 +488,7 @@ impl Lexer<'_> {
             };
             lexemes.push(Lexeme {
                 offset: start,
+                end: self.pos,
                 token,
             });
         }
@@ -595,6 +614,7 @@ impl Lexer<'_> {
             b'\'' => self.single_quoted(),
             b'"' => self.double_quoted(),
             b'\\' => {
+                self.reject_backslash_after_non_ascii()?;
                 let escaped = self.escaped_byte()?;
                 self.pos += 2;
                 Ok(Parts::lit(vec![escaped], Quoting::Quoted))
@@ -620,6 +640,22 @@ impl Lexer<'_> {
                 self.pos += 1;
                 Ok(Parts::lit(vec![b], Quoting::Unquoted))
             }
+        }
+    }
+
+    /// Rejects the backslash at `self.pos` when the byte before it is >= 0x80.
+    /// In SJIS, GBK, GB18030 and Big5 locales `\` (0x5C) can be the trail byte
+    /// of a multibyte character, and bash then does not treat it as an escape
+    /// (`echo \x83\;printf BOOM` runs `printf`). The test is "previous byte
+    /// is at least 0x80", not "previous byte is a lead byte", because that
+    /// depends on the encoding: `日\` is a `\` after a complete character in
+    /// SJIS terms, but `A5 5C` is a single GBK character.
+    fn reject_backslash_after_non_ascii(&self) -> Result<(), Unsupported> {
+        let before = self.pos.checked_sub(1).and_then(|i| self.input.get(i));
+        if before.is_some_and(|b| *b >= 0x80) {
+            Err(fail(UnsupportedKind::BackslashAfterNonAscii, self.pos))
+        } else {
+            Ok(())
         }
     }
 
@@ -669,6 +705,7 @@ impl Lexer<'_> {
                 }
                 Some(b'`') => return Err(fail(UnsupportedKind::Backquote, at)),
                 Some(b'\\') => {
+                    self.reject_backslash_after_non_ascii()?;
                     let escaped = self.escaped_byte()?;
                     // Only these four are escapable; bash keeps the
                     // backslash before anything else.
@@ -715,6 +752,18 @@ impl Lexer<'_> {
             }
             Some(c) if is_name_start(c) => {
                 let name = self.name_at(self.pos + 1).to_vec();
+                // Which bytes form a name depends on the locale and the bash
+                // build: bash 5.3p9 on macOS with no `LC_*` set took 0xE6 into
+                // `$HOME日`, while `LC_ALL=C` and bash 5.3p20 did not. A
+                // non-ASCII byte right after the name makes the boundary
+                // ambiguous.
+                if self
+                    .input
+                    .get(self.pos + 1 + name.len())
+                    .is_some_and(|b| *b >= 0x80)
+                {
+                    return Err(fail(UnsupportedKind::NameBeforeNonAscii, at));
+                }
                 self.pos += name.len() + 1;
                 Ok(Some(name))
             }

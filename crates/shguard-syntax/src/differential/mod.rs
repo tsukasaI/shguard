@@ -4,9 +4,11 @@
 //! - `brush` compares against `brush-parser` (pure Rust, runs in the normal
 //!   test run);
 //! - `shfmt` compares against `shfmt -ln bash --to-json`;
-//! - `bash` runs `bash -n` and requires exit status 0.
+//! - `bash` runs `bash -n` and requires exit status 0;
+//! - `argv` asks bash 5 for the argv of every simple command and compares it
+//!   with the words in our AST (see that module for why nothing executes).
 //!
-//! The last two are `#[ignore]`d because they need the tools from the flake
+//! The last three are `#[ignore]`d because they need the tools from the flake
 //! devShell: run them with
 //! `nix develop -c cargo test -p shguard-syntax --locked -- --include-ignored --nocapture`
 //! (`--nocapture`, because a failing test under the devShell aborts and loses
@@ -18,6 +20,7 @@
 //! something we accepted (an unmappable node, a parse error) is a
 //! disagreement too. Inputs the parser rejects are not compared.
 
+mod argv;
 mod bash;
 mod brush;
 mod shfmt;
@@ -28,6 +31,7 @@ use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 use shguard_kernel::ast::{AndOr, Connector, Opaque, Part, Pipeline, Redir, Script, Simple, Word};
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -400,6 +404,25 @@ const EDGE: &[&str] = &[
     "echo ==",
     "echo 1",
     "echo 12>&1",
+    "echo \"$X\"",
+    "echo \"a$X\"b",
+    "echo \"${X}y\"",
+    "echo \"$X$Y\"",
+    "echo ''\"$X\"''",
+    "echo ~",
+    "echo ~/a",
+    "echo HEAD~1",
+    "echo h:~/f",
+    "echo \\*",
+    "echo '*'",
+    "echo \"a b\"",
+    "echo a\\ b",
+    "echo \"\\$X\"",
+    "echo \"\\\\\"",
+    "echo \"\\q\"",
+    "echo -- \"-n\"",
+    "echo na\u{ef}ve",
+    "echo \"é${HOME}日本\"",
     "cat file.txt | grep 'foo bar' | sort -u > /dev/null",
 ];
 
@@ -500,8 +523,45 @@ impl Corpus {
 /// Runs `program args` with `input` on stdin and returns its output. Panics
 /// when the program cannot be started: a missing tool is a failure.
 fn run(program: &str, args: &[&str], input: &str) -> std::process::Output {
-    let mut child = Command::new(program)
-        .args(args)
+    let mut command = Command::new(program);
+    command.args(args);
+    run_command(command, program, input)
+}
+
+/// The bash the oracles use: `SHGUARD_DIFF_BASH`, else `bash`, resolved to a
+/// path through the test process's own `PATH`. A relative name must be
+/// resolved before a test builds a sandbox environment, because the sandbox
+/// `PATH` is empty.
+fn bash_program() -> PathBuf {
+    let name = std::env::var("SHGUARD_DIFF_BASH").unwrap_or_else(|_| "bash".to_string());
+    if name.contains('/') {
+        return PathBuf::from(name);
+    }
+    let paths = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(&name))
+        .find(|candidate| candidate.is_file())
+        .unwrap_or_else(|| panic!("{name} not found on PATH (use `nix develop`)"))
+}
+
+fn require_bash5(program: &Path) {
+    let program = program.to_str().expect("bash path is UTF-8");
+    let output = run(program, &["-c", "echo \"${BASH_VERSINFO[0]}\""], "");
+    assert!(output.status.success(), "{program} -c failed");
+    let major: u32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("{program} did not print a bash major version"));
+    assert!(
+        major >= 5,
+        "{program} is bash {major}; bash 5 or newer is required (use `nix develop`)"
+    );
+}
+
+/// Runs `command` (named `program` in messages) with `input` on stdin, kills
+/// it after [`TIMEOUT`] and returns its output.
+fn run_command(mut command: Command, program: &str, input: &str) -> std::process::Output {
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

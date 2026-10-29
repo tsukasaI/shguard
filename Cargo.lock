@@ -852,6 +852,7 @@ dependencies = [
  "proptest",
  "serde_json",
  "shguard-kernel",
+ "tempfile",
  "thiserror",
 ]
 
