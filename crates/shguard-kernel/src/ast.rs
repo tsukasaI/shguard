@@ -100,22 +100,21 @@ impl Word {
     }
 }
 
-/// A redirection the subset parser accepts.
+/// A redirection the subset parser accepts. The set is closed: every value
+/// only moves or discards descriptor 1 or 2 (stdout, stderr), so none can
+/// open a file, read input, or touch another descriptor. The kernel therefore
+/// ignores redirects when it decides coverage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(creusot, derive(DeepModel))]
 pub enum Redir {
-    /// `N>&M`: `2>&1` is `from: 2, to: 1`; `>&2` is `from: 1, to: 2`.
-    Dup {
-        /// The redirected descriptor.
-        from: u8,
-        /// The descriptor it now refers to.
-        to: u8,
-    },
-    /// `N>/dev/null`: `>/dev/null` is `fd: 1`.
-    DevNull {
-        /// The redirected descriptor.
-        fd: u8,
-    },
+    /// `2>&1`: stderr follows stdout.
+    ErrToOut,
+    /// `>&2` or `1>&2`: stdout follows stderr.
+    OutToErr,
+    /// `>/dev/null` or `1>/dev/null`: stdout is discarded.
+    OutDevNull,
+    /// `2>/dev/null`: stderr is discarded.
+    ErrDevNull,
 }
 
 /// A simple command: words (the first is the command name) and redirects.
@@ -374,7 +373,7 @@ mod tests {
 
     #[test]
     fn simple_with_first_puts_first_in_front() {
-        let redir = Redir::DevNull { fd: 1 };
+        let redir = Redir::OutDevNull;
         let c = Simple::with_first(word("a"), vec![word("b")], vec![redir]);
         assert_eq!(c.words(), [word("a"), word("b")]);
         assert_eq!(c.redirs(), [redir]);

@@ -14,7 +14,9 @@
 //!   `["git"]` covers `git --version` but not `git push`, where `push` would
 //!   otherwise read as an inert operand.
 //!
-//! Redirects never affect coverage. The catalog's global grammars (words
+//! Redirects never affect coverage: every [`Redir`](crate::ast::Redir) value
+//! only moves or discards descriptors 1 and 2, so none can write a file,
+//! read input or run code. The catalog's global grammars (words
 //! between key segments, as in `git -C x status`) are NOT used in v1: such a
 //! command matches no row with the longer key, which is conservative (it
 //! ends in Ask, never Allow).
@@ -793,9 +795,10 @@ mod tests {
         use crate::ast::Redir;
         let words = || vec![lit_word("ls"), lit_word("-la")];
         let redirs = [
-            Redir::Dup { from: 2, to: 1 },
-            Redir::Dup { from: 1, to: 2 },
-            Redir::DevNull { fd: 1 },
+            Redir::ErrToOut,
+            Redir::OutToErr,
+            Redir::OutDevNull,
+            Redir::ErrDevNull,
         ];
         for r in redirs {
             let s = Simple::new(words(), vec![r]).expect("non-empty");

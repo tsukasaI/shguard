@@ -78,7 +78,7 @@ fn gname() -> impl Strategy<Value = GWord> {
 pub(crate) struct GSimple {
     name: GWord,
     args: Vec<GWord>,
-    redirs: Vec<Redir>,
+    redirs: Vec<(Redir, bool)>,
     placement: Placement,
 }
 
@@ -93,17 +93,28 @@ pub(crate) enum Placement {
     Between,
 }
 
-fn gredir() -> impl Strategy<Value = Redir> {
-    prop_oneof![
-        (0u8..10, 0u8..10).prop_map(|(from, to)| Redir::Dup { from, to }),
-        (0u8..10).prop_map(|fd| Redir::DevNull { fd }),
-    ]
+/// A redirect and whether it is spelled with the explicit descriptor where
+/// bash allows both (`>&2` or `1>&2`, `>/dev/null` or `1>/dev/null`).
+fn gredir() -> impl Strategy<Value = (Redir, bool)> {
+    (
+        prop_oneof![
+            Just(Redir::ErrToOut),
+            Just(Redir::OutToErr),
+            Just(Redir::OutDevNull),
+            Just(Redir::ErrDevNull),
+        ],
+        any::<bool>(),
+    )
 }
 
-fn render_redir(r: Redir) -> String {
-    match r {
-        Redir::Dup { from, to } => format!("{from}>&{to}"),
-        Redir::DevNull { fd } => format!("{fd}>/dev/null"),
+fn render_redir((r, explicit): (Redir, bool)) -> String {
+    match (r, explicit) {
+        (Redir::ErrToOut, _) => "2>&1".to_string(),
+        (Redir::OutToErr, false) => ">&2".to_string(),
+        (Redir::OutToErr, true) => "1>&2".to_string(),
+        (Redir::OutDevNull, false) => ">/dev/null".to_string(),
+        (Redir::OutDevNull, true) => "1>/dev/null".to_string(),
+        (Redir::ErrDevNull, _) => "2>/dev/null".to_string(),
     }
 }
 
@@ -151,7 +162,7 @@ impl GSimple {
                 .chain(&self.args)
                 .map(GWord::word)
                 .collect(),
-            self.redirs.clone(),
+            self.redirs.iter().map(|(r, _)| *r).collect(),
         )
         .unwrap()
     }
