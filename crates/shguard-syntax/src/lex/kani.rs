@@ -13,7 +13,7 @@
 //!
 //! Bounds: a small symbolic input length per harness. Each harness's length
 //! const records its measured CI time (Kani's "Verification Time", run
-//! 40857677457). The unwind value is the input length plus two: the longest
+//! 40857677457). The unwind value is at least the input length plus two: the longest
 //! byte loop in the unit runs once per byte, plus the exit check and the one
 //! extra step of `take_while`/`get`.
 
@@ -77,7 +77,11 @@ fn escaped_byte_any() {
         pos,
     };
     match lexer.escaped_byte() {
-        Ok(_) => ::kani::cover!(true, "escaped_byte accepts"),
+        Ok(c) => {
+            ::kani::cover!(true, "escaped_byte accepts");
+            assert!(pos + 1 < len);
+            assert!(c == bytes[pos + 1]);
+        }
         Err(e) => {
             ::kani::cover!(true, "escaped_byte rejects");
             assert!(e.offset == pos || e.offset == pos + 1);
@@ -165,6 +169,8 @@ fn single_quoted_any() {
     match lexer.single_quoted() {
         Ok(_) => {
             ::kani::cover!(true, "single_quoted accepts");
+            assert!(lexer.pos >= 1);
+            assert!(bytes[lexer.pos - 1] == b'\'');
             assert!(lexer.pos <= len);
         }
         Err(e) => {
@@ -197,7 +203,10 @@ fn dollar_in_quotes_any() {
             assert!(!name.is_empty());
             assert!(lexer.pos <= len);
         }
-        Ok(None) => ::kani::cover!(true, "dollar_in_quotes finds a literal dollar"),
+        Ok(None) => {
+            ::kani::cover!(true, "dollar_in_quotes finds a literal dollar");
+            assert!(lexer.pos == pos + 1);
+        }
         Err(e) => {
             ::kani::cover!(true, "dollar_in_quotes rejects");
             assert!(e.offset == pos);

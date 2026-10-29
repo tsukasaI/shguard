@@ -34,7 +34,7 @@ const MAX_WORDS: usize = 4096;
 /// and `}` never reach the parser (the lexer rejects them); they stay so the
 /// list equals bash's `word_token_alist`.
 ///
-/// A `matches!` rather than a slice search.
+/// A `matches!`, so the check has no loop.
 fn is_reserved(bytes: &[u8]) -> bool {
     matches!(
         bytes,
