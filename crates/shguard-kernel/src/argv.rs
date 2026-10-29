@@ -191,9 +191,9 @@ pub fn has_opaque(parts: Seq<Part>, j: Int) -> bool {
 #[logic(open(crate))]
 pub fn has_short(o: Opt, c: u8) -> bool {
     match o.name {
-        OptName::Short(s) => s == c,
+        OptName::Short(s) => s.byte == c,
         OptName::Long(_) => false,
-        OptName::Both(s, _) => s == c,
+        OptName::Both(s, _) => s.byte == c,
     }
 }
 
@@ -717,9 +717,9 @@ pub(crate) fn parts_view(parts: &[Part], from: usize) -> (Vec<u8>, bool) {
 #[cfg_attr(creusot, ensures(result == has_short(*o, c)))]
 pub(crate) fn short_is(o: &Opt, c: u8) -> bool {
     match &o.name {
-        OptName::Short(s) => *s == c,
+        OptName::Short(s) => s.byte == c,
         OptName::Long(_) => false,
-        OptName::Both(s, _) => *s == c,
+        OptName::Both(s, _) => s.byte == c,
     }
 }
 
@@ -1058,7 +1058,9 @@ pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
 mod tests {
     use super::{ArgvResult, Parse, Slot, parse_argv};
     use crate::ast::{Opaque, Part, Word};
-    use crate::catalog::{Grammar, LongName, Opt, OptName, OptValue, PlusWords, Role};
+    use crate::catalog::{
+        DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role, ShortName,
+    };
     use crate::verdict::UnknownKind;
 
     const R: usize = 0; // -r / --recursive, flag
@@ -1067,20 +1069,27 @@ mod tests {
     const C: usize = 3; // --color, long only, takes an inert value
     // Index 4: -e, short only, takes code (never in a successful parse).
 
+    fn short(b: u8) -> ShortName {
+        ShortName::new(b).expect("printable, not '-'")
+    }
+
     fn long(s: &str) -> LongName {
-        LongName::new(s.as_bytes().to_vec()).expect("non-empty")
+        LongName::new(s.as_bytes().to_vec()).expect("well-formed long name")
     }
 
     fn opts() -> Vec<Opt> {
         vec![
-            Opt::new(OptName::Both(b'r', long("recursive")), OptValue::Flag),
-            Opt::new(OptName::Both(b'f', long("force")), OptValue::Flag),
             Opt::new(
-                OptName::Both(b'n', long("lines")),
+                OptName::Both(short(b'r'), long("recursive")),
+                OptValue::Flag,
+            ),
+            Opt::new(OptName::Both(short(b'f'), long("force")), OptValue::Flag),
+            Opt::new(
+                OptName::Both(short(b'n'), long("lines")),
                 OptValue::Takes(Role::Inert),
             ),
             Opt::new(OptName::Long(long("color")), OptValue::Takes(Role::Inert)),
-            Opt::new(OptName::Short(b'e'), OptValue::Takes(Role::Code)),
+            Opt::new(OptName::Short(short(b'e')), OptValue::Takes(Role::Code)),
         ]
     }
 
@@ -1090,8 +1099,8 @@ mod tests {
             opts(),
             Vec::new(),
             Some(Role::Path),
-            true,
-            true,
+            Order::Permute,
+            DashDash::Ends,
             PlusWords::Reject,
         )
     }
@@ -1256,8 +1265,8 @@ mod tests {
             opts(),
             Vec::new(),
             Some(Role::Path),
-            true,
-            false,
+            Order::Permute,
+            DashDash::Literal,
             PlusWords::Reject,
         );
         assert_eq!(
@@ -1324,22 +1333,22 @@ mod tests {
 
     #[test]
     fn permute_vs_not() {
-        let ls = |permute| {
+        let ls = |order| {
             Grammar::new(
                 opts(),
                 Vec::new(),
                 Some(Role::Path),
-                permute,
-                true,
+                order,
+                DashDash::Ends,
                 PlusWords::Reject,
             )
         };
         assert_eq!(
-            parse(&ls(true), &argv(&["a", "-r"])),
+            parse(&ls(Order::Permute), &argv(&["a", "-r"])),
             parsed(&[PATH, OPTS], &[R])
         );
         assert_eq!(
-            parse(&ls(false), &argv(&["a", "b"])),
+            parse(&ls(Order::Strict), &argv(&["a", "b"])),
             parsed(&[PATH, PATH], &[])
         );
     }
@@ -1350,8 +1359,8 @@ mod tests {
             opts(),
             Vec::new(),
             Some(Role::Path),
-            false,
-            true,
+            Order::Strict,
+            DashDash::Ends,
             PlusWords::Reject,
         )
     }
@@ -1421,10 +1430,10 @@ mod tests {
         Grammar::new(
             vec![
                 Opt::new(
-                    OptName::Both(b'i', long("interactive")),
+                    OptName::Both(short(b'i'), long("interactive")),
                     OptValue::Optional(Role::Inert),
                 ),
-                Opt::new(OptName::Short(b'E'), OptValue::Flag),
+                Opt::new(OptName::Short(short(b'E')), OptValue::Flag),
                 Opt::new(
                     OptName::Long(long("backup")),
                     OptValue::Optional(Role::Path),
@@ -1433,8 +1442,8 @@ mod tests {
             ],
             Vec::new(),
             Some(Role::Path),
-            true,
-            true,
+            Order::Permute,
+            DashDash::Ends,
             PlusWords::Reject,
         )
     }
@@ -1493,20 +1502,20 @@ mod tests {
     }
 
     /// `vim [file...]`, reading `+word`s as `plus` says (#1035).
-    fn vim(permute: bool, plus: PlusWords) -> Grammar {
+    fn vim(order: Order, plus: PlusWords) -> Grammar {
         Grammar::new(
             Vec::new(),
             Vec::new(),
             Some(Role::Path),
-            permute,
-            true,
+            order,
+            DashDash::Ends,
             plus,
         )
     }
 
     #[test]
     fn plus_word_rejected() {
-        let g = vim(true, PlusWords::Reject);
+        let g = vim(Order::Permute, PlusWords::Reject);
         assert_eq!(
             parse(&g, &argv(&["+cmd", "f"])),
             unknown(UnknownKind::PlusWord, 1)
@@ -1520,7 +1529,10 @@ mod tests {
         assert_eq!(parse(&g, &ws), unknown(UnknownKind::PlusWord, 1));
         // Without `permute`, after an operand too.
         assert_eq!(
-            parse(&vim(false, PlusWords::Reject), &argv(&["f", "+cmd"])),
+            parse(
+                &vim(Order::Strict, PlusWords::Reject),
+                &argv(&["f", "+cmd"])
+            ),
             unknown(UnknownKind::PlusWord, 2)
         );
         // After `--`, an operand.
@@ -1532,8 +1544,8 @@ mod tests {
 
     #[test]
     fn plus_word_operand() {
-        for permute in [true, false] {
-            let g = vim(permute, PlusWords::Operand);
+        for order in [Order::Permute, Order::Strict] {
+            let g = vim(order, PlusWords::Operand);
             assert_eq!(parse(&g, &argv(&["+cmd", "f"])), parsed(&[PATH, PATH], &[]));
             assert_eq!(parse(&g, &argv(&["f", "+cmd"])), parsed(&[PATH, PATH], &[]));
         }
@@ -1545,8 +1557,8 @@ mod tests {
             opts(),
             vec![Role::Inert, Role::Path],
             None,
-            true,
-            true,
+            Order::Permute,
+            DashDash::Ends,
             PlusWords::Reject,
         );
         assert_eq!(
@@ -1569,8 +1581,8 @@ mod tests {
             opts(),
             vec![Role::Code],
             None,
-            true,
-            true,
+            Order::Permute,
+            DashDash::Ends,
             PlusWords::Reject,
         );
         assert_eq!(
@@ -1594,7 +1606,14 @@ mod tests {
 
     #[test]
     fn first_unknown_wins() {
-        let g = Grammar::new(opts(), Vec::new(), None, true, true, PlusWords::Reject);
+        let g = Grammar::new(
+            opts(),
+            Vec::new(),
+            None,
+            Order::Permute,
+            DashDash::Ends,
+            PlusWords::Reject,
+        );
         assert_eq!(
             parse(&g, &argv(&["--bogus", "a"])),
             unknown(UnknownKind::UnknownOption, 1)
@@ -1650,13 +1669,13 @@ mod tests {
 
         let out = Grammar::new(
             vec![Opt::new(
-                OptName::Both(b'o', long("output")),
+                OptName::Both(short(b'o'), long("output")),
                 OptValue::Takes(Role::Path),
             )],
             Vec::new(),
             None,
-            true,
-            true,
+            Order::Permute,
+            DashDash::Ends,
             PlusWords::Reject,
         );
         assert_eq!(
@@ -1673,8 +1692,8 @@ mod tests {
             opts(),
             vec![Role::Inert],
             None,
-            true,
-            true,
+            Order::Permute,
+            DashDash::Ends,
             PlusWords::Reject,
         );
         assert_eq!(
@@ -1699,16 +1718,16 @@ mod tests {
         // On a name collision the first option in `opts` wins.
         let clash = Grammar::new(
             vec![
-                Opt::new(OptName::Short(b'f'), OptValue::Flag),
+                Opt::new(OptName::Short(short(b'f')), OptValue::Flag),
                 Opt::new(
-                    OptName::Both(b'f', long("file")),
+                    OptName::Both(short(b'f'), long("file")),
                     OptValue::Takes(Role::Path),
                 ),
             ],
             Vec::new(),
             Some(Role::Path),
-            true,
-            true,
+            Order::Permute,
+            DashDash::Ends,
             PlusWords::Reject,
         );
         assert_eq!(

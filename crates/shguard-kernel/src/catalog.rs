@@ -28,18 +28,73 @@ pub enum Role {
     Code,
 }
 
-/// A long option name, without the leading `--`. Never empty.
+/// A short option name: one printable ASCII byte other than `-`.
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(not(creusot), derive(PartialEq, Eq))]
+pub struct ShortName {
+    pub(crate) byte: u8,
+}
+
+/// A short name is printable ASCII (`0x21..=0x7E`) and not `-`.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn short_name_wf(b: u8) -> bool {
+    // 45 is `-`: Creusot logic has no byte literals.
+    0x21u8 <= b && b <= 0x7Eu8 && b != 45u8
+}
+
+#[cfg(creusot)]
+impl Invariant for ShortName {
+    #[logic(open(crate))]
+    fn invariant(self) -> bool {
+        pearlite! { short_name_wf(self.byte) }
+    }
+}
+
+impl ShortName {
+    /// Builds a short name, or `None` when `b` is not printable ASCII or is
+    /// `-`.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(match result {
+        Some(s) => s.byte == b,
+        None => !short_name_wf(b),
+    }))]
+    #[must_use]
+    pub fn new(b: u8) -> Option<ShortName> {
+        match b {
+            b'-' => None,
+            0x21..=0x7E => Some(ShortName { byte: b }),
+            _ => None,
+        }
+    }
+
+    /// The name's byte.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(result == self.byte))]
+    #[must_use]
+    pub fn byte(&self) -> u8 {
+        self.byte
+    }
+}
+
+/// A long option name, without the leading `--`. Never empty, never starts
+/// with `-`, and never contains `=`.
 #[derive(Clone, Debug)]
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub struct LongName {
     pub(crate) bytes: Vec<u8>,
 }
 
-/// A long name has at least one byte.
+/// A long name has at least one byte, does not start with `-` (that would
+/// read as `---x`), and has no `=` (the first `=` splits name from value).
+/// The literals are `-` (45) and `=` (61); logic has no byte literals.
 #[cfg(creusot)]
 #[logic(open)]
 pub fn long_name_wf(bytes: Seq<u8>) -> bool {
-    bytes.len() > 0
+    pearlite! {
+        bytes.len() > 0 && bytes[0] != 45u8
+            && forall<i> 0 <= i && i < bytes.len() ==> bytes[i] != 61u8
+    }
 }
 
 #[cfg(creusot)]
@@ -51,7 +106,8 @@ impl Invariant for LongName {
 }
 
 impl LongName {
-    /// Builds a long name, or `None` when `bytes` is empty.
+    /// Builds a long name, or `None` when `bytes` is empty, starts with `-`,
+    /// or contains `=`.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(match result {
         Some(n) => n.bytes@ == bytes@,
@@ -59,11 +115,20 @@ impl LongName {
     }))]
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Option<LongName> {
-        if <[_]>::is_empty(&bytes) {
-            None
-        } else {
-            Some(LongName { bytes })
+        if <[_]>::is_empty(&bytes) || bytes[0] == b'-' {
+            return None;
         }
+        let mut i: usize = 0;
+        #[cfg_attr(creusot, variant(bytes@.len() - i@))]
+        #[cfg_attr(creusot, invariant(i@ <= bytes@.len()))]
+        #[cfg_attr(creusot, invariant(forall<k> 0 <= k && k < i@ ==> bytes@[k] != 61u8))]
+        while i < bytes.len() {
+            if bytes[i] == b'=' {
+                return None;
+            }
+            i += 1;
+        }
+        Some(LongName { bytes })
     }
 
     /// The name's bytes.
@@ -77,18 +142,19 @@ impl LongName {
 
 /// The name of an option; an option always has at least one name.
 ///
-/// The long name lives in a [`LongName`], whose invariant (non-empty) the
-/// enum inherits. A bare `Vec<u8>` payload would stay mutable through a
-/// `&mut` pattern even with `#[non_exhaustive]` variants.
+/// The short name lives in a [`ShortName`] (printable ASCII, not `-`) and the
+/// long name in a [`LongName`] (non-empty, no leading `-`, no `=`); the enum
+/// inherits their invariants. A bare `u8` or `Vec<u8>` payload would stay
+/// mutable through a `&mut` pattern even with `#[non_exhaustive]` variants.
 #[derive(Clone, Debug)]
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub enum OptName {
-    /// Only a short name: `-v` is `Short(b'v')`.
-    Short(u8),
+    /// Only a short name: `-v` is `Short(..)` holding `b'v'`.
+    Short(ShortName),
     /// Only a long name: `--verbose` is `Long(..)`.
     Long(LongName),
     /// Both spellings: `-v` and `--verbose`.
-    Both(u8, LongName),
+    Both(ShortName, LongName),
 }
 
 /// Whether an option takes a value, and what the value does.
@@ -118,6 +184,47 @@ pub enum PlusWords {
     Reject,
     /// The word is an ordinary operand.
     Operand,
+}
+
+/// Whether a command runs other code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(DeepModel))]
+pub enum RunsCode {
+    /// The command runs other code (`env`, `xargs`, `sh -c`).
+    Yes,
+    /// The command does not run other code.
+    No,
+}
+
+/// Whether a command changes the working directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(DeepModel))]
+pub enum Cwd {
+    /// The command changes the working directory (`cd`, `pushd`).
+    Changes,
+    /// The command leaves the working directory alone.
+    Keeps,
+}
+
+/// Whether options may follow operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(DeepModel))]
+pub enum Order {
+    /// GNU style: options may follow operands.
+    Permute,
+    /// An option-looking word after the first operand is Unknown, because
+    /// the real tool may still read it as an option.
+    Strict,
+}
+
+/// What `--` does in a grammar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(DeepModel))]
+pub enum DashDash {
+    /// `--` ends option parsing.
+    Ends,
+    /// `--` is an ordinary word.
+    Literal,
 }
 
 /// One option of a grammar.
@@ -172,25 +279,36 @@ impl Grammar {
     /// - `positionals`: roles of the leading operands, in order.
     /// - `rest`: the role of every operand after them; `None` means there are
     ///   none.
-    /// - `permute`: options may follow operands (GNU style). Without it, an
-    ///   option-looking word after the first operand is Unknown, because
-    ///   the real tool may still read it as an option.
-    /// - `dashdash`: `--` ends option parsing.
+    /// - `order`: [`Order::Permute`] lets options follow operands (GNU
+    ///   style). With [`Order::Strict`], an option-looking word after the
+    ///   first operand is Unknown, because the real tool may still read it
+    ///   as an option.
+    /// - `dashdash`: [`DashDash::Ends`] means `--` ends option parsing.
     /// - `plus`: how a `+word` is read where options are still read, and
-    ///   after the first operand without `permute`.
+    ///   after the first operand with [`Order::Strict`].
+    ///
+    /// The two choices are stored as the booleans the accessors return.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(result.opts@ == opts@ && result.positionals@ == positionals@
-        && result.rest == rest && result.permute == permute && result.dashdash == dashdash
-        && result.plus == plus))]
+        && result.rest == rest && result.permute == (order == Order::Permute)
+        && result.dashdash == (dashdash == DashDash::Ends) && result.plus == plus))]
     #[must_use]
     pub fn new(
         opts: Vec<Opt>,
         positionals: Vec<Role>,
         rest: Option<Role>,
-        permute: bool,
-        dashdash: bool,
+        order: Order,
+        dashdash: DashDash,
         plus: PlusWords,
     ) -> Grammar {
+        let permute = match order {
+            Order::Permute => true,
+            Order::Strict => false,
+        };
+        let dashdash = match dashdash {
+            DashDash::Ends => true,
+            DashDash::Literal => false,
+        };
         Grammar {
             opts,
             positionals,
@@ -300,19 +418,24 @@ impl Row {
     /// Builds a row, or `None` when `key` is empty or has an empty segment.
     ///
     /// Subcommands are flattened into the key (`["git", "status"]`).
+    /// `runs_code` and `cwd` are stored as the booleans the accessors return.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(match result {
         Some(r) => r.key@ == key@ && r.grammar == grammar
-            && r.runs_code == runs_code && r.changes_cwd == changes_cwd,
+            && r.runs_code == (runs_code == RunsCode::Yes)
+            && r.changes_cwd == (cwd == Cwd::Changes),
         None => !key_wf(key@),
     }))]
     #[must_use]
-    pub fn new(
-        key: Vec<Vec<u8>>,
-        grammar: Grammar,
-        runs_code: bool,
-        changes_cwd: bool,
-    ) -> Option<Row> {
+    pub fn new(key: Vec<Vec<u8>>, grammar: Grammar, runs_code: RunsCode, cwd: Cwd) -> Option<Row> {
+        let runs_code = match runs_code {
+            RunsCode::Yes => true,
+            RunsCode::No => false,
+        };
+        let changes_cwd = match cwd {
+            Cwd::Changes => true,
+            Cwd::Keeps => false,
+        };
         if key_ok(&key) {
             Some(Row {
                 key,
@@ -453,7 +576,8 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::{
-        Catalog, Global, Grammar, LongName, Opt, OptName, OptValue, PlusWords, Role, Row, key_ok,
+        Catalog, Cwd, DashDash, Global, Grammar, LongName, Opt, OptName, OptValue, Order,
+        PlusWords, Role, Row, RunsCode, ShortName, key_ok,
     };
 
     fn bytes(s: &str) -> Vec<u8> {
@@ -461,16 +585,48 @@ mod tests {
     }
 
     fn grammar() -> Grammar {
-        Grammar::new(Vec::new(), Vec::new(), None, false, true, PlusWords::Reject)
+        Grammar::new(
+            Vec::new(),
+            Vec::new(),
+            None,
+            Order::Strict,
+            DashDash::Ends,
+            PlusWords::Reject,
+        )
+    }
+
+    fn short(b: u8) -> ShortName {
+        ShortName::new(b).expect("printable, not '-'")
+    }
+
+    #[test]
+    fn short_name_constructor() {
+        assert_eq!(short(b'v').byte(), b'v');
+        assert_eq!(short(b'!').byte(), b'!');
+        assert_eq!(short(b'~').byte(), b'~');
+        assert!(ShortName::new(b'-').is_none());
+        assert!(ShortName::new(b' ').is_none());
+        assert!(ShortName::new(0x00).is_none());
+        assert!(ShortName::new(0x20).is_none());
+        assert!(ShortName::new(0x7F).is_none());
+        assert!(ShortName::new(0x80).is_none());
+        assert!(ShortName::new(0xFF).is_none());
     }
 
     #[test]
     fn long_name_constructor() {
-        let name = LongName::new(bytes("verbose")).expect("non-empty");
+        let name = LongName::new(bytes("verbose")).expect("well-formed long name");
         assert_eq!(name.bytes(), b"verbose");
         assert!(LongName::new(Vec::new()).is_none());
+        assert!(LongName::new(bytes("-x")).is_none());
+        assert!(LongName::new(bytes("-")).is_none());
+        assert!(LongName::new(bytes("a=b")).is_none());
+        assert!(LongName::new(bytes("a=")).is_none());
+        assert!(LongName::new(bytes("=")).is_none());
+        assert!(LongName::new(bytes("a-b")).is_some());
+        assert!(LongName::new(bytes("a b")).is_some());
 
-        let both = OptName::Both(b'v', name.clone());
+        let both = OptName::Both(short(b'v'), name.clone());
         assert_ne!(both, OptName::Long(name));
     }
 
@@ -486,16 +642,34 @@ mod tests {
 
     #[test]
     fn row_constructor() {
-        let row = Row::new(vec![bytes("git"), bytes("status")], grammar(), false, true)
-            .expect("valid key");
+        let row = Row::new(
+            vec![bytes("git"), bytes("status")],
+            grammar(),
+            RunsCode::No,
+            Cwd::Changes,
+        )
+        .expect("valid key");
         assert_eq!(row.key(), [bytes("git"), bytes("status")]);
         assert_eq!(*row.grammar(), grammar());
         assert!(!row.runs_code());
         assert!(row.changes_cwd());
 
-        assert!(Row::new(Vec::new(), grammar(), false, false).is_none());
-        assert!(Row::new(vec![Vec::new()], grammar(), false, false).is_none());
-        assert!(Row::new(vec![bytes("git"), Vec::new()], grammar(), false, false).is_none());
+        let other =
+            Row::new(vec![bytes("sh")], grammar(), RunsCode::Yes, Cwd::Keeps).expect("valid key");
+        assert!(other.runs_code());
+        assert!(!other.changes_cwd());
+
+        assert!(Row::new(Vec::new(), grammar(), RunsCode::No, Cwd::Keeps).is_none());
+        assert!(Row::new(vec![Vec::new()], grammar(), RunsCode::No, Cwd::Keeps).is_none());
+        assert!(
+            Row::new(
+                vec![bytes("git"), Vec::new()],
+                grammar(),
+                RunsCode::No,
+                Cwd::Keeps
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -508,16 +682,16 @@ mod tests {
 
     #[test]
     fn grammar_and_catalog_accessors() {
-        let opt = Opt::new(OptName::Short(b'C'), OptValue::Takes(Role::Path));
-        assert_eq!(*opt.name(), OptName::Short(b'C'));
+        let opt = Opt::new(OptName::Short(short(b'C')), OptValue::Takes(Role::Path));
+        assert_eq!(*opt.name(), OptName::Short(short(b'C')));
         assert_eq!(opt.value(), OptValue::Takes(Role::Path));
 
         let g = Grammar::new(
             vec![opt.clone()],
             vec![Role::Inert],
             Some(Role::Path),
-            true,
-            false,
+            Order::Permute,
+            DashDash::Literal,
             PlusWords::Operand,
         );
         assert_eq!(g.opts(), [opt]);
@@ -527,7 +701,18 @@ mod tests {
         assert!(!g.dashdash());
         assert_eq!(g.plus_words(), PlusWords::Operand);
 
-        let row = Row::new(vec![bytes("ls")], g, false, false).expect("valid key");
+        let strict = Grammar::new(
+            Vec::new(),
+            Vec::new(),
+            None,
+            Order::Strict,
+            DashDash::Ends,
+            PlusWords::Reject,
+        );
+        assert!(!strict.permute());
+        assert!(strict.dashdash());
+
+        let row = Row::new(vec![bytes("ls")], g, RunsCode::No, Cwd::Keeps).expect("valid key");
         let global = Global::new(bytes("git"), grammar()).expect("valid head");
         let cat = Catalog::new(vec![row.clone()], vec![global.clone()]);
         assert_eq!(cat.rows(), [row]);

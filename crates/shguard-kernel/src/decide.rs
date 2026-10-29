@@ -333,9 +333,9 @@ pub fn targets_hit(targets: Seq<Pat>, ws: Seq<Word>, start: Int, slots: Seq<Slot
 pub fn name_overlaps(n: OptName, o: Opt) -> bool {
     pearlite! {
         match n {
-            OptName::Short(c) => has_short(o, c),
+            OptName::Short(c) => has_short(o, c.byte),
             OptName::Long(l) => has_long(o, l.bytes@),
-            OptName::Both(c, l) => has_short(o, c) || has_long(o, l.bytes@),
+            OptName::Both(c, l) => has_short(o, c.byte) || has_long(o, l.bytes@),
         }
     }
 }
@@ -1047,9 +1047,9 @@ fn targets_hit_p(targets: &[Pat], ws: &[Word], start: usize, slots: &[Slot]) -> 
 #[cfg_attr(creusot, ensures(result == name_overlaps(*n, *o)))]
 fn overlaps(n: &OptName, o: &Opt) -> bool {
     match n {
-        OptName::Short(c) => short_is(o, *c),
+        OptName::Short(c) => short_is(o, c.byte),
         OptName::Long(l) => long_is(o, &l.bytes),
-        OptName::Both(c, l) => short_is(o, *c) || long_is(o, &l.bytes),
+        OptName::Both(c, l) => short_is(o, c.byte) || long_is(o, &l.bytes),
     }
 }
 
@@ -1437,7 +1437,8 @@ mod tests {
     use super::{OptAlts, Verdict, decide};
     use crate::ast::{AndOr, Connector, Link, Opaque, Part, Pipeline, Script, Simple, Word};
     use crate::catalog::{
-        Catalog, Grammar, LongName, Opt, OptName, OptValue, PlusWords, Role, Row,
+        Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role,
+        Row, RunsCode, ShortName,
     };
     use crate::decision::Decision;
     use crate::rule::{Outcome, Pat, PatKind, Rule, RuleId, Scope};
@@ -1454,17 +1455,28 @@ mod tests {
         Opt::new(name, OptValue::Flag)
     }
 
-    fn long(s: &str) -> LongName {
-        LongName::new(bytes(s)).expect("non-empty")
+    fn short(b: u8) -> ShortName {
+        ShortName::new(b).expect("printable, not '-'")
     }
 
-    fn row(segs: &[&str], g: Grammar, changes_cwd: bool) -> Row {
-        Row::new(key(segs), g, false, changes_cwd).expect("valid key")
+    fn long(s: &str) -> LongName {
+        LongName::new(bytes(s)).expect("well-formed long name")
+    }
+
+    fn row(segs: &[&str], g: Grammar, cwd: Cwd) -> Row {
+        Row::new(key(segs), g, RunsCode::No, cwd).expect("valid key")
     }
 
     /// GNU style: options anywhere, `--` ends them, any number of operands.
     fn gnu(opts: Vec<Opt>, rest: Role) -> Grammar {
-        Grammar::new(opts, Vec::new(), Some(rest), true, true, PlusWords::Reject)
+        Grammar::new(
+            opts,
+            Vec::new(),
+            Some(rest),
+            Order::Permute,
+            DashDash::Ends,
+            PlusWords::Reject,
+        )
     }
 
     fn catalog() -> Catalog {
@@ -1473,21 +1485,24 @@ mod tests {
                 row(
                     &["ls"],
                     gnu(
-                        vec![flag(OptName::Short(b'l')), flag(OptName::Short(b'a'))],
+                        vec![
+                            flag(OptName::Short(short(b'l'))),
+                            flag(OptName::Short(short(b'a'))),
+                        ],
                         Role::Path,
                     ),
-                    false,
+                    Cwd::Keeps,
                 ),
                 row(
                     &["rm"],
                     gnu(
                         vec![
-                            flag(OptName::Both(b'r', long("recursive"))),
-                            flag(OptName::Short(b'f')),
+                            flag(OptName::Both(short(b'r'), long("recursive"))),
+                            flag(OptName::Short(short(b'f'))),
                         ],
                         Role::Path,
                     ),
-                    false,
+                    Cwd::Keeps,
                 ),
                 row(
                     &["cd"],
@@ -1495,18 +1510,25 @@ mod tests {
                         Vec::new(),
                         vec![Role::Path],
                         None,
-                        false,
-                        true,
+                        Order::Strict,
+                        DashDash::Ends,
                         PlusWords::Reject,
                     ),
-                    true,
+                    Cwd::Changes,
                 ),
-                row(&["echo"], gnu(Vec::new(), Role::Inert), false),
-                row(&["cat"], gnu(Vec::new(), Role::Path), false),
+                row(&["echo"], gnu(Vec::new(), Role::Inert), Cwd::Keeps),
+                row(&["cat"], gnu(Vec::new(), Role::Path), Cwd::Keeps),
                 row(
                     &["sh"],
-                    Grammar::new(Vec::new(), Vec::new(), None, false, true, PlusWords::Reject),
-                    false,
+                    Grammar::new(
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        Order::Strict,
+                        DashDash::Ends,
+                        PlusWords::Reject,
+                    ),
+                    Cwd::Keeps,
                 ),
             ],
             Vec::new(),
@@ -1527,7 +1549,7 @@ mod tests {
 
     fn rule(id: u32, scope: Scope, k: &str, targets: Vec<Pat>) -> Rule {
         let opts = match scope {
-            Scope::Simple => vec![one(OptName::Short(b'r'))],
+            Scope::Simple => vec![one(OptName::Short(short(b'r')))],
             Scope::PipeInto => Vec::new(),
         };
         Rule::new(RuleId(id), scope, key(&[k]), opts, targets, Outcome::Block).expect("valid")
@@ -1775,7 +1797,7 @@ mod tests {
         let home = Pat::new(vec![Part::Opaque(Opaque::Tilde)], PatKind::Exact).expect("non-empty");
         let r = [block_rule(
             "rm",
-            vec![one(OptName::Short(b'r'))],
+            vec![one(OptName::Short(short(b'r')))],
             vec![home],
         )];
         check_with(&r, rm_r_dashdash(tilde_word("/")), Decision::Block);
@@ -1787,7 +1809,11 @@ mod tests {
     fn patterns_are_normalized() {
         // `/etc/` Exact vs `rm -r /etc/` and `rm -r /etc`.
         let etc = Pat::new(vec![lit("/etc/")], PatKind::Exact).expect("non-empty");
-        let r = [block_rule("rm", vec![one(OptName::Short(b'r'))], vec![etc])];
+        let r = [block_rule(
+            "rm",
+            vec![one(OptName::Short(short(b'r')))],
+            vec![etc],
+        )];
         check_with(&r, seq(vec![cmd(&["rm", "-r", "/etc/"])]), Decision::Block);
         check_with(&r, seq(vec![cmd(&["rm", "-r", "/etc"])]), Decision::Block);
         check_with(&r, seq(vec![cmd(&["rm", "-r", "/etc/x"])]), Decision::Allow);
@@ -1799,7 +1825,7 @@ mod tests {
             RuleId(10),
             Scope::Simple,
             key(&["rm"]),
-            vec![one(OptName::Short(b'r'))],
+            vec![one(OptName::Short(short(b'r')))],
             Vec::new(),
             Outcome::Ask,
         )
@@ -1812,12 +1838,12 @@ mod tests {
     fn catalog_with_cp() -> Catalog {
         let mut cat = catalog();
         let t = Opt::new(
-            OptName::Both(b't', long("target-directory")),
+            OptName::Both(short(b't'), long("target-directory")),
             OptValue::Takes(Role::Path),
         );
         let o = Opt::new(OptName::Long(long("opt")), OptValue::Optional(Role::Path));
         cat.rows
-            .push(row(&["cp"], gnu(vec![t, o], Role::Path), false));
+            .push(row(&["cp"], gnu(vec![t, o], Role::Path), Cwd::Keeps));
         cat
     }
 
@@ -1918,22 +1944,22 @@ mod tests {
             &["rm"],
             gnu(
                 vec![
-                    flag(OptName::Short(b'r')),
-                    flag(OptName::Short(b'R')),
+                    flag(OptName::Short(short(b'r'))),
+                    flag(OptName::Short(short(b'R'))),
                     flag(OptName::Long(long("recursive"))),
-                    flag(OptName::Short(b'f')),
+                    flag(OptName::Short(short(b'f'))),
                 ],
                 Role::Path,
             ),
-            false,
+            Cwd::Keeps,
         );
         let cat = Catalog::new(vec![rm], Vec::new());
         let root = Pat::new(vec![lit("/")], PatKind::Exact).expect("non-empty");
         let r = [block_rule(
             "rm",
             vec![any_of(vec![
-                OptName::Short(b'r'),
-                OptName::Short(b'R'),
+                OptName::Short(short(b'r')),
+                OptName::Short(short(b'R')),
                 OptName::Long(long("recursive")),
             ])],
             vec![root],
@@ -1959,20 +1985,23 @@ mod tests {
             &["rm"],
             gnu(
                 vec![
-                    flag(OptName::Short(b'r')),
-                    flag(OptName::Short(b'R')),
-                    flag(OptName::Short(b'f')),
+                    flag(OptName::Short(short(b'r'))),
+                    flag(OptName::Short(short(b'R'))),
+                    flag(OptName::Short(short(b'f'))),
                 ],
                 Role::Path,
             ),
-            false,
+            Cwd::Keeps,
         );
         let cat = Catalog::new(vec![rm], Vec::new());
         let r = [block_rule(
             "rm",
             vec![
-                any_of(vec![OptName::Short(b'r'), OptName::Short(b'R')]),
-                one(OptName::Short(b'f')),
+                any_of(vec![
+                    OptName::Short(short(b'r')),
+                    OptName::Short(short(b'R')),
+                ]),
+                one(OptName::Short(short(b'f'))),
             ],
             Vec::new(),
         )];
@@ -2000,16 +2029,16 @@ mod tests {
     fn rules_see_the_first_covering_row() {
         let short_only = row(
             &["rm"],
-            gnu(vec![flag(OptName::Short(b'r'))], Role::Path),
-            false,
+            gnu(vec![flag(OptName::Short(short(b'r')))], Role::Path),
+            Cwd::Keeps,
         );
         let both = row(
             &["rm"],
             gnu(
-                vec![flag(OptName::Both(b'r', long("recursive")))],
+                vec![flag(OptName::Both(short(b'r'), long("recursive")))],
                 Role::Path,
             ),
-            false,
+            Cwd::Keeps,
         );
         // The rule names only `--recursive`, so it overlaps `both` alone.
         let r = [block_rule(
