@@ -83,6 +83,28 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"bash",
     b"sh",
     b"zsh",
+    // More shells and interpreters, and the GNU builds of the wrappers.
+    b"su",
+    b"dash",
+    b"ksh",
+    b"fish",
+    b"csh",
+    b"tcsh",
+    b"deno",
+    b"bun",
+    b"php",
+    b"lua",
+    b"osascript",
+    b"python2",
+    b"python3.11",
+    b"python3.12",
+    b"python3.13",
+    b"python3.14",
+    b"gsplit",
+    b"gtimeout",
+    b"genv",
+    b"gnohup",
+    b"gnice",
 ];
 
 /// One catalog file's name and text.

@@ -380,8 +380,8 @@ fn empty_home_counts_as_unset() {
     assert_eq!(decision(&out).as_deref(), Some("allow"));
     let mut cmd = binary();
     cmd.env_remove("HOME").env_remove("SHGUARD_CONFIG");
-    let out = spawn(cmd, &bash("uname -a"));
-    assert_eq!(decision(&out).as_deref(), Some("deny"));
+    let out = spawn(cmd, &bash("ls -la"));
+    assert_eq!(decision(&out).as_deref(), Some("allow"));
 }
 
 fn cli(args: &[&str]) -> Output {

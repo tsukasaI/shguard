@@ -320,3 +320,65 @@ fn unknown_heads_are_asked_even_when_they_wrap_a_blocked_command() {
         Decision::Ask,
     );
 }
+
+#[test]
+fn unnormalized_relative_leads_are_not_allowed() {
+    assert_not_allow(&[
+        "cp x .//.git/hooks/y",
+        "mkdir .//.git/hooks",
+        "rm -rf ././.git",
+        "cp x ././.claude/settings.json",
+        "rm -rf .//",
+        "rm -rf ././",
+    ]);
+}
+
+#[test]
+#[ignore = "kernel case-fold, follow-up"]
+fn case_variants_of_blocked_paths_are_not_allowed() {
+    assert_not_allow(&["rm -rf .GIT", "cp x .GIT/hooks/pre-commit"]);
+}
+
+#[test]
+fn recursive_readers_of_broad_roots_are_not_allowed() {
+    assert_not_allow(&[
+        "grep -r -- BEGIN ~",
+        "grep -rl -- x /",
+        "rg -- BEGIN ~",
+        "rg --files /Users/x",
+        "ls -laR -- ~",
+    ]);
+    assert_all(
+        &["grep -r foo src", "rg foo src", "ls -R src"],
+        Decision::Allow,
+    );
+}
+
+#[test]
+fn more_credential_files_are_asked() {
+    assert_not_allow(&[
+        "cat -- ~/.claude/.credentials.json",
+        "cat -- ~/.netrc",
+        "cat -- ~/.zsh_history",
+        "cat .env",
+        "cat .env.local",
+        "cat ./.env",
+    ]);
+    assert_all(&["cat README.md", "cat .envrc.example"], Decision::Allow);
+}
+
+#[test]
+fn project_local_code_running_configs_are_blocked() {
+    assert_all(
+        &[
+            "cp x .mcp.json",
+            "cp x .envrc",
+            "cp x .husky/pre-commit",
+            "cp x ./.githooks/pre-push",
+            "cp x lefthook.yaml",
+            "cp x ./.lefthook.yml",
+            "rm -rf .husky",
+        ],
+        Decision::Block,
+    );
+}

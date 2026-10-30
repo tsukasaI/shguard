@@ -280,6 +280,8 @@ value = { takes = "inert" }
 
 # Left out: -P -W -x (BSD only), -I -d (not on every BSD) and all long options
 # (BSD rm has none), so `rm --recursive` is Unknown and asked.
+# `rm -r link/` with a trailing slash recurses into a pre-existing symlinked
+# directory; P3 (repo contents are trusted to that extent).
 [[row]]
 key = ["rm"]
 source = "https://www.gnu.org/software/coreutils/manual/html_node/rm-invocation.html https://man.freebsd.org/cgi/man.cgi?query=rm"
@@ -637,9 +639,12 @@ targets = [
 
 # Block: device files, shell init and tool config, secrets and the project's
 # own hook and config directories. `/dev` is a byte prefix, so `/devops` is
-# blocked too. Relative leads are not normalized by the kernel, so `././.git`
-# is not matched (a path that reaches `.git` below another directory is
-# not either).
+# blocked too. Relative leads are not normalized by the kernel (#1087), so
+# `././.git` and `.//.git` are not matched here; the Ask rule below catches the
+# `./.` and `.//` spellings instead. A path that reaches `.git` below another
+# directory is not matched either.
+# macOS volumes are case-insensitive; `.GIT` evades these exact-case targets
+# until the kernel case-folds target matching (follow-up issue).
 [[rule]]
 id = "cp-block-sensitive-target"
 key = ["cp"]
@@ -658,6 +663,26 @@ targets = [
   { pat = ".cargo/", kind = "prefix" },
   { pat = "./.cargo", kind = "exact" },
   { pat = "./.cargo/", kind = "prefix" },
+  { pat = ".husky", kind = "exact" },
+  { pat = ".husky/", kind = "prefix" },
+  { pat = "./.husky", kind = "exact" },
+  { pat = "./.husky/", kind = "prefix" },
+  { pat = ".githooks", kind = "exact" },
+  { pat = ".githooks/", kind = "prefix" },
+  { pat = "./.githooks", kind = "exact" },
+  { pat = "./.githooks/", kind = "prefix" },
+  { pat = ".mcp.json", kind = "exact" },
+  { pat = "./.mcp.json", kind = "exact" },
+  { pat = ".envrc", kind = "exact" },
+  { pat = "./.envrc", kind = "exact" },
+  { pat = "lefthook.yml", kind = "exact" },
+  { pat = "./lefthook.yml", kind = "exact" },
+  { pat = "lefthook.yaml", kind = "exact" },
+  { pat = "./lefthook.yaml", kind = "exact" },
+  { pat = ".lefthook.yml", kind = "exact" },
+  { pat = "./.lefthook.yml", kind = "exact" },
+  { pat = ".lefthook.yaml", kind = "exact" },
+  { pat = "./.lefthook.yaml", kind = "exact" },
   { pat = "~/.bashrc", kind = "prefix" },
   { pat = "~/.bash_profile", kind = "prefix" },
   { pat = "~/.bash_login", kind = "prefix" },
@@ -697,6 +722,26 @@ targets = [
   { pat = ".cargo/", kind = "prefix" },
   { pat = "./.cargo", kind = "exact" },
   { pat = "./.cargo/", kind = "prefix" },
+  { pat = ".husky", kind = "exact" },
+  { pat = ".husky/", kind = "prefix" },
+  { pat = "./.husky", kind = "exact" },
+  { pat = "./.husky/", kind = "prefix" },
+  { pat = ".githooks", kind = "exact" },
+  { pat = ".githooks/", kind = "prefix" },
+  { pat = "./.githooks", kind = "exact" },
+  { pat = "./.githooks/", kind = "prefix" },
+  { pat = ".mcp.json", kind = "exact" },
+  { pat = "./.mcp.json", kind = "exact" },
+  { pat = ".envrc", kind = "exact" },
+  { pat = "./.envrc", kind = "exact" },
+  { pat = "lefthook.yml", kind = "exact" },
+  { pat = "./lefthook.yml", kind = "exact" },
+  { pat = "lefthook.yaml", kind = "exact" },
+  { pat = "./lefthook.yaml", kind = "exact" },
+  { pat = ".lefthook.yml", kind = "exact" },
+  { pat = "./.lefthook.yml", kind = "exact" },
+  { pat = ".lefthook.yaml", kind = "exact" },
+  { pat = "./.lefthook.yaml", kind = "exact" },
   { pat = "~/.bashrc", kind = "prefix" },
   { pat = "~/.bash_profile", kind = "prefix" },
   { pat = "~/.bash_login", kind = "prefix" },
@@ -736,6 +781,26 @@ targets = [
   { pat = ".cargo/", kind = "prefix" },
   { pat = "./.cargo", kind = "exact" },
   { pat = "./.cargo/", kind = "prefix" },
+  { pat = ".husky", kind = "exact" },
+  { pat = ".husky/", kind = "prefix" },
+  { pat = "./.husky", kind = "exact" },
+  { pat = "./.husky/", kind = "prefix" },
+  { pat = ".githooks", kind = "exact" },
+  { pat = ".githooks/", kind = "prefix" },
+  { pat = "./.githooks", kind = "exact" },
+  { pat = "./.githooks/", kind = "prefix" },
+  { pat = ".mcp.json", kind = "exact" },
+  { pat = "./.mcp.json", kind = "exact" },
+  { pat = ".envrc", kind = "exact" },
+  { pat = "./.envrc", kind = "exact" },
+  { pat = "lefthook.yml", kind = "exact" },
+  { pat = "./lefthook.yml", kind = "exact" },
+  { pat = "lefthook.yaml", kind = "exact" },
+  { pat = "./lefthook.yaml", kind = "exact" },
+  { pat = ".lefthook.yml", kind = "exact" },
+  { pat = "./.lefthook.yml", kind = "exact" },
+  { pat = ".lefthook.yaml", kind = "exact" },
+  { pat = "./.lefthook.yaml", kind = "exact" },
   { pat = "~/.bashrc", kind = "prefix" },
   { pat = "~/.bash_profile", kind = "prefix" },
   { pat = "~/.bash_login", kind = "prefix" },
@@ -775,6 +840,26 @@ targets = [
   { pat = ".cargo/", kind = "prefix" },
   { pat = "./.cargo", kind = "exact" },
   { pat = "./.cargo/", kind = "prefix" },
+  { pat = ".husky", kind = "exact" },
+  { pat = ".husky/", kind = "prefix" },
+  { pat = "./.husky", kind = "exact" },
+  { pat = "./.husky/", kind = "prefix" },
+  { pat = ".githooks", kind = "exact" },
+  { pat = ".githooks/", kind = "prefix" },
+  { pat = "./.githooks", kind = "exact" },
+  { pat = "./.githooks/", kind = "prefix" },
+  { pat = ".mcp.json", kind = "exact" },
+  { pat = "./.mcp.json", kind = "exact" },
+  { pat = ".envrc", kind = "exact" },
+  { pat = "./.envrc", kind = "exact" },
+  { pat = "lefthook.yml", kind = "exact" },
+  { pat = "./lefthook.yml", kind = "exact" },
+  { pat = "lefthook.yaml", kind = "exact" },
+  { pat = "./lefthook.yaml", kind = "exact" },
+  { pat = ".lefthook.yml", kind = "exact" },
+  { pat = "./.lefthook.yml", kind = "exact" },
+  { pat = ".lefthook.yaml", kind = "exact" },
+  { pat = "./.lefthook.yaml", kind = "exact" },
   { pat = "~/.bashrc", kind = "prefix" },
   { pat = "~/.bash_profile", kind = "prefix" },
   { pat = "~/.bash_login", kind = "prefix" },
@@ -808,6 +893,8 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
 ]
 
 [[rule]]
@@ -818,6 +905,8 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
 ]
 
 [[rule]]
@@ -828,6 +917,8 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
 ]
 
 [[rule]]
@@ -838,6 +929,8 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
 ]
 
 # Ask: credential directories under `~`. Reading other absolute paths is
@@ -852,6 +945,21 @@ targets = [
   { pat = "~/.gnupg", kind = "prefix" },
   { pat = "~/.aws", kind = "prefix" },
   { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -863,6 +971,21 @@ targets = [
   { pat = "~/.gnupg", kind = "prefix" },
   { pat = "~/.aws", kind = "prefix" },
   { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -874,6 +997,21 @@ targets = [
   { pat = "~/.gnupg", kind = "prefix" },
   { pat = "~/.aws", kind = "prefix" },
   { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -885,6 +1023,21 @@ targets = [
   { pat = "~/.gnupg", kind = "prefix" },
   { pat = "~/.aws", kind = "prefix" },
   { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -896,6 +1049,21 @@ targets = [
   { pat = "~/.gnupg", kind = "prefix" },
   { pat = "~/.aws", kind = "prefix" },
   { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -907,6 +1075,21 @@ targets = [
   { pat = "~/.gnupg", kind = "prefix" },
   { pat = "~/.aws", kind = "prefix" },
   { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -918,4 +1101,60 @@ targets = [
   { pat = "~/.gnupg", kind = "prefix" },
   { pat = "~/.aws", kind = "prefix" },
   { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
+]
+
+# Ask: a recursive search from the filesystem root or a home directory reads
+# every secret under it.
+[[rule]]
+id = "grep-ask-recursive-broad"
+key = ["grep"]
+outcome = "ask"
+opts = [["-r"]]
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "prefix" },
+  { pat = "/Users", kind = "prefix" },
+  { pat = "/home", kind = "prefix" },
+  { pat = "/root", kind = "prefix" },
+]
+
+# rg is always recursive.
+[[rule]]
+id = "rg-ask-broad"
+key = ["rg"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "prefix" },
+  { pat = "/Users", kind = "prefix" },
+  { pat = "/home", kind = "prefix" },
+  { pat = "/root", kind = "prefix" },
+]
+
+[[rule]]
+id = "ls-ask-recursive-broad"
+key = ["ls"]
+outcome = "ask"
+opts = [["-R"]]
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "prefix" },
+  { pat = "/Users", kind = "prefix" },
+  { pat = "/home", kind = "prefix" },
+  { pat = "/root", kind = "prefix" },
 ]
