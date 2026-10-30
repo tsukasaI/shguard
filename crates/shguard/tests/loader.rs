@@ -202,6 +202,15 @@ fn parent_option_spelling_child_must_take_code() {
         );
     }
     assert!(load_one(&format!("{}{child}", parent("{ takes = \"code\" }"))).is_ok());
+    let both_parent = row(
+        "\"python\"",
+        "[[row.opt]]\nshort = \"c\"\nlong = \"command\"\n",
+    );
+    assert!(
+        errors(&format!("{both_parent}{child}"))
+            .iter()
+            .any(|e| matches!(e, LoadError::ParentOptNotCode { .. }))
+    );
     let long_child = row("\"python\", \"--command\"", "runs_code = true");
     let long_parent = row("\"python\"", "[[row.opt]]\nlong = \"command\"\n");
     assert!(
@@ -274,8 +283,10 @@ fn malformed_or_unknown_rule_option() {
             "{unknown}"
         );
     }
-    let t = format!("{rm}{}", rule("opts = [[\"--recursive\"]]"));
-    assert!(load_one(&t).is_ok());
+    for ok in ["--recursive", "-r"] {
+        let t = format!("{rm}{}", rule(&format!("opts = [[\"{ok}\"]]")));
+        assert!(load_one(&t).is_ok(), "{ok}");
+    }
 }
 
 #[test]
@@ -316,16 +327,21 @@ fn all_errors_are_collected() {
 #[test]
 fn valid_catalog_equals_hand_built() {
     let text = format!(
-        r#"{}{}{}{}"#,
+        "{}{}{}{}{}{}",
         row(
             "\"ls\"",
-            "rest = \"path\"\n[[row.opt]]\nshort = \"l\"\n[[row.opt]]\nshort = \"n\"\nlong = \"lines\"\nvalue = { takes = \"inert\" }\n"
+            "rest = \"path\"\n[[row.opt]]\nshort = \"l\"\n[[row.opt]]\nshort = \"n\"\nlong = \"lines\"\nvalue = { takes = \"inert\" }\n[[row.opt]]\nlong = \"color\"\nvalue = { optional = \"path\" }\n"
         ),
         "[[row]]\nkey = [\"cd\"]\nsource = \"https://example.com/cd\"\norder = \"strict\"\ndashdash = \"literal\"\nplus_words = \"operand\"\npositionals = [\"path\"]\nchanges_cwd = true\n",
         row(
             "\"rm\"",
             "[[row.opt]]\nshort = \"r\"\n[[row.opt]]\nshort = \"R\"\n[[row.opt]]\nlong = \"recursive\"\n"
         ),
+        row(
+            "\"sh\"",
+            "[[row.opt]]\nshort = \"c\"\nvalue = { takes = \"code\" }\n"
+        ),
+        row("\"sh\", \"-c\"", "runs_code = true"),
         "[[rule]]\nid = \"rm-root\"\nscope = \"pipe_into\"\nkey = [\"rm\"]\nopts = [[\"-r\", \"-R\", \"--recursive\"]]\ntargets = [{ pat = \"/\", kind = \"exact\" }, { pat = \"~/x\", kind = \"prefix\" }, { pat = \"~\", kind = \"exact\" }]\noutcome = \"block\"\n",
     );
     let l = loaded(&text);
@@ -340,6 +356,7 @@ fn valid_catalog_equals_hand_built() {
                     OptName::Both(short(b'n'), long("lines")),
                     OptValue::Takes(Role::Inert),
                 ),
+                Opt::new(OptName::Long(long("color")), OptValue::Optional(Role::Path)),
             ],
             vec![],
             Some(Role::Path),
@@ -383,7 +400,38 @@ fn valid_catalog_equals_hand_built() {
         Cwd::Keeps,
     )
     .unwrap();
-    assert_eq!(l.catalog, Catalog::new(vec![ls, cd, rm], vec![]));
+    let sh = Row::new(
+        vec![b"sh".to_vec()],
+        Grammar::new(
+            vec![Opt::new(
+                OptName::Short(short(b'c')),
+                OptValue::Takes(Role::Code),
+            )],
+            vec![],
+            None,
+            Order::Permute,
+            DashDash::Ends,
+            PlusWords::Reject,
+        ),
+        RunsCode::No,
+        Cwd::Keeps,
+    )
+    .unwrap();
+    let sh_c = Row::new(
+        vec![b"sh".to_vec(), b"-c".to_vec()],
+        Grammar::new(
+            vec![],
+            vec![],
+            None,
+            Order::Permute,
+            DashDash::Ends,
+            PlusWords::Reject,
+        ),
+        RunsCode::Yes,
+        Cwd::Keeps,
+    )
+    .unwrap();
+    assert_eq!(l.catalog, Catalog::new(vec![ls, cd, rm, sh, sh_c], vec![]));
     let expected = Rule::new(
         RuleId(0),
         Scope::PipeInto,

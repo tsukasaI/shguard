@@ -322,21 +322,21 @@ fn check_rows(entries: &[Entry], errs: &mut Vec<LoadError>) {
             });
         } else {
             first.insert(e.key.as_slice(), e.file.as_str());
+            check_code_child(e, entries, errs);
         }
         if let Some((_, parent)) = e.key.split_last()
             && !parent.is_empty()
-            && !first_has(entries, parent)
+            && !has_key(entries, parent)
         {
             errs.push(LoadError::OrphanRow {
                 file: e.file.clone(),
                 row: e.label.clone(),
             });
         }
-        check_code_child(e, entries, errs);
     }
 }
 
-fn first_has(entries: &[Entry], key: &[Vec<u8>]) -> bool {
+fn has_key(entries: &[Entry], key: &[Vec<u8>]) -> bool {
     entries.iter().any(|e| e.key == key)
 }
 
