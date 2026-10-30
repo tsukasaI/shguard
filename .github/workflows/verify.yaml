@@ -38,8 +38,6 @@ jobs:
       contents: read
       # Read the why3find artifact of main's last green push run (#1052).
       actions: read
-    env:
-      WHY3FIND_ARTIFACT: why3find-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'why3find.json', 'spikes/lattice/why3find.json') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -74,10 +72,16 @@ jobs:
       # workflow that runs in main's ref context (pull_request_target,
       # workflow_run, schedule). A missing artifact only means proving from
       # scratch.
+      # The artifact name carries the solver and prover setup, so results
+      # from another flake or why3find.json are never mixed in. A job-level
+      # `env` cannot use `runner` or `hashFiles`, so a step exports it.
       - name: Restore why3find results from main
         env:
           GH_TOKEN: ${{ github.token }}
+          ARTIFACT: why3find-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'why3find.json', 'spikes/lattice/why3find.json') }}
         run: |
+          echo "WHY3FIND_ARTIFACT=$ARTIFACT" >> "$GITHUB_ENV"
+          WHY3FIND_ARTIFACT=$ARTIFACT
           run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow verify.yaml --branch main --event push --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
           if [ -n "$run_id" ] && gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$WHY3FIND_ARTIFACT" --dir .; then
             echo "restored $WHY3FIND_ARTIFACT from run $run_id"
