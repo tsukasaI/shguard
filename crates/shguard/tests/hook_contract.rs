@@ -1,8 +1,9 @@
 //! The hook contract, through the real binary: `HOME` and `SHGUARD_CONFIG`
 //! point at a temp directory, so the user's own config is never read.
 //!
-//! The embedded catalog is empty until M14, so a test that needs a covered
-//! command supplies rows and rules through the config.
+//! The embedded core catalog is merged with every config, so the rows a test
+//! adds through the config use tool names the embedded catalog does not have
+//! (`mytool`, `mydel`).
 
 use std::fmt::Debug;
 use std::io::Write;
@@ -25,7 +26,7 @@ enum Config<'a> {
 
 const ROWS: &str = r#"
 [[row]]
-key = ["ls"]
+key = ["mytool"]
 source = "https://example.com"
 order = "permute"
 dashdash = "ends"
@@ -36,7 +37,7 @@ short = "l"
 short = "a"
 
 [[row]]
-key = ["rm"]
+key = ["mydel"]
 source = "https://example.com"
 order = "permute"
 dashdash = "ends"
@@ -200,12 +201,12 @@ fn unsupported_syntax_is_an_ask() {
 
 #[test]
 fn covered_command_is_allowed() {
-    let out = run(&bash("ls -la"), &Config::File(ROWS));
+    let out = run(&bash("mytool -la"), &Config::File(ROWS));
     assert_eq!(decision(&out).as_deref(), Some("allow"));
     assert!(!reason(&out).contains("safe"));
     // ask_outcome does not touch an Allow.
     let out = run(
-        &bash("ls -la"),
+        &bash("mytool -la"),
         &Config::File(&format!("ask_outcome = \"ask\"\n{ROWS}")),
     );
     assert_eq!(decision(&out).as_deref(), Some("allow"));
@@ -221,27 +222,27 @@ fn uncovered_command_goes_through_ask_outcome() {
 fn block_rule_denies_even_with_ask_outcome_ask() {
     let rule = r#"
 [[rule]]
-id = "rm-root"
-key = ["rm"]
+id = "mydel-root"
+key = ["mydel"]
 outcome = "block"
 targets = [{ pat = "/", kind = "exact" }]
 "#;
     for ask in ["deny", "ask"] {
         let cfg = format!("ask_outcome = \"{ask}\"\n{ROWS}{rule}");
-        let out = run(&bash("rm -rf /"), &Config::File(&cfg));
+        let out = run(&bash("mydel -rf /"), &Config::File(&cfg));
         assert_eq!(decision(&out).as_deref(), Some("deny"), "{ask}");
-        let out = run(&bash("rm -rf /tmp/x"), &Config::File(&cfg));
+        let out = run(&bash("mydel -rf /tmp/x"), &Config::File(&cfg));
         assert_eq!(decision(&out).as_deref(), Some("allow"), "{ask}");
     }
 }
 
 #[test]
 fn ask_rule_is_an_ask() {
-    let rule = "\n[[rule]]\nid = \"distrust-ls\"\nkey = [\"ls\"]\noutcome = \"ask\"\n";
-    let by_default = run(&bash("ls -la"), &Config::File(&format!("{ROWS}{rule}")));
+    let rule = "\n[[rule]]\nid = \"distrust-mytool\"\nkey = [\"mytool\"]\noutcome = \"ask\"\n";
+    let by_default = run(&bash("mytool -la"), &Config::File(&format!("{ROWS}{rule}")));
     assert_eq!(decision(&by_default).as_deref(), Some("deny"));
     let with_ask = run(
-        &bash("ls -la"),
+        &bash("mytool -la"),
         &Config::File(&format!("ask_outcome = \"ask\"\n{ROWS}{rule}")),
     );
     assert_eq!(decision(&with_ask).as_deref(), Some("ask"));
@@ -290,9 +291,21 @@ fn option_like_user_row_cannot_unblock_rm_root() {
 
 #[test]
 fn no_config_at_the_default_path_means_defaults() {
-    let out = run(&bash("ls -la"), &Config::None);
-    // The embedded catalog is empty, so nothing is covered.
-    assert_eq!(decision(&out).as_deref(), Some("deny"));
+    // The embedded core catalog alone, with `ask_outcome = "deny"`.
+    let table = [
+        ("ls -la", Some("allow")),
+        ("rm -rf /", Some("deny")),
+        ("unknowntool rm -rf /", Some("deny")),
+    ];
+    for (cmd, want) in table {
+        let out = run(&bash(cmd), &Config::None);
+        assert_eq!(decision(&out).as_deref(), want, "{cmd}");
+    }
+    let out = run(
+        br#"{"tool_name":"Read","tool_input":{"file_path":"/x"}}"#,
+        &Config::None,
+    );
+    assert_eq!(decision(&out), None);
 }
 
 fn at_default_path(home: &Path) -> std::path::PathBuf {
@@ -360,14 +373,15 @@ fn permission_denied_default_path_is_a_load_error() {
 
 #[test]
 fn empty_home_counts_as_unset() {
+    // No config is read, so only the embedded catalog applies.
     let mut cmd = binary();
     cmd.env("HOME", "").env_remove("SHGUARD_CONFIG");
     let out = spawn(cmd, &bash("ls -la"));
-    assert_eq!(decision(&out).as_deref(), Some("deny"));
+    assert_eq!(decision(&out).as_deref(), Some("allow"));
     let mut cmd = binary();
     cmd.env_remove("HOME").env_remove("SHGUARD_CONFIG");
     let out = spawn(cmd, &bash("ls -la"));
-    assert_eq!(decision(&out).as_deref(), Some("deny"));
+    assert_eq!(decision(&out).as_deref(), Some("allow"));
 }
 
 fn cli(args: &[&str]) -> Output {

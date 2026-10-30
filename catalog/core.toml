@@ -1,2 +1,1160 @@
-# The embedded default catalog. M13 ships it empty: the rows and rules arrive
-# in M14, so until then every Bash command is Unknown.
+# The embedded core catalog: shell builtins and read-mostly tools.
+#
+# Every row lists only options that mean the same thing, with the same value
+# shape, on BSD/macOS and GNU, so the grammar matches whichever the host has
+# (rg and tokei have one implementation). coreutils and grep rows are
+# `strict`: BSD getopt stops at the first operand, so an option after an
+# operand is Unknown here. A command a row covers is Allow unless a rule
+# below raises it; Allow means the parser and catalog read the whole
+# command, nothing more. An option a row lacks makes the command Unknown.
+#
+# Writing rows (cp, rm, mkdir, uniq) are Allowed only for relative paths: an
+# absolute or `~` path is an Ask, and a few targets are a Block.
+
+# The shell builtin. `-e` and `-@` are left out (bash only / not everywhere).
+# `cd` with no operand goes to $HOME and is a plain Allow here.
+[[row]]
+key = ["cd"]
+source = "https://www.gnu.org/software/bash/manual/html_node/Bourne-Shell-Builtins.html https://man.freebsd.org/cgi/man.cgi?query=cd"
+order = "strict"
+dashdash = "ends"
+positionals = ["path"]
+changes_cwd = true
+[[row.opt]]
+short = "L"
+[[row.opt]]
+short = "P"
+
+[[row]]
+key = ["pwd"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/pwd-invocation.html https://man.freebsd.org/cgi/man.cgi?query=pwd"
+order = "strict"
+dashdash = "ends"
+positionals = []
+[[row.opt]]
+short = "L"
+[[row.opt]]
+short = "P"
+
+# BSD /bin/echo knows only -n; -e and -E are kept because the shell builtins
+# read them. This only changes the printed text. `--` is text, not an end marker.
+[[row]]
+key = ["echo"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/echo-invocation.html https://man.freebsd.org/cgi/man.cgi?query=echo"
+order = "strict"
+dashdash = "literal"
+plus_words = "operand"
+rest = "inert"
+[[row.opt]]
+short = "n"
+[[row.opt]]
+short = "e"
+[[row.opt]]
+short = "E"
+
+# Left out because the meaning differs between BSD and GNU: -B -b -D -f -G -g
+# -I -o -T -U -v -w -X -Z. GNU long options do not exist on BSD.
+[[row]]
+key = ["ls"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/ls-invocation.html https://man.freebsd.org/cgi/man.cgi?query=ls"
+order = "strict"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "1"
+[[row.opt]]
+short = "A"
+[[row.opt]]
+short = "a"
+[[row.opt]]
+short = "C"
+[[row.opt]]
+short = "c"
+[[row.opt]]
+short = "d"
+[[row.opt]]
+short = "F"
+[[row.opt]]
+short = "H"
+[[row.opt]]
+short = "h"
+[[row.opt]]
+short = "i"
+[[row.opt]]
+short = "k"
+[[row.opt]]
+short = "L"
+[[row.opt]]
+short = "l"
+[[row.opt]]
+short = "m"
+[[row.opt]]
+short = "n"
+[[row.opt]]
+short = "p"
+[[row.opt]]
+short = "q"
+[[row.opt]]
+short = "R"
+[[row.opt]]
+short = "r"
+[[row.opt]]
+short = "S"
+[[row.opt]]
+short = "s"
+[[row.opt]]
+short = "t"
+[[row.opt]]
+short = "u"
+[[row.opt]]
+short = "x"
+
+# Left out: -l (BSD lock only), -A -E -T (GNU only).
+[[row]]
+key = ["cat"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/cat-invocation.html https://man.freebsd.org/cgi/man.cgi?query=cat"
+order = "strict"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "b"
+[[row.opt]]
+short = "e"
+[[row.opt]]
+short = "n"
+[[row.opt]]
+short = "s"
+[[row.opt]]
+short = "t"
+[[row.opt]]
+short = "u"
+[[row.opt]]
+short = "v"
+
+# Left out: -q -v (GNU only) and the obsolete `-5` form.
+[[row]]
+key = ["head"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/head-invocation.html https://man.freebsd.org/cgi/man.cgi?query=head"
+order = "strict"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "n"
+value = { takes = "inert" }
+[[row.opt]]
+short = "c"
+value = { takes = "inert" }
+
+# Left out: -f -F (never ends), -r -b (BSD only), -v (GNU only) and the
+# obsolete `+5` and `-5` forms.
+[[row]]
+key = ["tail"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/tail-invocation.html https://man.freebsd.org/cgi/man.cgi?query=tail"
+order = "strict"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "n"
+value = { takes = "inert" }
+[[row.opt]]
+short = "c"
+value = { takes = "inert" }
+[[row.opt]]
+short = "q"
+
+# Left out: -L (not on every BSD) and GNU --files0-from.
+[[row]]
+key = ["wc"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/wc-invocation.html https://man.freebsd.org/cgi/man.cgi?query=wc"
+order = "strict"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "c"
+[[row.opt]]
+short = "l"
+[[row.opt]]
+short = "m"
+[[row.opt]]
+short = "w"
+
+# Left out: -t (GNU only) and -u (BSD only). tr reads stdin only.
+[[row]]
+key = ["tr"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/tr-invocation.html https://man.freebsd.org/cgi/man.cgi?query=tr"
+order = "strict"
+dashdash = "ends"
+plus_words = "operand"
+rest = "inert"
+[[row.opt]]
+short = "C"
+[[row.opt]]
+short = "c"
+[[row.opt]]
+short = "d"
+[[row.opt]]
+short = "s"
+
+# Left out: -o (writes a file), -T (temp dir), -S, -z, -R, --compress-program
+# and every other long option. The old `+1` key syntax is rejected.
+[[row]]
+key = ["sort"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/sort-invocation.html https://man.freebsd.org/cgi/man.cgi?query=sort"
+order = "strict"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "b"
+[[row.opt]]
+short = "c"
+[[row.opt]]
+short = "C"
+[[row.opt]]
+short = "d"
+[[row.opt]]
+short = "f"
+[[row.opt]]
+short = "g"
+[[row.opt]]
+short = "h"
+[[row.opt]]
+short = "i"
+[[row.opt]]
+short = "M"
+[[row.opt]]
+short = "m"
+[[row.opt]]
+short = "n"
+[[row.opt]]
+short = "r"
+[[row.opt]]
+short = "s"
+[[row.opt]]
+short = "u"
+[[row.opt]]
+short = "V"
+[[row.opt]]
+short = "k"
+value = { takes = "inert" }
+[[row.opt]]
+short = "t"
+value = { takes = "inert" }
+
+# The second operand is an OUTPUT file, so both operands are paths and the
+# write rules below cover this row. Left out: -D -w -z (not on both).
+[[row]]
+key = ["uniq"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/uniq-invocation.html https://man.freebsd.org/cgi/man.cgi?query=uniq"
+order = "strict"
+dashdash = "ends"
+positionals = ["path", "path"]
+[[row.opt]]
+short = "c"
+[[row.opt]]
+short = "d"
+[[row.opt]]
+short = "i"
+[[row.opt]]
+short = "u"
+[[row.opt]]
+short = "f"
+value = { takes = "inert" }
+[[row.opt]]
+short = "s"
+value = { takes = "inert" }
+
+# Left out: -Z and --context (GNU only).
+[[row]]
+key = ["mkdir"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/mkdir-invocation.html https://man.freebsd.org/cgi/man.cgi?query=mkdir"
+order = "strict"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "p"
+[[row.opt]]
+short = "v"
+[[row.opt]]
+short = "m"
+value = { takes = "inert" }
+
+# Left out: -P -W -x (BSD only), -I -d (not on every BSD) and all long options
+# (BSD rm has none), so `rm --recursive` is Unknown and asked.
+# `rm -r link/` with a trailing slash recurses into a pre-existing symlinked
+# directory; P3 (repo contents are trusted to that extent).
+[[row]]
+key = ["rm"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/rm-invocation.html https://man.freebsd.org/cgi/man.cgi?query=rm"
+order = "strict"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "f"
+[[row.opt]]
+short = "i"
+[[row.opt]]
+short = "r"
+[[row.opt]]
+short = "R"
+[[row.opt]]
+short = "v"
+
+# Left out: -r (GNU/BSD differ on symlinks), -a -l -s -t -T (GNU only or
+# different meaning), so `cp -t DIR` and `cp --target-directory=DIR` are Unknown
+# and asked.
+[[row]]
+key = ["cp"]
+source = "https://www.gnu.org/software/coreutils/manual/html_node/cp-invocation.html https://man.freebsd.org/cgi/man.cgi?query=cp"
+order = "strict"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "R"
+[[row.opt]]
+short = "H"
+[[row.opt]]
+short = "L"
+[[row.opt]]
+short = "P"
+[[row.opt]]
+short = "f"
+[[row.opt]]
+short = "i"
+[[row.opt]]
+short = "n"
+[[row.opt]]
+short = "p"
+[[row.opt]]
+short = "v"
+
+# The first operand is the pattern unless -e or -f is given, in which case it is
+# a file. The grammar cannot tell, so it is read as a path: a pattern that looks
+# like `/x`, `~` or `a/../b` is asked, and a file after -e is still checked.
+# Left out: -C (BSD takes an optional count, GNU a required one), -z -P -Z -d
+# -D -R -U -T and all long options.
+[[row]]
+key = ["grep"]
+source = "https://www.gnu.org/software/grep/manual/grep.html https://man.freebsd.org/cgi/man.cgi?query=grep"
+order = "strict"
+dashdash = "ends"
+plus_words = "operand"
+positionals = ["path"]
+rest = "path"
+[[row.opt]]
+short = "E"
+[[row.opt]]
+short = "F"
+[[row.opt]]
+short = "G"
+[[row.opt]]
+short = "i"
+[[row.opt]]
+short = "v"
+[[row.opt]]
+short = "w"
+[[row.opt]]
+short = "x"
+[[row.opt]]
+short = "c"
+[[row.opt]]
+short = "l"
+[[row.opt]]
+short = "L"
+[[row.opt]]
+short = "n"
+[[row.opt]]
+short = "h"
+[[row.opt]]
+short = "H"
+[[row.opt]]
+short = "o"
+[[row.opt]]
+short = "q"
+[[row.opt]]
+short = "s"
+[[row.opt]]
+short = "r"
+[[row.opt]]
+short = "a"
+[[row.opt]]
+short = "I"
+[[row.opt]]
+short = "b"
+[[row.opt]]
+short = "A"
+value = { takes = "inert" }
+[[row.opt]]
+short = "B"
+value = { takes = "inert" }
+[[row.opt]]
+short = "e"
+value = { takes = "inert" }
+[[row.opt]]
+short = "m"
+value = { takes = "inert" }
+[[row.opt]]
+short = "f"
+value = { takes = "path" }
+
+# The first operand is the pattern, or a file after -e/-f/--files; it is read as
+# a path for the same reason as in the grep row. Left out: --pre --pre-glob -z
+# --search-zip --hostname-bin (they run a program), -r/--replace, -L/--follow,
+# -u and every config or colour-spec option that is not listed.
+[[row]]
+key = ["rg"]
+source = "https://github.com/BurntSushi/ripgrep/blob/master/GUIDE.md https://github.com/BurntSushi/ripgrep/blob/master/crates/core/flags/defs.rs"
+order = "permute"
+dashdash = "ends"
+plus_words = "operand"
+positionals = ["path"]
+rest = "path"
+[[row.opt]]
+short = "i"
+long = "ignore-case"
+[[row.opt]]
+short = "s"
+long = "case-sensitive"
+[[row.opt]]
+short = "S"
+long = "smart-case"
+[[row.opt]]
+short = "F"
+long = "fixed-strings"
+[[row.opt]]
+short = "w"
+long = "word-regexp"
+[[row.opt]]
+short = "x"
+long = "line-regexp"
+[[row.opt]]
+short = "v"
+long = "invert-match"
+[[row.opt]]
+short = "c"
+long = "count"
+[[row.opt]]
+short = "l"
+long = "files-with-matches"
+[[row.opt]]
+long = "files-without-match"
+[[row.opt]]
+short = "n"
+long = "line-number"
+[[row.opt]]
+short = "N"
+long = "no-line-number"
+[[row.opt]]
+short = "H"
+long = "with-filename"
+[[row.opt]]
+short = "I"
+long = "no-filename"
+[[row.opt]]
+short = "o"
+long = "only-matching"
+[[row.opt]]
+short = "q"
+long = "quiet"
+[[row.opt]]
+long = "count-matches"
+[[row.opt]]
+long = "heading"
+[[row.opt]]
+long = "no-heading"
+[[row.opt]]
+long = "column"
+[[row.opt]]
+long = "vimgrep"
+[[row.opt]]
+long = "files"
+[[row.opt]]
+long = "hidden"
+[[row.opt]]
+long = "no-ignore"
+[[row.opt]]
+short = "U"
+long = "multiline"
+[[row.opt]]
+short = "a"
+long = "text"
+[[row.opt]]
+long = "trim"
+[[row.opt]]
+long = "stats"
+[[row.opt]]
+long = "json"
+[[row.opt]]
+long = "no-messages"
+[[row.opt]]
+long = "type-list"
+[[row.opt]]
+long = "no-config"
+[[row.opt]]
+short = "h"
+long = "help"
+[[row.opt]]
+short = "V"
+long = "version"
+[[row.opt]]
+short = "A"
+long = "after-context"
+value = { takes = "inert" }
+[[row.opt]]
+short = "B"
+long = "before-context"
+value = { takes = "inert" }
+[[row.opt]]
+short = "C"
+long = "context"
+value = { takes = "inert" }
+[[row.opt]]
+short = "e"
+long = "regexp"
+value = { takes = "inert" }
+[[row.opt]]
+short = "g"
+long = "glob"
+value = { takes = "inert" }
+[[row.opt]]
+short = "t"
+long = "type"
+value = { takes = "inert" }
+[[row.opt]]
+short = "T"
+long = "type-not"
+value = { takes = "inert" }
+[[row.opt]]
+short = "m"
+long = "max-count"
+value = { takes = "inert" }
+[[row.opt]]
+short = "d"
+long = "max-depth"
+value = { takes = "inert" }
+[[row.opt]]
+short = "j"
+long = "threads"
+value = { takes = "inert" }
+[[row.opt]]
+long = "color"
+value = { takes = "inert" }
+[[row.opt]]
+long = "sort"
+value = { takes = "inert" }
+[[row.opt]]
+short = "f"
+long = "file"
+value = { takes = "path" }
+[[row.opt]]
+long = "ignore-file"
+value = { takes = "path" }
+
+# Left out: -i/--input (reads a stats file), -o/--output, --streaming, -v.
+[[row]]
+key = ["tokei"]
+source = "https://github.com/XAMPPRocky/tokei#readme https://github.com/XAMPPRocky/tokei/blob/master/src/cli.rs"
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "f"
+long = "files"
+[[row.opt]]
+short = "l"
+long = "languages"
+[[row.opt]]
+short = "C"
+long = "compact"
+[[row.opt]]
+long = "hidden"
+[[row.opt]]
+long = "no-ignore"
+[[row.opt]]
+long = "no-ignore-parent"
+[[row.opt]]
+long = "no-ignore-dot"
+[[row.opt]]
+long = "no-ignore-vcs"
+[[row.opt]]
+short = "h"
+long = "help"
+[[row.opt]]
+short = "V"
+long = "version"
+[[row.opt]]
+short = "c"
+long = "columns"
+value = { takes = "inert" }
+[[row.opt]]
+short = "e"
+long = "exclude"
+value = { takes = "inert" }
+[[row.opt]]
+short = "s"
+long = "sort"
+value = { takes = "inert" }
+[[row.opt]]
+short = "r"
+long = "rsort"
+value = { takes = "inert" }
+[[row.opt]]
+short = "t"
+long = "types"
+value = { takes = "inert" }
+[[row.opt]]
+short = "n"
+long = "num-format"
+value = { takes = "inert" }
+
+# Deleting a top-level directory recursively. The data directories (/Users,
+# /home, /var, /opt, /private, /Library, /Applications) match only themselves,
+# so `rm -r /var/tmp/x` is an Ask (absolute path), not a Block. A `~` word
+# matches `~` and `~/` only here; anything deeper is the absolute/home Ask.
+# `.` and `./` are the working directory itself.
+[[rule]]
+id = "rm-recursive-dangerous-target"
+key = ["rm"]
+outcome = "block"
+opts = [["-r", "-R"]]
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "exact" },
+  { pat = ".", kind = "exact" },
+  { pat = "./", kind = "exact" },
+  { pat = "./.", kind = "exact" },
+  { pat = "/Users", kind = "exact" },
+  { pat = "/home", kind = "exact" },
+  { pat = "/var", kind = "exact" },
+  { pat = "/opt", kind = "exact" },
+  { pat = "/private", kind = "exact" },
+  { pat = "/Library", kind = "exact" },
+  { pat = "/Applications", kind = "exact" },
+  { pat = "/etc", kind = "prefix" },
+  { pat = "/usr", kind = "prefix" },
+  { pat = "/bin", kind = "prefix" },
+  { pat = "/sbin", kind = "prefix" },
+  { pat = "/lib", kind = "prefix" },
+  { pat = "/System", kind = "prefix" },
+]
+
+# Block: device files, shell init and tool config, secrets and the project's
+# own hook and config directories. `/dev` is a byte prefix, so `/devops` is
+# blocked too. Relative leads are not normalized by the kernel (#1087), so
+# `././.git` and `.//.git` are not matched here; the Ask rule below catches the
+# `./.` and `.//` spellings instead. A path that reaches `.git` below another
+# directory is not matched either.
+# macOS volumes are case-insensitive; `.GIT` evades these exact-case targets
+# until the kernel case-folds target matching (#1087, M7f).
+[[rule]]
+id = "cp-block-sensitive-target"
+key = ["cp"]
+outcome = "block"
+targets = [
+  { pat = "/dev", kind = "prefix" },
+  { pat = ".claude", kind = "exact" },
+  { pat = ".claude/", kind = "prefix" },
+  { pat = "./.claude", kind = "exact" },
+  { pat = "./.claude/", kind = "prefix" },
+  { pat = ".git", kind = "exact" },
+  { pat = ".git/", kind = "prefix" },
+  { pat = "./.git", kind = "exact" },
+  { pat = "./.git/", kind = "prefix" },
+  { pat = ".cargo", kind = "exact" },
+  { pat = ".cargo/", kind = "prefix" },
+  { pat = "./.cargo", kind = "exact" },
+  { pat = "./.cargo/", kind = "prefix" },
+  { pat = ".husky", kind = "exact" },
+  { pat = ".husky/", kind = "prefix" },
+  { pat = "./.husky", kind = "exact" },
+  { pat = "./.husky/", kind = "prefix" },
+  { pat = ".githooks", kind = "exact" },
+  { pat = ".githooks/", kind = "prefix" },
+  { pat = "./.githooks", kind = "exact" },
+  { pat = "./.githooks/", kind = "prefix" },
+  { pat = ".mcp.json", kind = "exact" },
+  { pat = "./.mcp.json", kind = "exact" },
+  { pat = ".envrc", kind = "exact" },
+  { pat = "./.envrc", kind = "exact" },
+  { pat = "lefthook.yml", kind = "exact" },
+  { pat = "./lefthook.yml", kind = "exact" },
+  { pat = "lefthook.yaml", kind = "exact" },
+  { pat = "./lefthook.yaml", kind = "exact" },
+  { pat = ".lefthook.yml", kind = "exact" },
+  { pat = "./.lefthook.yml", kind = "exact" },
+  { pat = ".lefthook.yaml", kind = "exact" },
+  { pat = "./.lefthook.yaml", kind = "exact" },
+  { pat = "~/.bashrc", kind = "prefix" },
+  { pat = "~/.bash_profile", kind = "prefix" },
+  { pat = "~/.bash_login", kind = "prefix" },
+  { pat = "~/.profile", kind = "prefix" },
+  { pat = "~/.zshrc", kind = "prefix" },
+  { pat = "~/.zshenv", kind = "prefix" },
+  { pat = "~/.zprofile", kind = "prefix" },
+  { pat = "~/.zlogin", kind = "prefix" },
+  { pat = "~/.config/fish", kind = "prefix" },
+  { pat = "~/.config/shguard", kind = "prefix" },
+  { pat = "~/.config/git", kind = "prefix" },
+  { pat = "~/.config/autostart", kind = "prefix" },
+  { pat = "~/.config/systemd", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.gitconfig", kind = "prefix" },
+  { pat = "~/.cargo", kind = "prefix" },
+  { pat = "~/Library/LaunchAgents", kind = "prefix" },
+]
+
+[[rule]]
+id = "rm-block-sensitive-target"
+key = ["rm"]
+outcome = "block"
+targets = [
+  { pat = "/dev", kind = "prefix" },
+  { pat = ".claude", kind = "exact" },
+  { pat = ".claude/", kind = "prefix" },
+  { pat = "./.claude", kind = "exact" },
+  { pat = "./.claude/", kind = "prefix" },
+  { pat = ".git", kind = "exact" },
+  { pat = ".git/", kind = "prefix" },
+  { pat = "./.git", kind = "exact" },
+  { pat = "./.git/", kind = "prefix" },
+  { pat = ".cargo", kind = "exact" },
+  { pat = ".cargo/", kind = "prefix" },
+  { pat = "./.cargo", kind = "exact" },
+  { pat = "./.cargo/", kind = "prefix" },
+  { pat = ".husky", kind = "exact" },
+  { pat = ".husky/", kind = "prefix" },
+  { pat = "./.husky", kind = "exact" },
+  { pat = "./.husky/", kind = "prefix" },
+  { pat = ".githooks", kind = "exact" },
+  { pat = ".githooks/", kind = "prefix" },
+  { pat = "./.githooks", kind = "exact" },
+  { pat = "./.githooks/", kind = "prefix" },
+  { pat = ".mcp.json", kind = "exact" },
+  { pat = "./.mcp.json", kind = "exact" },
+  { pat = ".envrc", kind = "exact" },
+  { pat = "./.envrc", kind = "exact" },
+  { pat = "lefthook.yml", kind = "exact" },
+  { pat = "./lefthook.yml", kind = "exact" },
+  { pat = "lefthook.yaml", kind = "exact" },
+  { pat = "./lefthook.yaml", kind = "exact" },
+  { pat = ".lefthook.yml", kind = "exact" },
+  { pat = "./.lefthook.yml", kind = "exact" },
+  { pat = ".lefthook.yaml", kind = "exact" },
+  { pat = "./.lefthook.yaml", kind = "exact" },
+  { pat = "~/.bashrc", kind = "prefix" },
+  { pat = "~/.bash_profile", kind = "prefix" },
+  { pat = "~/.bash_login", kind = "prefix" },
+  { pat = "~/.profile", kind = "prefix" },
+  { pat = "~/.zshrc", kind = "prefix" },
+  { pat = "~/.zshenv", kind = "prefix" },
+  { pat = "~/.zprofile", kind = "prefix" },
+  { pat = "~/.zlogin", kind = "prefix" },
+  { pat = "~/.config/fish", kind = "prefix" },
+  { pat = "~/.config/shguard", kind = "prefix" },
+  { pat = "~/.config/git", kind = "prefix" },
+  { pat = "~/.config/autostart", kind = "prefix" },
+  { pat = "~/.config/systemd", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.gitconfig", kind = "prefix" },
+  { pat = "~/.cargo", kind = "prefix" },
+  { pat = "~/Library/LaunchAgents", kind = "prefix" },
+]
+
+[[rule]]
+id = "mkdir-block-sensitive-target"
+key = ["mkdir"]
+outcome = "block"
+targets = [
+  { pat = "/dev", kind = "prefix" },
+  { pat = ".claude", kind = "exact" },
+  { pat = ".claude/", kind = "prefix" },
+  { pat = "./.claude", kind = "exact" },
+  { pat = "./.claude/", kind = "prefix" },
+  { pat = ".git", kind = "exact" },
+  { pat = ".git/", kind = "prefix" },
+  { pat = "./.git", kind = "exact" },
+  { pat = "./.git/", kind = "prefix" },
+  { pat = ".cargo", kind = "exact" },
+  { pat = ".cargo/", kind = "prefix" },
+  { pat = "./.cargo", kind = "exact" },
+  { pat = "./.cargo/", kind = "prefix" },
+  { pat = ".husky", kind = "exact" },
+  { pat = ".husky/", kind = "prefix" },
+  { pat = "./.husky", kind = "exact" },
+  { pat = "./.husky/", kind = "prefix" },
+  { pat = ".githooks", kind = "exact" },
+  { pat = ".githooks/", kind = "prefix" },
+  { pat = "./.githooks", kind = "exact" },
+  { pat = "./.githooks/", kind = "prefix" },
+  { pat = ".mcp.json", kind = "exact" },
+  { pat = "./.mcp.json", kind = "exact" },
+  { pat = ".envrc", kind = "exact" },
+  { pat = "./.envrc", kind = "exact" },
+  { pat = "lefthook.yml", kind = "exact" },
+  { pat = "./lefthook.yml", kind = "exact" },
+  { pat = "lefthook.yaml", kind = "exact" },
+  { pat = "./lefthook.yaml", kind = "exact" },
+  { pat = ".lefthook.yml", kind = "exact" },
+  { pat = "./.lefthook.yml", kind = "exact" },
+  { pat = ".lefthook.yaml", kind = "exact" },
+  { pat = "./.lefthook.yaml", kind = "exact" },
+  { pat = "~/.bashrc", kind = "prefix" },
+  { pat = "~/.bash_profile", kind = "prefix" },
+  { pat = "~/.bash_login", kind = "prefix" },
+  { pat = "~/.profile", kind = "prefix" },
+  { pat = "~/.zshrc", kind = "prefix" },
+  { pat = "~/.zshenv", kind = "prefix" },
+  { pat = "~/.zprofile", kind = "prefix" },
+  { pat = "~/.zlogin", kind = "prefix" },
+  { pat = "~/.config/fish", kind = "prefix" },
+  { pat = "~/.config/shguard", kind = "prefix" },
+  { pat = "~/.config/git", kind = "prefix" },
+  { pat = "~/.config/autostart", kind = "prefix" },
+  { pat = "~/.config/systemd", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.gitconfig", kind = "prefix" },
+  { pat = "~/.cargo", kind = "prefix" },
+  { pat = "~/Library/LaunchAgents", kind = "prefix" },
+]
+
+[[rule]]
+id = "uniq-block-sensitive-target"
+key = ["uniq"]
+outcome = "block"
+targets = [
+  { pat = "/dev", kind = "prefix" },
+  { pat = ".claude", kind = "exact" },
+  { pat = ".claude/", kind = "prefix" },
+  { pat = "./.claude", kind = "exact" },
+  { pat = "./.claude/", kind = "prefix" },
+  { pat = ".git", kind = "exact" },
+  { pat = ".git/", kind = "prefix" },
+  { pat = "./.git", kind = "exact" },
+  { pat = "./.git/", kind = "prefix" },
+  { pat = ".cargo", kind = "exact" },
+  { pat = ".cargo/", kind = "prefix" },
+  { pat = "./.cargo", kind = "exact" },
+  { pat = "./.cargo/", kind = "prefix" },
+  { pat = ".husky", kind = "exact" },
+  { pat = ".husky/", kind = "prefix" },
+  { pat = "./.husky", kind = "exact" },
+  { pat = "./.husky/", kind = "prefix" },
+  { pat = ".githooks", kind = "exact" },
+  { pat = ".githooks/", kind = "prefix" },
+  { pat = "./.githooks", kind = "exact" },
+  { pat = "./.githooks/", kind = "prefix" },
+  { pat = ".mcp.json", kind = "exact" },
+  { pat = "./.mcp.json", kind = "exact" },
+  { pat = ".envrc", kind = "exact" },
+  { pat = "./.envrc", kind = "exact" },
+  { pat = "lefthook.yml", kind = "exact" },
+  { pat = "./lefthook.yml", kind = "exact" },
+  { pat = "lefthook.yaml", kind = "exact" },
+  { pat = "./lefthook.yaml", kind = "exact" },
+  { pat = ".lefthook.yml", kind = "exact" },
+  { pat = "./.lefthook.yml", kind = "exact" },
+  { pat = ".lefthook.yaml", kind = "exact" },
+  { pat = "./.lefthook.yaml", kind = "exact" },
+  { pat = "~/.bashrc", kind = "prefix" },
+  { pat = "~/.bash_profile", kind = "prefix" },
+  { pat = "~/.bash_login", kind = "prefix" },
+  { pat = "~/.profile", kind = "prefix" },
+  { pat = "~/.zshrc", kind = "prefix" },
+  { pat = "~/.zshenv", kind = "prefix" },
+  { pat = "~/.zprofile", kind = "prefix" },
+  { pat = "~/.zlogin", kind = "prefix" },
+  { pat = "~/.config/fish", kind = "prefix" },
+  { pat = "~/.config/shguard", kind = "prefix" },
+  { pat = "~/.config/git", kind = "prefix" },
+  { pat = "~/.config/autostart", kind = "prefix" },
+  { pat = "~/.config/systemd", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.gitconfig", kind = "prefix" },
+  { pat = "~/.cargo", kind = "prefix" },
+  { pat = "~/Library/LaunchAgents", kind = "prefix" },
+]
+
+# Ask: the kernel has no working directory, so it cannot tell a path inside the
+# project from one outside. Only relative paths are Allowed for writing rows.
+# A word that starts with `^` is asked as well: zsh reads `^foo` as a glob
+# that matches everything except `foo`, and the lexer does not see it as one.
+[[rule]]
+id = "cp-ask-nonlocal-target"
+key = ["cp"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+]
+
+[[rule]]
+id = "rm-ask-nonlocal-target"
+key = ["rm"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+]
+
+[[rule]]
+id = "mkdir-ask-nonlocal-target"
+key = ["mkdir"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+]
+
+[[rule]]
+id = "uniq-ask-nonlocal-target"
+key = ["uniq"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+]
+
+# Ask: credential directories under `~`. Reading other absolute paths is
+# Allowed, so `/Users/me/.ssh/id_rsa` is not caught; the kernel cannot match
+# "a segment anywhere in the path".
+[[rule]]
+id = "cat-ask-credential-dirs"
+key = ["cat"]
+outcome = "ask"
+targets = [
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.aws", kind = "prefix" },
+  { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
+]
+
+[[rule]]
+id = "head-ask-credential-dirs"
+key = ["head"]
+outcome = "ask"
+targets = [
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.aws", kind = "prefix" },
+  { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
+]
+
+[[rule]]
+id = "tail-ask-credential-dirs"
+key = ["tail"]
+outcome = "ask"
+targets = [
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.aws", kind = "prefix" },
+  { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
+]
+
+[[rule]]
+id = "grep-ask-credential-dirs"
+key = ["grep"]
+outcome = "ask"
+targets = [
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.aws", kind = "prefix" },
+  { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
+]
+
+[[rule]]
+id = "rg-ask-credential-dirs"
+key = ["rg"]
+outcome = "ask"
+targets = [
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.aws", kind = "prefix" },
+  { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
+]
+
+[[rule]]
+id = "wc-ask-credential-dirs"
+key = ["wc"]
+outcome = "ask"
+targets = [
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.aws", kind = "prefix" },
+  { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
+]
+
+[[rule]]
+id = "sort-ask-credential-dirs"
+key = ["sort"]
+outcome = "ask"
+targets = [
+  { pat = "~/.ssh", kind = "prefix" },
+  { pat = "~/.gnupg", kind = "prefix" },
+  { pat = "~/.aws", kind = "prefix" },
+  { pat = "~/.config/gh", kind = "prefix" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = "~/.claude.json", kind = "prefix" },
+  { pat = "~/.netrc", kind = "prefix" },
+  { pat = "~/.npmrc", kind = "prefix" },
+  { pat = "~/.pypirc", kind = "prefix" },
+  { pat = "~/.pgpass", kind = "prefix" },
+  { pat = "~/.kube", kind = "prefix" },
+  { pat = "~/.docker", kind = "prefix" },
+  { pat = "~/.config/gcloud", kind = "prefix" },
+  { pat = "~/.zsh_history", kind = "prefix" },
+  { pat = "~/.bash_history", kind = "prefix" },
+  { pat = ".env", kind = "exact" },
+  { pat = "./.env", kind = "exact" },
+  { pat = ".env.", kind = "prefix" },
+  { pat = "./.env.", kind = "prefix" },
+]
+
+# Ask: a recursive search from the filesystem root or a home directory reads
+# every secret under it.
+[[rule]]
+id = "grep-ask-recursive-broad"
+key = ["grep"]
+outcome = "ask"
+opts = [["-r"]]
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "prefix" },
+  { pat = "/Users", kind = "prefix" },
+  { pat = "/home", kind = "prefix" },
+  { pat = "/root", kind = "prefix" },
+]
+
+# rg is always recursive.
+[[rule]]
+id = "rg-ask-broad"
+key = ["rg"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "prefix" },
+  { pat = "/Users", kind = "prefix" },
+  { pat = "/home", kind = "prefix" },
+  { pat = "/root", kind = "prefix" },
+]
+
+[[rule]]
+id = "ls-ask-recursive-broad"
+key = ["ls"]
+outcome = "ask"
+opts = [["-R"]]
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "prefix" },
+  { pat = "/Users", kind = "prefix" },
+  { pat = "/home", kind = "prefix" },
+  { pat = "/root", kind = "prefix" },
+]

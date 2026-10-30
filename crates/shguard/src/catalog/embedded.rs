@@ -2,8 +2,8 @@
 
 use super::Source;
 
-/// The embedded default catalog. M13 ships `core.toml` empty; the rows come
-/// in M14.
+/// The embedded default catalog: `core.toml` holds the shell builtins and
+/// the read-mostly tools. Later parts add more files to this list.
 pub const EMBEDDED: &[Source<'static>] = &[Source {
     name: "embedded:core.toml",
     text: include_str!("../../../../catalog/core.toml"),

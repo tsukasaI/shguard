@@ -169,7 +169,74 @@ fn orphan_row() {
 
 #[test]
 fn denylisted_head() {
-    for head in ["tar", "ps", "ar", "find"] {
+    for head in [
+        "tar",
+        "ps",
+        "ar",
+        "find",
+        "eval",
+        "source",
+        ".",
+        "exec",
+        "command",
+        "builtin",
+        "trap",
+        "ssh",
+        "docker",
+        "kubectl",
+        "fd",
+        "socat",
+        "flock",
+        "strace",
+        "tmux",
+        "crontab",
+        "xargs",
+        "env",
+        "nohup",
+        "timeout",
+        "nice",
+        "sudo",
+        "doas",
+        "watch",
+        "script",
+        "parallel",
+        "split",
+        "gxargs",
+        "gsed",
+        "gfind",
+        "gtar",
+        "sed",
+        "awk",
+        "perl",
+        "node",
+        "python",
+        "python3",
+        "ruby",
+        "bash",
+        "sh",
+        "zsh",
+        "gsplit",
+        "gtimeout",
+        "genv",
+        "gnohup",
+        "gnice",
+        "su",
+        "dash",
+        "ksh",
+        "fish",
+        "csh",
+        "tcsh",
+        "deno",
+        "bun",
+        "php",
+        "lua",
+        "osascript",
+        "python2",
+        "python3.11",
+        "python3.12",
+        "python3.13",
+        "python3.14",
+    ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
             matches!(errors(&t)[0], LoadError::DenylistedHead { .. }),
@@ -182,10 +249,10 @@ fn denylisted_head() {
 
 #[test]
 fn parent_option_spelling_child_must_take_code() {
-    let child = row("\"python\", \"-c\"", "runs_code = true");
+    let child = row("\"pylang\", \"-c\"", "runs_code = true");
     let parent = |value: &str| {
         row(
-            "\"python\"",
+            "\"pylang\"",
             &format!("[[row.opt]]\nshort = \"c\"\nvalue = {value}\n"),
         )
     };
@@ -203,7 +270,7 @@ fn parent_option_spelling_child_must_take_code() {
     }
     assert!(load_one(&format!("{}{child}", parent("{ takes = \"code\" }"))).is_ok());
     let both_parent = row(
-        "\"python\"",
+        "\"pylang\"",
         "[[row.opt]]\nshort = \"c\"\nlong = \"command\"\n",
     );
     assert!(
@@ -211,8 +278,8 @@ fn parent_option_spelling_child_must_take_code() {
             .iter()
             .any(|e| matches!(e, LoadError::ParentOptNotCode { .. }))
     );
-    let long_child = row("\"python\", \"--command\"", "runs_code = true");
-    let long_parent = row("\"python\"", "[[row.opt]]\nlong = \"command\"\n");
+    let long_child = row("\"pylang\", \"--command\"", "runs_code = true");
+    let long_parent = row("\"pylang\"", "[[row.opt]]\nlong = \"command\"\n");
     assert!(
         errors(&format!("{long_parent}{long_child}"))
             .iter()
@@ -338,10 +405,10 @@ fn valid_catalog_equals_hand_built() {
             "[[row.opt]]\nshort = \"r\"\n[[row.opt]]\nshort = \"R\"\n[[row.opt]]\nlong = \"recursive\"\n"
         ),
         row(
-            "\"sh\"",
+            "\"shx\"",
             "[[row.opt]]\nshort = \"c\"\nvalue = { takes = \"code\" }\n"
         ),
-        row("\"sh\", \"-c\"", "runs_code = true"),
+        row("\"shx\", \"-c\"", "runs_code = true"),
         "[[rule]]\nid = \"rm-root\"\nscope = \"pipe_into\"\nkey = [\"rm\"]\nopts = [[\"-r\", \"-R\", \"--recursive\"]]\ntargets = [{ pat = \"/\", kind = \"exact\" }, { pat = \"~/x\", kind = \"prefix\" }, { pat = \"~\", kind = \"exact\" }]\noutcome = \"block\"\n",
     );
     let l = loaded(&text);
@@ -401,7 +468,7 @@ fn valid_catalog_equals_hand_built() {
     )
     .unwrap();
     let sh = Row::new(
-        vec![b"sh".to_vec()],
+        vec![b"shx".to_vec()],
         Grammar::new(
             vec![Opt::new(
                 OptName::Short(short(b'c')),
@@ -418,7 +485,7 @@ fn valid_catalog_equals_hand_built() {
     )
     .unwrap();
     let sh_c = Row::new(
-        vec![b"sh".to_vec(), b"-c".to_vec()],
+        vec![b"shx".to_vec(), b"-c".to_vec()],
         Grammar::new(
             vec![],
             vec![],
@@ -477,16 +544,16 @@ fn end_to_end_decisions() {
             "opts = [[\"-r\", \"-R\", \"--recursive\"]]\ntargets = [{ pat = \"/\", kind = \"exact\" }]"
         ),
         row(
-            "\"python\"",
+            "\"pylang\"",
             "rest = \"path\"\n[[row.opt]]\nshort = \"c\"\nvalue = { takes = \"code\" }\n"
         ),
-        row("\"python\", \"-c\"", "runs_code = true"),
+        row("\"pylang\", \"-c\"", "runs_code = true"),
         row("\"tar\"", "runs_code = true"),
     );
     let l = loaded(&format!("{base}{}", date("")));
     assert_eq!(decision(&l, "ls -la"), Decision::Allow);
     assert_eq!(decision(&l, "rm -rf /"), Decision::Block);
-    assert_eq!(decision(&l, "python -c x"), Decision::Ask);
+    assert_eq!(decision(&l, "pylang -c x"), Decision::Ask);
     assert_eq!(decision(&l, "tar xf a"), Decision::Ask);
     assert_eq!(decision(&l, "date +%s"), Decision::Ask);
     let l = loaded(&format!("{base}{}", date("plus_words = \"operand\"")));
@@ -539,10 +606,10 @@ fn option_like_key_segment() {
             .any(|e| matches!(e, LoadError::ParentOptNotCode { .. }))
     );
     let py = row(
-        "\"python\"",
+        "\"pylang\"",
         "[[row.opt]]\nshort = \"c\"\nvalue = { takes = \"code\" }\n",
     );
-    let py_c = row("\"python\", \"-c\"", "runs_code = true");
+    let py_c = row("\"pylang\", \"-c\"", "runs_code = true");
     assert!(load_one(&format!("{py}{py_c}")).is_ok());
     // Rules: rejected unless the key is that of a `runs_code` row.
     let bad_rule = "[[rule]]\nid = \"r\"\nkey = [\"rm\", \"-rf\"]\noutcome = \"ask\"\n";
@@ -551,7 +618,7 @@ fn option_like_key_segment() {
             .iter()
             .any(|e| matches!(e, LoadError::OptionLikeKey { .. }))
     );
-    let py_rule = "[[rule]]\nid = \"r\"\nkey = [\"python\", \"-c\"]\noutcome = \"ask\"\n";
+    let py_rule = "[[rule]]\nid = \"r\"\nkey = [\"pylang\", \"-c\"]\noutcome = \"ask\"\n";
     assert!(load_one(&format!("{py}{py_c}{py_rule}")).is_ok());
 }
 
