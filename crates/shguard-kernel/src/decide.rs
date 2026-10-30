@@ -22,9 +22,12 @@
 //!   share a short name, or have long names with equal bytes (#1025 A);
 //! - for `Scope::Simple`: the target list is empty, or some target word
 //!   matches some pattern. Target words are the words in `Operand(Path)`
-//!   and `OptValue(Path)` slots. An `Opts(Some(Path))` slot (an inline path
-//!   value, whose bytes cannot be located yet, #1034) counts as matching
-//!   any non-empty target list;
+//!   and `OptValue(Path)` slots, and the inline values of `Opts(Some(Path))`
+//!   slots (`--file=/x`, `-t/x`): the bytes of the option word from the
+//!   slot's offset on, read as a literal path word without `~` (#1034). An
+//!   inline value that cannot be read (the word is opaque or the offset is
+//!   outside it; `argv_spec` never builds that, but it is not proved) counts
+//!   as matching any pattern;
 //! - for `Scope::PipeInto`: the command is not the first of its pipeline.
 //!   Targets are ignored.
 //!
@@ -73,8 +76,11 @@
 //!   extension;
 //! - `PathAfterCd`: a relative path word (no leading `/`, no `~`) after an
 //!   earlier covered command, in address order, whose selected row has
-//!   `changes_cwd`;
-//! - `PathInlineValue`: a word in an `Opts(Some(Path))` slot.
+//!   `changes_cwd`.
+//!
+//! The same three checks apply to an inline path value
+//! (`inline_path_fails`). An empty value (`--file=`) is relative, so it fails
+//! `PathAfterCd` after a `cd`. An unreadable value fails as `PathOpaque`.
 //!
 //! # The decision and the verdict
 //!
@@ -88,14 +94,14 @@
 
 #[cfg(creusot)]
 use crate::argv::{
-    ArgvL, Phase, argv_spec, has_long, has_opaque, has_short, ints, lemma_go_no_code,
-    lemma_ints_index, lit_prefix, no_code,
+    ArgvL, Phase, SlotL, argv_spec, has_long, has_opaque, has_short, ints, lemma_go_no_code,
+    lemma_ints_index, lemma_slots_index, lit_prefix, no_code, slots_l,
 };
-use crate::argv::{ArgvResult, Parse, Slot, long_is, parse_argv, parts_view, short_is};
+use crate::argv::{ArgvResult, Parse, Slot, long_is, parse_argv, parts_view, short_is, word_view};
 use crate::ast::{Opaque, Part, Script, Simple, Word};
-#[cfg(creusot)]
-use crate::bytes::norm_l;
 use crate::bytes::{DOT, SLASH, bytes_eq, normalize_path, starts_with};
+#[cfg(creusot)]
+use crate::bytes::{lemma_sub_snoc, norm_l};
 #[cfg(creusot)]
 use crate::catalog::Row;
 use crate::catalog::{Catalog, Opt, OptName, Role};
@@ -293,36 +299,82 @@ pub fn is_path_role(r: Role) -> bool {
     }
 }
 
-/// `s` is an option word carrying an inline path value.
+/// The inline value of the option word with parts `parts`: its known bytes
+/// from the offset `off` on.
 #[cfg(creusot)]
 #[logic(open)]
-pub fn inline_path(s: Slot) -> bool {
-    match s {
-        Slot::Opts(Some(r)) => is_path_role(r),
-        Slot::Opts(None) | Slot::OptValue(_) | Slot::Operand(_) | Slot::DashDash => false,
+pub fn inline_value(parts: Seq<Part>, off: Int) -> Seq<u8> {
+    pearlite! { lit_prefix(parts, 0).subsequence(off, lit_prefix(parts, 0).len()) }
+}
+
+/// The key an inline value is compared on: normalized when it starts with
+/// `/`, like a literal path word (`path_norm` with no `~` and nothing opaque).
+#[cfg(creusot)]
+#[logic(open)]
+pub fn inline_norm(v: Seq<u8>) -> Seq<u8> {
+    if starts_slash(v) { norm_l(v) } else { v }
+}
+
+/// The inline value cannot be read: the option word is opaque or `off` is
+/// outside it. `argv_spec` never builds such a slot (only a non-opaque word
+/// is an option word, and the offset is at most its length), but nothing
+/// proves that alignment, so a bad value fails closed: it hits every
+/// pattern and fails the path check.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn inline_bad(parts: Seq<Part>, off: Int) -> bool {
+    pearlite! { has_opaque(parts, 0) || off < 0 || off > lit_prefix(parts, 0).len() }
+}
+
+/// Some pattern of `targets` matches the inline value at `off` of the option
+/// word with parts `parts`.
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn inline_path_hit(targets: Seq<Pat>, parts: Seq<Part>, off: Int) -> bool {
+    pearlite! {
+        inline_bad(parts, off)
+            || exists<t> 0 <= t && t < targets.len()
+                && pat_match_view(targets[t], false, inline_norm(inline_value(parts, off)),
+                    inline_norm(inline_value(parts, off)), false)
     }
 }
 
-/// `s` is a whole word that names a path.
+/// The inline value at `off` of the option word with parts `parts` fails a
+/// path check; `cwd`: an earlier command changed the working directory.
 #[cfg(creusot)]
 #[logic(open)]
-pub fn path_word_slot(s: Slot) -> bool {
-    match s {
-        Slot::Operand(r) => is_path_role(r),
-        Slot::OptValue(r) => is_path_role(r),
-        Slot::Opts(_) | Slot::DashDash => false,
+pub fn inline_path_fails(parts: Seq<Part>, off: Int, cwd: bool) -> bool {
+    pearlite! {
+        inline_bad(parts, off)
+            || has_dotdot_l(inline_value(parts, off))
+            || (cwd && !starts_slash(inline_value(parts, off)))
+    }
+}
+
+/// The rule's targets hit the slot `s`, which is the word with parts `parts`:
+/// a path operand or option value by `some_pat_matches`, a path value given
+/// inline in an option word by `inline_path_hit`.
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn slot_hits(targets: Seq<Pat>, parts: Seq<Part>, s: SlotL) -> bool {
+    pearlite! {
+        match s {
+            SlotL::Opts(Some((r, off))) => is_path_role(r) && inline_path_hit(targets, parts, off),
+            SlotL::Operand(r) => is_path_role(r) && some_pat_matches(targets, parts),
+            SlotL::OptValue(r) => is_path_role(r) && some_pat_matches(targets, parts),
+            SlotL::Opts(None) | SlotL::DashDash => false,
+        }
     }
 }
 
 /// The rule's targets hit the parse `slots` of `ws[start..]`.
 #[cfg(creusot)]
 #[logic(open(crate))]
-pub fn targets_hit(targets: Seq<Pat>, ws: Seq<Word>, start: Int, slots: Seq<Slot>) -> bool {
+pub fn targets_hit(targets: Seq<Pat>, ws: Seq<Word>, start: Int, slots: Seq<SlotL>) -> bool {
     pearlite! {
         targets.len() == 0
             || exists<k> 0 <= k && k < slots.len()
-                && (inline_path(slots[k])
-                    || (path_word_slot(slots[k]) && some_pat_matches(targets, ws[start + k].parts@)))
+                && slot_hits(targets, ws[start + k].parts@, slots[k])
     }
 }
 
@@ -377,7 +429,7 @@ pub fn hit_parsed(
     gopts: Seq<Opt>,
     ws: Seq<Word>,
     start: Int,
-    slots: Seq<Slot>,
+    slots: Seq<SlotL>,
     seen: Seq<Int>,
     piped: bool,
 ) -> bool {
@@ -443,14 +495,28 @@ pub fn word_path_fails(parts: Seq<Part>, cwd: bool) -> bool {
         || (cwd && !path_tilde(parts) && !starts_slash(path_lead(parts)))
 }
 
+/// The slot `s`, which is the word with parts `parts`, fails a path check:
+/// a path operand or option value by `word_path_fails`, a path value given
+/// inline in an option word by `inline_path_fails`.
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn slot_fails(parts: Seq<Part>, s: SlotL, cwd: bool) -> bool {
+    pearlite! {
+        match s {
+            SlotL::Opts(Some((r, off))) => is_path_role(r) && inline_path_fails(parts, off, cwd),
+            SlotL::Operand(r) => is_path_role(r) && word_path_fails(parts, cwd),
+            SlotL::OptValue(r) => is_path_role(r) && word_path_fails(parts, cwd),
+            SlotL::Opts(None) | SlotL::DashDash => false,
+        }
+    }
+}
+
 /// Some slot of the parse `slots` of `ws[start..]` fails a path check.
 #[cfg(creusot)]
 #[logic(open(crate))]
-pub fn path_fail_parsed(ws: Seq<Word>, start: Int, slots: Seq<Slot>, cwd: bool) -> bool {
+pub fn path_fail_parsed(ws: Seq<Word>, start: Int, slots: Seq<SlotL>, cwd: bool) -> bool {
     pearlite! {
-        exists<k> 0 <= k && k < slots.len()
-            && (inline_path(slots[k])
-                || (path_word_slot(slots[k]) && word_path_fails(ws[start + k].parts@, cwd)))
+        exists<k> 0 <= k && k < slots.len() && slot_fails(ws[start + k].parts@, slots[k], cwd)
     }
 }
 
@@ -1011,28 +1077,104 @@ fn any_pat_matches(targets: &[Pat], w: &Word) -> bool {
     false
 }
 
+/// An owned copy of `b[off..]`.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, requires(off@ <= b@.len()))]
+#[cfg_attr(creusot, ensures(result@ == b@.subsequence(off@, b@.len())))]
+fn suffix_from(b: &[u8], off: usize) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    #[cfg(creusot)]
+    proof_assert! { b@.subsequence(off@, off@).ext_eq(Seq::empty()) };
+    let mut j = off;
+    #[cfg_attr(creusot, variant(b@.len() - j@))]
+    #[cfg_attr(creusot, invariant(off@ <= j@ && j@ <= b@.len()))]
+    #[cfg_attr(creusot, invariant(out@ == b@.subsequence(off@, j@)))]
+    while j < b.len() {
+        #[cfg(creusot)]
+        proof_assert! { lemma_sub_snoc(b@, off@, j@); true };
+        out.push(b[j]);
+        j += 1;
+    }
+    out
+}
+
+/// The view of the inline value `b[off..]` of an option word: no `~`, nothing
+/// opaque, and the key is the normalized lead like a literal path word's.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, requires(off@ <= b@.len()))]
+#[cfg_attr(creusot, ensures(!result.tilde && !result.more))]
+#[cfg_attr(creusot, ensures(result.lead@ == b@.subsequence(off@, b@.len())))]
+#[cfg_attr(creusot, ensures(result.norm@ == inline_norm(b@.subsequence(off@, b@.len()))))]
+#[cfg_attr(creusot, ensures(result.key@ == inline_norm(b@.subsequence(off@, b@.len()))))]
+fn inline_view(b: &[u8], off: usize) -> PathView {
+    // Three owned copies, from three calls, as `path_view` does.
+    let lead = suffix_from(b, off);
+    let lead2 = suffix_from(b, off);
+    let lead3 = suffix_from(b, off);
+    let norm = path_norm_of(lead2, false);
+    let key = path_norm_of(lead3, false);
+    PathView {
+        tilde: false,
+        lead,
+        norm,
+        key,
+        more: false,
+    }
+}
+
+/// Some pattern of `targets` matches the inline value at `off` of the option
+/// word `w`; true when the value cannot be read (see `inline_bad`).
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result == inline_path_hit(targets@, w.parts@, off@)))]
+fn inline_hit(targets: &[Pat], w: &Word, off: usize) -> bool {
+    let (b, opaque) = word_view(w);
+    if opaque || off > b.len() {
+        return true;
+    }
+    let wv = inline_view(&b, off);
+    let mut t: usize = 0;
+    #[cfg_attr(creusot, variant(targets@.len() - t@))]
+    #[cfg_attr(creusot, invariant(t@ <= targets@.len()))]
+    #[cfg_attr(creusot, invariant(forall<x> 0 <= x && x < t@
+        ==> !pat_match_view(targets@[x], false, inline_norm(inline_value(w.parts@, off@)),
+            inline_norm(inline_value(w.parts@, off@)), false)))]
+    while t < targets.len() {
+        if pat_match(&targets[t], &wv) {
+            return true;
+        }
+        t += 1;
+    }
+    false
+}
+
 /// The targets hit the parse `slots` of `ws[start..]`.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, requires(start@ + slots@.len() == ws@.len()))]
-#[cfg_attr(creusot, ensures(result == targets_hit(targets@, ws@, start@, slots@)))]
+#[cfg_attr(creusot, ensures(result == targets_hit(targets@, ws@, start@, slots_l(slots@))))]
 fn targets_hit_p(targets: &[Pat], ws: &[Word], start: usize, slots: &[Slot]) -> bool {
     if <[Pat]>::is_empty(targets) {
         return true;
     }
+    #[cfg(creusot)]
+    proof_assert! { lemma_slots_index(slots@); true };
     let mut k: usize = 0;
     #[cfg_attr(creusot, variant(slots@.len() - k@))]
     #[cfg_attr(creusot, invariant(k@ <= slots@.len()))]
-    #[cfg_attr(creusot, invariant(forall<x> 0 <= x && x < k@ ==> !(inline_path(slots@[x])
-        || (path_word_slot(slots@[x]) && some_pat_matches(targets@, ws@[start@ + x].parts@)))))]
+    #[cfg_attr(creusot, invariant(forall<x> 0 <= x && x < k@
+        ==> !slot_hits(targets@, ws@[start@ + x].parts@, slots_l(slots@)[x])))]
     while k < slots.len() {
         match slots[k] {
-            Slot::Opts(Some(Role::Path)) => return true,
+            Slot::Opts(Some((Role::Path, off))) => {
+                if inline_hit(targets, &ws[start + k], off) {
+                    return true;
+                }
+            }
             Slot::Operand(Role::Path) | Slot::OptValue(Role::Path) => {
                 if any_pat_matches(targets, &ws[start + k]) {
                     return true;
                 }
             }
-            Slot::Opts(None | Some(Role::Inert | Role::Code))
+            Slot::Opts(None | Some((Role::Inert | Role::Code, _)))
             | Slot::Operand(Role::Inert | Role::Code)
             | Slot::OptValue(Role::Inert | Role::Code)
             | Slot::DashDash => {}
@@ -1116,7 +1258,7 @@ fn opts_present(ropts: &[OptAlts], gopts: &[Opt], seen: &[usize]) -> bool {
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, requires(start@ + p.slots@.len() == ws@.len()))]
 #[cfg_attr(creusot, ensures(result
-    == hit_parsed(*rule, gopts@, ws@, start@, p.slots@, ints(p.seen@), piped)))]
+    == hit_parsed(*rule, gopts@, ws@, start@, slots_l(p.slots@), ints(p.seen@), piped)))]
 fn rule_hits(
     rule: &Rule,
     gopts: &[Opt],
@@ -1177,13 +1319,33 @@ fn word_path_check(w: &Word, cwd: bool) -> Option<UnknownKind> {
     None
 }
 
+/// The path check of the inline value at `off` of the option word `w`, or
+/// `None` when it passes. A value that cannot be read (see `inline_bad`) is
+/// `PathOpaque`.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures((result != None) == inline_path_fails(w.parts@, off@, cwd)))]
+fn inline_path_check(w: &Word, off: usize, cwd: bool) -> Option<UnknownKind> {
+    let (b, opaque) = word_view(w);
+    if opaque || off > b.len() {
+        return Some(UnknownKind::PathOpaque);
+    }
+    let v = &b[off..b.len()];
+    if has_dotdot(v) {
+        return Some(UnknownKind::PathDotDot);
+    }
+    if cwd && (<[u8]>::is_empty(v) || v[0] != SLASH) {
+        return Some(UnknownKind::PathAfterCd);
+    }
+    None
+}
+
 /// The first failed path check of the parse `slots` of `ws[start..]`: its
 /// kind and word.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, requires(start@ + slots@.len() == ws@.len()))]
 #[cfg_attr(creusot, ensures(match result {
-    None => !path_fail_parsed(ws@, start@, slots@, cwd),
-    Some((_, w)) => path_fail_parsed(ws@, start@, slots@, cwd) && w@ < ws@.len(),
+    None => !path_fail_parsed(ws@, start@, slots_l(slots@), cwd),
+    Some((_, w)) => path_fail_parsed(ws@, start@, slots_l(slots@), cwd) && w@ < ws@.len(),
 }))]
 fn path_check(
     ws: &[Word],
@@ -1191,22 +1353,26 @@ fn path_check(
     slots: &[Slot],
     cwd: bool,
 ) -> Option<(UnknownKind, usize)> {
+    #[cfg(creusot)]
+    proof_assert! { lemma_slots_index(slots@); true };
     let mut k: usize = 0;
     #[cfg_attr(creusot, variant(slots@.len() - k@))]
     #[cfg_attr(creusot, invariant(k@ <= slots@.len()))]
-    #[cfg_attr(creusot, invariant(forall<x> 0 <= x && x < k@ ==> !(inline_path(slots@[x])
-        || (path_word_slot(slots@[x]) && word_path_fails(ws@[start@ + x].parts@, cwd)))))]
+    #[cfg_attr(creusot, invariant(forall<x> 0 <= x && x < k@
+        ==> !slot_fails(ws@[start@ + x].parts@, slots_l(slots@)[x], cwd)))]
     while k < slots.len() {
         match slots[k] {
-            Slot::Opts(Some(Role::Path)) => {
-                return Some((UnknownKind::PathInlineValue, start + k));
+            Slot::Opts(Some((Role::Path, off))) => {
+                if let Some(u) = inline_path_check(&ws[start + k], off, cwd) {
+                    return Some((u, start + k));
+                }
             }
             Slot::Operand(Role::Path) | Slot::OptValue(Role::Path) => {
                 if let Some(u) = word_path_check(&ws[start + k], cwd) {
                     return Some((u, start + k));
                 }
             }
-            Slot::Opts(None | Some(Role::Inert | Role::Code))
+            Slot::Opts(None | Some((Role::Inert | Role::Code, _)))
             | Slot::Operand(Role::Inert | Role::Code)
             | Slot::OptValue(Role::Inert | Role::Code)
             | Slot::DashDash => {}
@@ -1848,14 +2014,18 @@ mod tests {
     }
 
     #[test]
-    fn inline_path_value_is_ask() {
+    fn inline_path_value_is_checked_like_a_path_word() {
         let cat = catalog_with_cp();
-        check_in(
-            &cat,
-            &[],
-            seq(vec![cmd(&["cp", "--target-directory=/x", "a"])]),
-            Decision::Ask,
-        );
+        let ok = |w: &str, want| check_in(&cat, &[], seq(vec![cmd(&["cp", w, "a"])]), want);
+        // A clean absolute or relative inline value passes, as `-t /x` does.
+        ok("--target-directory=/x", Decision::Allow);
+        ok("-t/x", Decision::Allow);
+        ok("--target-directory=x", Decision::Allow);
+        // A `..` segment in the inline value is Ask.
+        ok("--target-directory=../x", Decision::Ask);
+        ok("-t../x", Decision::Ask);
+        ok("--opt=a/../x", Decision::Ask);
+        // `cp -t /x a` still passes.
         check_in(
             &cat,
             &[],
@@ -1865,20 +2035,51 @@ mod tests {
     }
 
     #[test]
-    fn optional_inline_path_is_ask_like_takes() {
+    fn relative_inline_value_after_cd_is_ask() {
+        let cat = catalog_with_cp();
+        // `cd /; cp <w> /a`: the operand is absolute, so only `w` decides.
+        let after_cd = |w: &str, want| {
+            check_in(
+                &cat,
+                &[],
+                seq(vec![cmd(&["cd", "/"]), cmd(&["cp", w, "/a"])]),
+                want,
+            );
+        };
+        after_cd("--target-directory=x", Decision::Ask);
+        after_cd("-tx", Decision::Ask);
+        after_cd("--target-directory=", Decision::Ask);
+        after_cd("--target-directory=/x", Decision::Allow);
+        after_cd("-t/x", Decision::Allow);
+    }
+
+    #[test]
+    fn optional_inline_path_is_checked_like_takes() {
         let cat = catalog_with_cp();
         let cp = |w: &str, want| check_in(&cat, &[], seq(vec![cmd(&["cp", w, "a"])]), want);
-        // An empty inline value is still an inline path slot, as with `Takes`.
-        for w in [
-            "--opt=x",
-            "--target-directory=x",
-            "--opt=",
-            "--target-directory=",
-        ] {
-            cp(w, Decision::Ask);
-        }
+        cp("--opt=x", Decision::Allow);
+        cp("--opt=../x", Decision::Ask);
+        // An empty inline value is an empty relative path: no `..`, no cd.
+        cp("--opt=", Decision::Allow);
+        cp("--target-directory=", Decision::Allow);
         // Without an inline value, there is no path slot at all.
         cp("--opt", Decision::Allow);
+    }
+
+    #[test]
+    fn inline_path_value_is_a_target() {
+        let cat = catalog_with_cp();
+        let etc = Pat::new(vec![lit("/etc")], PatKind::Prefix).expect("non-empty");
+        let r = [block_rule("cp", Vec::new(), vec![etc])];
+        let cp = |w: &str, want| check_in(&cat, &r, seq(vec![cmd(&["cp", w, "a"])]), want);
+        cp("-t/etc/x", Decision::Block);
+        cp("--target-directory=/etc/x", Decision::Block);
+        // The inline value is normalized like a path word.
+        cp("-t/etc/./x", Decision::Block);
+        cp("-t//etc", Decision::Block);
+        cp("-t/tmp/x", Decision::Allow);
+        // An empty inline value is not a hit.
+        cp("--target-directory=", Decision::Allow);
     }
 
     #[test]

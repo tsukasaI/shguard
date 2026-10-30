@@ -46,7 +46,7 @@
 //! `Code` value (#1070).
 
 #[cfg(creusot)]
-use crate::argv::{ArgvL, argv_spec, has_opaque, lit_prefix};
+use crate::argv::{ArgvL, SlotL, argv_spec, has_opaque, lemma_slots_index, lit_prefix, slots_l};
 use crate::argv::{ArgvResult, Slot, parse_argv, word_view};
 use crate::ast::{Pipeline, Script, Simple, Word};
 use crate::bytes::bytes_eq;
@@ -107,17 +107,17 @@ pub fn code_child_l(rows: Seq<Row>, j: Int, ws: Seq<Word>) -> bool {
 /// `s` is an operand slot.
 #[cfg(creusot)]
 #[logic(open)]
-pub fn is_operand(s: Slot) -> bool {
+pub fn is_operand(s: SlotL) -> bool {
     match s {
-        Slot::Operand(_) => true,
-        Slot::Opts(_) | Slot::OptValue(_) | Slot::DashDash => false,
+        SlotL::Operand(_) => true,
+        SlotL::Opts(_) | SlotL::OptValue(_) | SlotL::DashDash => false,
     }
 }
 
 /// Some slot of `slots` is an operand.
 #[cfg(creusot)]
 #[logic(open)]
-pub fn has_operand(slots: Seq<Slot>) -> bool {
+pub fn has_operand(slots: Seq<SlotL>) -> bool {
     pearlite! { exists<t> 0 <= t && t < slots.len() && is_operand(slots[t]) }
 }
 
@@ -303,14 +303,18 @@ fn code_child(rows: &[Row], j: usize, ws: &[Word]) -> bool {
 /// The index of the first operand slot, if any.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(match result {
-    None => !has_operand(slots@),
-    Some(k) => k@ < slots@.len() && is_operand(slots@[k@]),
+    None => !has_operand(slots_l(slots@)),
+    Some(k) => k@ < slots@.len() && k@ < slots_l(slots@).len()
+        && is_operand(slots_l(slots@)[k@]),
 }))]
 fn first_operand(slots: &[Slot]) -> Option<usize> {
+    #[cfg(creusot)]
+    proof_assert! { lemma_slots_index(slots@); true };
     let mut k: usize = 0;
     #[cfg_attr(creusot, variant(slots@.len() - k@))]
     #[cfg_attr(creusot, invariant(k@ <= slots@.len()))]
-    #[cfg_attr(creusot, invariant(forall<u> 0 <= u && u < k@ ==> !is_operand(slots@[u])))]
+    #[cfg_attr(creusot, invariant(forall<u> 0 <= u && u < k@
+        ==> !is_operand(slots_l(slots@)[u])))]
     while k < slots.len() {
         match slots[k] {
             Slot::Operand(_) => return Some(k),
