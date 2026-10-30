@@ -16,6 +16,11 @@ const GUARDFALL_ALLOWED: &[&str] = &[
     "echo \"f(x)\"",
     "echo \"x(:h)\"",
     "echo hi | cat | wc -l",
+    "git log --format='%(refname)'",
+    "git log --oneline",
+    "git log | grep x | head",
+    "git push --set-upstream origin x",
+    "git push origin main",
     "rm -f 'notes(1).txt'",
     "rm -f file",
 ];
