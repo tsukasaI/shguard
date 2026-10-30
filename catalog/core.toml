@@ -644,7 +644,7 @@ targets = [
 # `./.` and `.//` spellings instead. A path that reaches `.git` below another
 # directory is not matched either.
 # macOS volumes are case-insensitive; `.GIT` evades these exact-case targets
-# until the kernel case-folds target matching (follow-up issue).
+# until the kernel case-folds target matching (#1087, M7f).
 [[rule]]
 id = "cp-block-sensitive-target"
 key = ["cp"]

@@ -334,7 +334,7 @@ fn unnormalized_relative_leads_are_not_allowed() {
 }
 
 #[test]
-#[ignore = "kernel case-fold, follow-up"]
+#[ignore = "kernel case-fold, #1087 (M7f)"]
 fn case_variants_of_blocked_paths_are_not_allowed() {
     assert_not_allow(&["rm -rf .GIT", "cp x .GIT/hooks/pre-commit"]);
 }
