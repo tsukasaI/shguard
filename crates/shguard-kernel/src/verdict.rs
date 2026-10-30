@@ -69,8 +69,6 @@ pub enum UnknownKind {
     /// likely a subcommand the catalog does not list (`git push` with only
     /// `["git"]` and `["git", "status"]`).
     UnknownSubcommand,
-    /// A redirect the model cannot reason about.
-    Redirect,
     /// A path word that is neither literal nor `~` followed by literal
     /// bytes, so it cannot be compared with rule targets.
     PathOpaque,
