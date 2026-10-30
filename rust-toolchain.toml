@@ -1,0 +1,8 @@
+# The stable toolchain CI and the release build use. It equals the rustc of
+# the flake's devShell (#1013); the `proofs` job fails when the two drift, so
+# a flake bump that moves rustc must bump this file too. Inside the devShell,
+# nixpkgs' cargo ignores this file.
+[toolchain]
+channel = "1.96.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

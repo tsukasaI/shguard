@@ -9,7 +9,9 @@
 # cargo-deny then evaluates `cfg(creusot)` as false, so the
 # verification-only creusot-std (LGPL-2.1-or-later) and its dependencies are
 # pruned from the graph for every check (licenses, bans, sources and
-# advisories alike), not only `licenses`.
+# advisories alike), not only `licenses`. creusot-std's LGPL source can still
+# show up in a `cargo vendor` or nix source bundle. Redistributing the source
+# is permitted, and it never links into a shipped binary (#1023).
 targets = [
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",
