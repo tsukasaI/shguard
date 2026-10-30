@@ -30,10 +30,14 @@
 //!
 //! An uncovered command's reason is deterministic: `OpaqueCommandName` at
 //! word 0 when the first word is not literal, `NoRow` at 0 when no key
-//! matches, and otherwise the reason of the first matching row in catalog
-//! order (`RunsCode` at 0, the argv parse's Unknown, or `UnknownSubcommand`
-//! at a parent row's first operand). The contracts pin only that the reason
-//! sits at a valid address of an uncovered command, not which reason it is.
+//! matches, and otherwise the reason of the matching row with the longest
+//! key (#1044): the most specific row is the one the command was meant for,
+//! so `git status x` reports the `status` row's `ExtraOperand`, not the
+//! `git` parent row's `UnknownSubcommand`. Rows with equal key lengths keep
+//! catalog order. The reason is `RunsCode` at 0, the argv parse's Unknown, or
+//! `UnknownSubcommand` at a parent row's first operand. The contracts pin
+//! only that the reason sits at a valid address of an uncovered command, not
+//! which reason it is.
 //!
 //! `code_child_l` guards only the exact key spelling: `python -cx` and
 //! `python --version -c x` are not caught by it. The primary defence is giving
@@ -388,21 +392,25 @@ pub fn classify_simple(cat: &Catalog, s: &Simple) -> SimpleClass {
         };
         return SimpleClass::Unknown(UnknownKind::OpaqueCommandName, 0);
     }
-    let mut first: Option<(UnknownKind, usize)> = None;
+    // The reason from the miss with the longest key so far: kind, word, key
+    // length.
+    let mut first: Option<(UnknownKind, usize, usize)> = None;
     let mut j: usize = 0;
     #[cfg_attr(creusot, variant(rows@.len() - j@))]
     #[cfg_attr(creusot, invariant(j@ <= rows@.len()))]
     #[cfg_attr(creusot, invariant(forall<m> 0 <= m && m < j@ ==> !row_covers(rows@, m, ws@)))]
     #[cfg_attr(creusot, invariant(match first {
-        Some((_, w)) => w@ < ws@.len(),
+        Some((_, w, _)) => w@ < ws@.len(),
         None => true,
     }))]
     while j < rows.len() {
         match row_fit(rows, j, ws) {
             RowFit::Covers => return SimpleClass::Covered { row: j },
             RowFit::Miss(u, w) => {
-                if first.is_none() {
-                    first = Some((u, w));
+                let len = rows[j].key.len();
+                match first {
+                    Some((_, _, best)) if best >= len => {}
+                    Some(_) | None => first = Some((u, w, len)),
                 }
             }
             RowFit::NoKey => {}
@@ -411,7 +419,7 @@ pub fn classify_simple(cat: &Catalog, s: &Simple) -> SimpleClass {
     }
     match first {
         None => SimpleClass::Unknown(UnknownKind::NoRow, 0),
-        Some((u, w)) => SimpleClass::Unknown(u, w),
+        Some((u, w, _)) => SimpleClass::Unknown(u, w),
     }
 }
 
@@ -758,7 +766,8 @@ mod tests {
         );
         assert_eq!(
             classify_simple(&cat, &cmd(&["python", "-c", "x"])),
-            unknown(UnknownKind::RunsCode, 1)
+            unknown(UnknownKind::RunsCode, 0),
+            "the longer key's own RunsCode (word 0) wins over the parent's (word 1)"
         );
     }
 
@@ -785,8 +794,13 @@ mod tests {
         );
         assert_eq!(
             classify_simple(&catalog(), &cmd(&["git", "status", "x"])),
-            unknown(UnknownKind::UnknownSubcommand, 1),
-            "the first matching row's reason wins"
+            unknown(UnknownKind::ExtraOperand, 2),
+            "the row with the longest key wins"
+        );
+        assert_eq!(
+            classify_simple(&catalog(), &cmd(&["git", "status", "--bogus"])),
+            unknown(UnknownKind::UnknownOption, 2),
+            "the option miss is reported under the `status` row"
         );
     }
 
