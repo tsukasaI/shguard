@@ -29,6 +29,11 @@ concurrency:
 
 env:
   KANI_VERSION: 0.68.0
+  # The release asset is mutable, so it is pinned by digest (#1062). A
+  # KANI_VERSION bump must update this too. Copy it from the release asset's
+  # `digest` (gh api repos/model-checking/kani/releases/tags/kani-<version>).
+  # The daily schedule run notices a replaced asset.
+  KANI_BUNDLE_SHA256: 32e2b484d73ede0bbf64a2cf0879c4259422497d8aec4ee67d448de9ae7843d3
 
 # The Kani binaries decide whether this check is green, so this workflow must
 # never run PR code in main's ref context (pull_request_target, workflow_run).
@@ -62,6 +67,9 @@ jobs:
       - name: Install Kani
         run: |
           cargo install --locked kani-verifier --version "$KANI_VERSION"
-          cargo kani setup
+          bundle="kani-$KANI_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$bundle" "https://github.com/model-checking/kani/releases/download/kani-$KANI_VERSION/$bundle"
+          echo "$KANI_BUNDLE_SHA256  $RUNNER_TEMP/$bundle" | sha256sum -c -
+          cargo kani setup --use-local-bundle "$RUNNER_TEMP/$bundle"
       - name: Run Kani harness
         run: cargo kani -p shguard-syntax --harness "${{ matrix.harness }}"
