@@ -56,8 +56,9 @@ jobs:
       # The official kani-github-action installs Rust through an unpinned
       # dtolnay/rust-toolchain@stable, so Kani is installed here by pinned
       # version instead.
-      - name: Install stable toolchain
-        run: rustup toolchain install stable --profile minimal --no-self-update
+      # Installs the toolchain rust-toolchain.toml names (#1013).
+      - name: Install toolchain
+        run: rustup toolchain install --no-self-update
       - name: Install Kani
         run: |
           cargo install --locked kani-verifier --version "$KANI_VERSION"

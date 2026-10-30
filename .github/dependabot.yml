@@ -10,3 +10,6 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Pinned to the flake's Creusot release (#1022); it moves with the flake.
+    ignore:
+      - dependency-name: "creusot-std"

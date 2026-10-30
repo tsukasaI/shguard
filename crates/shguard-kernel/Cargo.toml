@@ -10,6 +10,8 @@ publish.workspace = true
 workspace = true
 
 # Creusot is a verification-only dependency (LGPL-2.1-or-later): it exists
-# only under `cargo creusot`, which passes `--cfg creusot`.
+# only under `cargo creusot`, which passes `--cfg creusot`. It is pinned
+# exactly to the flake's Creusot release (#1022). Only a flake bump moves it,
+# so Dependabot ignores it.
 [target.'cfg(creusot)'.dependencies]
-creusot-std = "0.14.0"
+creusot-std = "=0.14.0"

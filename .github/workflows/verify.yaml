@@ -20,11 +20,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install stable toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+      # Installs the toolchain rust-toolchain.toml names (#1013).
+      - name: Install toolchain
+        run: rustup toolchain install --no-self-update
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
+      # The spike has its own lockfile. A nix-form one, with no source or
+      # checksum for creusot-std, must not land there either (#1020).
+      - name: Spike lockfile is the registry form
+        run: cargo metadata --locked --format-version 1 --manifest-path spikes/lattice/Cargo.toml > /dev/null
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
@@ -68,6 +73,15 @@ jobs:
             spikes/lattice/.why3find
           key: why3find-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'why3find.json', 'spikes/lattice/why3find.json') }}-${{ github.sha }}
           restore-keys: why3find-${{ runner.os }}-${{ hashFiles('flake.nix', 'flake.lock', 'why3find.json', 'spikes/lattice/why3find.json') }}-
+      # rust-toolchain.toml pins the `rust` job and the release build to the
+      # devShell's rustc (#1013). This step fails when a flake bump moves
+      # only one of them.
+      - name: Toolchain parity
+        run: |
+          want=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          have=$(nix develop -c rustc --version | cut -d' ' -f2)
+          echo "rust-toolchain.toml: $want, devShell: $have"
+          test -n "$want" && test "$want" = "$have"
       - name: Prove spike
         working-directory: spikes/lattice
         run: nix develop ../.. -c cargo creusot --span-mode relative
