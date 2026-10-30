@@ -524,9 +524,26 @@ fn option_like_key_segment() {
             "{seg}"
         );
     }
-    // A `runs_code` row can never cover a command, so it may be option-like.
+    // A `runs_code` row may be option-like only as a single option spelling.
     let code = row("\"rm\", \"-rf\"", "runs_code = true");
-    assert!(load_one(&format!("{rm}{code}")).is_ok());
+    assert!(
+        errors(&format!("{rm}{code}"))
+            .iter()
+            .any(|e| matches!(e, LoadError::OptionLikeKey { .. }))
+    );
+    let flag_f = row("\"rm\"", "[[row.opt]]\nshort = \"f\"\n");
+    let rm_f = row("\"rm\", \"-f\"", "runs_code = true");
+    assert!(
+        errors(&format!("{flag_f}{rm_f}"))
+            .iter()
+            .any(|e| matches!(e, LoadError::ParentOptNotCode { .. }))
+    );
+    let py = row(
+        "\"python\"",
+        "[[row.opt]]\nshort = \"c\"\nvalue = { takes = \"code\" }\n",
+    );
+    let py_c = row("\"python\", \"-c\"", "runs_code = true");
+    assert!(load_one(&format!("{py}{py_c}")).is_ok());
     // Rules: rejected unless the key is that of a `runs_code` row.
     let bad_rule = "[[rule]]\nid = \"r\"\nkey = [\"rm\", \"-rf\"]\noutcome = \"ask\"\n";
     assert!(
@@ -534,7 +551,8 @@ fn option_like_key_segment() {
             .iter()
             .any(|e| matches!(e, LoadError::OptionLikeKey { .. }))
     );
-    assert!(load_one(&format!("{rm}{code}{bad_rule}")).is_ok());
+    let py_rule = "[[rule]]\nid = \"r\"\nkey = [\"python\", \"-c\"]\noutcome = \"ask\"\n";
+    assert!(load_one(&format!("{py}{py_c}{py_rule}")).is_ok());
 }
 
 #[test]

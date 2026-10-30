@@ -192,10 +192,20 @@ fn value(v: ValueDto) -> OptValue {
 
 /// Whether a key segment starts with `-` or `+`. Such a segment would be
 /// selected ahead of a shorter row and swallow the option (`["rm", "-rf"]`
-/// over `["rm"]`). Only a `runs_code` row may have one (`["python", "-c"]`,
-/// #1070): it can never cover a command, so it cannot widen Allow.
+/// over `["rm"]`). Only a `runs_code` row may have one, and only as its last
+/// segment spelling a single option (`["python", "-c"]`, #1070): it can never
+/// cover a command, so it cannot widen Allow.
 fn option_like(key: &[String]) -> bool {
     key.iter().any(|s| s.starts_with(['-', '+']))
+}
+
+/// Whether the key's only option-like segment is the last one and reads as
+/// `-x` or `--name`.
+fn is_option_child(key: &[String]) -> bool {
+    match key.split_last() {
+        Some((last, init)) => !option_like(init) && spelling(last.as_bytes()).is_some(),
+        None => false,
+    }
 }
 
 fn seg_bytes(key: &[String]) -> Vec<Vec<u8>> {
@@ -257,7 +267,7 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             row: label.clone(),
         });
     }
-    if !dto.runs_code && option_like(&dto.key) {
+    if option_like(&dto.key) && !(dto.runs_code && is_option_child(&dto.key)) {
         errs.push(LoadError::OptionLikeKey {
             file: file.to_owned(),
             item: format!("row `{label}`"),

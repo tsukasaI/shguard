@@ -4,7 +4,7 @@
 
 use std::ffi::OsString;
 use std::io::{IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use shguard::catalog::{EMBEDDED, LoadError, Source, load};
@@ -101,6 +101,15 @@ fn load_settings() -> Result<Settings, Vec<LoadError>> {
             Location::Nowhere => return settings(EMBEDDED, None),
             Location::Default(p) => (p, true),
             Location::Explicit(p) => (p, false),
+            Location::Relative(p) => {
+                return Err(vec![LoadError::Read {
+                    file: p.to_string_lossy().into_owned(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "SHGUARD_CONFIG must be an absolute path",
+                    ),
+                }]);
+            }
         };
     let name = path.to_string_lossy().into_owned();
     match std::fs::read_to_string(&path) {
@@ -118,7 +127,7 @@ fn check(files: &[PathBuf], err: &mut impl Write) -> ExitCode {
     let mut failed = false;
     for path in files {
         let name = path.to_string_lossy().into_owned();
-        match read(path) {
+        match std::fs::read_to_string(path) {
             Ok(text) => texts.push((name, text)),
             Err(e) => {
                 drop(writeln!(err, "{name}: {e}"));
@@ -143,8 +152,4 @@ fn check(files: &[PathBuf], err: &mut impl Write) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
-}
-
-fn read(path: &Path) -> std::io::Result<String> {
-    std::fs::read_to_string(path)
 }

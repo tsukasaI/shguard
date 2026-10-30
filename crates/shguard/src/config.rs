@@ -12,8 +12,12 @@
 //!
 //! Rows and rules are merged with the embedded catalog through the same
 //! checks as every catalog file, so a duplicate key against an embedded row
-//! is a load error: nothing can be shadowed. A user `[[row]]` widens Allow
-//! and the user owns that. To distrust a row, add a `[[rule]]` instead. A
+//! is a load error. A longer user key still shadows its parent for the
+//! commands it matches. A user `[[row]]` widens Allow and the user owns
+//! that. Under `ask_outcome = "ask"` an embedded Block holds only for
+//! commands the catalog covers: an unknown option makes the command
+//! uncovered, so it is an Ask. `SHGUARD_CONFIG` must be an absolute path.
+//! To distrust a row, add a `[[rule]]` instead. A
 //! rule with a key and no `opts` or `targets` hits every command under that
 //! key, so `[[rule]] key = ["rm"] outcome = "ask"` makes every `rm` an Ask.
 
@@ -42,6 +46,9 @@ pub enum Location {
     Default(PathBuf),
     /// `SHGUARD_CONFIG`. A missing file is a load error.
     Explicit(PathBuf),
+    /// `SHGUARD_CONFIG` is not absolute: a load error, since the hook's
+    /// working directory is not under the user's control.
+    Relative(PathBuf),
 }
 
 /// Picks the config path from the two environment variables. An empty value
@@ -49,7 +56,12 @@ pub enum Location {
 #[must_use]
 pub fn locate(shguard_config: Option<OsString>, home: Option<OsString>) -> Location {
     if let Some(p) = shguard_config.filter(|p| !p.is_empty()) {
-        return Location::Explicit(PathBuf::from(p));
+        let path = PathBuf::from(p);
+        return if path.is_absolute() {
+            Location::Explicit(path)
+        } else {
+            Location::Relative(path)
+        };
     }
     match home.filter(|h| !h.is_empty()) {
         Some(h) => Location::Default(
@@ -110,6 +122,10 @@ mod tests {
         assert_eq!(
             locate(os("/c.toml"), os("/h")),
             Location::Explicit(PathBuf::from("/c.toml"))
+        );
+        assert_eq!(
+            locate(os("rel.toml"), os("/h")),
+            Location::Relative(PathBuf::from("rel.toml"))
         );
         assert_eq!(
             locate(os(""), os("/h")),

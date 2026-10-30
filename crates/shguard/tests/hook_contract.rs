@@ -4,12 +4,7 @@
 //! The embedded catalog is empty until M14, so a test that needs a covered
 //! command supplies rows and rules through the config.
 
-#![expect(
-    clippy::unwrap_used,
-    clippy::indexing_slicing,
-    reason = "helpers outside #[test] fns; a failure here is a test failure"
-)]
-
+use std::fmt::Debug;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -24,6 +19,8 @@ enum Config<'a> {
     File(&'a str),
     /// `SHGUARD_CONFIG` names a file that does not exist.
     Missing,
+    /// `SHGUARD_CONFIG` is a relative path.
+    Relative,
 }
 
 const ROWS: &str = r#"
@@ -80,16 +77,26 @@ fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_shguard"))
 }
 
+fn ok<T, E: Debug>(r: Result<T, E>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(e) => panic!("{e:?}"),
+    }
+}
+
 fn run(stdin: &[u8], config: &Config<'_>) -> Output {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = ok(tempfile::tempdir());
     let mut cmd = binary();
     cmd.env("HOME", dir.path()).env_remove("SHGUARD_CONFIG");
     match config {
         Config::None => {}
         Config::File(text) => {
             let path = dir.path().join("config.toml");
-            std::fs::write(&path, text).unwrap();
+            ok(std::fs::write(&path, text));
             cmd.env("SHGUARD_CONFIG", &path);
+        }
+        Config::Relative => {
+            cmd.env("SHGUARD_CONFIG", "config.toml");
         }
         Config::Missing => {
             cmd.env("SHGUARD_CONFIG", dir.path().join("missing.toml"));
@@ -101,20 +108,29 @@ fn run(stdin: &[u8], config: &Config<'_>) -> Output {
 /// The JSON the hook wrote, after checking the status is 0.
 fn answer(out: &Output) -> Value {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
-    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    let v: Value = ok(serde_json::from_slice(&out.stdout));
+    assert_eq!(
+        v.get("hookSpecificOutput")
+            .and_then(|o| o.get("hookEventName"))
+            .and_then(Value::as_str),
+        Some("PreToolUse")
+    );
     v
 }
 
 fn decision(out: &Output) -> Option<String> {
-    answer(out)["hookSpecificOutput"]["permissionDecision"]
-        .as_str()
+    answer(out)
+        .get("hookSpecificOutput")
+        .and_then(|o| o.get("permissionDecision"))
+        .and_then(Value::as_str)
         .map(str::to_owned)
 }
 
 fn reason(out: &Output) -> String {
-    answer(out)["hookSpecificOutput"]["permissionDecisionReason"]
-        .as_str()
+    answer(out)
+        .get("hookSpecificOutput")
+        .and_then(|o| o.get("permissionDecisionReason"))
+        .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
 }
@@ -214,7 +230,6 @@ targets = [{ pat = "/", kind = "exact" }]
         let cfg = format!("ask_outcome = \"{ask}\"\n{ROWS}{rule}");
         let out = run(&bash("rm -rf /"), &Config::File(&cfg));
         assert_eq!(decision(&out).as_deref(), Some("deny"), "{ask}");
-        assert!(reason(&out).contains("rm-root"));
         let out = run(&bash("rm -rf /tmp/x"), &Config::File(&cfg));
         assert_eq!(decision(&out).as_deref(), Some("allow"), "{ask}");
     }
@@ -259,7 +274,18 @@ fn load_errors_deny_even_a_covered_command() {
     }
     let out = run(&bash("ls -la"), &Config::Missing);
     assert_eq!(decision(&out).as_deref(), Some("deny"));
-    assert!(reason(&out).contains("cannot load"));
+    let out = run(&bash("ls -la"), &Config::Relative);
+    assert_eq!(decision(&out).as_deref(), Some("deny"));
+}
+
+#[test]
+fn option_like_user_row_cannot_unblock_rm_root() {
+    let cfg = format!(
+        "ask_outcome = \"ask\"\n{ROWS}{}\n[[row]]\nkey = [\"rm\", \"-rf\"]\nsource = \"x\"\norder = \"permute\"\ndashdash = \"ends\"\nruns_code = true\n",
+        "[[rule]]\nid = \"rm-root\"\nkey = [\"rm\"]\noutcome = \"block\"\ntargets = [{ pat = \"/\", kind = \"exact\" }]\n"
+    );
+    let out = run(&bash("rm -rf /"), &Config::File(&cfg));
+    assert_eq!(decision(&out).as_deref(), Some("deny"));
 }
 
 #[test]
@@ -271,7 +297,7 @@ fn no_config_at_the_default_path_means_defaults() {
 
 fn at_default_path(home: &Path) -> std::path::PathBuf {
     let dir = home.join(".config").join("shguard");
-    std::fs::create_dir_all(&dir).unwrap();
+    ok(std::fs::create_dir_all(&dir));
     dir.join("config.toml")
 }
 

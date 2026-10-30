@@ -70,6 +70,12 @@ fn load_reason(errs: &[LoadError]) -> String {
         n => format!(" (+{} more)", n - 1),
     };
     match errs.first() {
+        // The TOML error would echo config lines into the model's context.
+        Some(LoadError::Toml { file, .. }) => {
+            format!(
+                "shguard cannot load its config or catalog: {file}: invalid TOML or schema{more}"
+            )
+        }
         Some(first) => format!("shguard cannot load its config or catalog: {first}{more}"),
         None => "shguard cannot load its config or catalog".to_owned(),
     }
