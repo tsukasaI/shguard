@@ -1,0 +1,199 @@
+# The embedded gh catalog: read-only `pr`, `issue` and `run` subcommands.
+#
+# Only commands that print what GitHub returns are rows. Left out on purpose:
+# `--web`/`-w` (opens a browser), `gh api`, `gh auth`, `gh extension`,
+# `gh alias` and every subcommand that edits (`merge`, `create`, `close`,
+# `comment`, `rerun`, ...). A parent row has no options, so a global option
+# before the subcommand (`gh -R x pr view`) and an unlisted subcommand are
+# Unknown. `--jq` runs gojq inside gh and `--template` a Go template; neither
+# starts a program, but a jq filter can read gh's environment (`env`), so an
+# Allow does not mean the output is free of secrets. `--watch` on
+# `pr checks` only polls the API every `--interval` seconds, so it is
+# allowed; it can run until the tool's own timeout. `-R/--repo` is a
+# repository name, not a path.
+
+[[row]]
+key = ["gh"]
+source = "https://cli.github.com/manual/gh"
+order = "permute"
+dashdash = "ends"
+
+[[row]]
+key = ["gh", "pr"]
+source = "https://cli.github.com/manual/gh_pr"
+order = "permute"
+dashdash = "ends"
+
+[[row]]
+key = ["gh", "issue"]
+source = "https://cli.github.com/manual/gh_issue"
+order = "permute"
+dashdash = "ends"
+
+[[row]]
+key = ["gh", "run"]
+source = "https://cli.github.com/manual/gh_run"
+order = "permute"
+dashdash = "ends"
+
+# ---- gh pr ----
+
+[[row]]
+key = ["gh", "pr", "view"]
+source = "https://cli.github.com/manual/gh_pr_view"
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]
+opt = [
+  { short = "c", long = "comments" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "pr", "list"]
+source = "https://cli.github.com/manual/gh_pr_list"
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "a", long = "assignee", value = { takes = "inert" } },
+  { long = "app", value = { takes = "inert" } },
+  { short = "A", long = "author", value = { takes = "inert" } },
+  { short = "B", long = "base", value = { takes = "inert" } },
+  { short = "d", long = "draft" },
+  { short = "H", long = "head", value = { takes = "inert" } },
+  { short = "l", long = "label", value = { takes = "inert" } },
+  { short = "L", long = "limit", value = { takes = "inert" } },
+  { short = "S", long = "search", value = { takes = "inert" } },
+  { short = "s", long = "state", value = { takes = "inert" } },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "pr", "diff"]
+source = "https://cli.github.com/manual/gh_pr_diff"
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]
+opt = [
+  { long = "color", value = { takes = "inert" } },
+  { long = "name-only" },
+  { long = "patch" },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+# `--watch` polls only; `--interval` is its period in seconds.
+[[row]]
+key = ["gh", "pr", "checks"]
+source = "https://cli.github.com/manual/gh_pr_checks"
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]
+opt = [
+  { long = "fail-fast" },
+  { short = "i", long = "interval", value = { takes = "inert" } },
+  { long = "required" },
+  { long = "watch" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "pr", "status"]
+source = "https://cli.github.com/manual/gh_pr_status"
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "c", long = "conflict-status" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+# ---- gh issue ----
+
+[[row]]
+key = ["gh", "issue", "view"]
+source = "https://cli.github.com/manual/gh_issue_view"
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]
+opt = [
+  { short = "c", long = "comments" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "issue", "list"]
+source = "https://cli.github.com/manual/gh_issue_list"
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "a", long = "assignee", value = { takes = "inert" } },
+  { long = "app", value = { takes = "inert" } },
+  { short = "A", long = "author", value = { takes = "inert" } },
+  { short = "l", long = "label", value = { takes = "inert" } },
+  { short = "L", long = "limit", value = { takes = "inert" } },
+  { long = "mention", value = { takes = "inert" } },
+  { short = "m", long = "milestone", value = { takes = "inert" } },
+  { short = "S", long = "search", value = { takes = "inert" } },
+  { short = "s", long = "state", value = { takes = "inert" } },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+# ---- gh run ----
+
+# `--log` and `--log-failed` print the job logs.
+[[row]]
+key = ["gh", "run", "view"]
+source = "https://cli.github.com/manual/gh_run_view"
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]
+opt = [
+  { short = "a", long = "attempt", value = { takes = "inert" } },
+  { long = "exit-status" },
+  { short = "j", long = "job", value = { takes = "inert" } },
+  { long = "log" },
+  { long = "log-failed" },
+  { short = "v", long = "verbose" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "run", "list"]
+source = "https://cli.github.com/manual/gh_run_list"
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "a", long = "all" },
+  { short = "b", long = "branch", value = { takes = "inert" } },
+  { short = "c", long = "commit", value = { takes = "inert" } },
+  { long = "created", value = { takes = "inert" } },
+  { short = "e", long = "event", value = { takes = "inert" } },
+  { short = "L", long = "limit", value = { takes = "inert" } },
+  { short = "s", long = "status", value = { takes = "inert" } },
+  { short = "u", long = "user", value = { takes = "inert" } },
+  { short = "w", long = "workflow", value = { takes = "inert" } },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]

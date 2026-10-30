@@ -1,0 +1,327 @@
+# The embedded cargo catalog: build, test, check, clippy, fmt and doc.
+#
+# These are normal rows, so they can be Allowed. A build runs the project's
+# build.rs and proc macros, and a test runs its test binary; that is repo code
+# and falls under P3 (the repo is trusted to that extent), which the threat
+# model documents. What the rows do not list is what keeps cargo from running
+# code or config that the command line names:
+#   - `run`, `install`, `bench`, `fix`, `clippy --fix`, `doc --open` (browser);
+#   - `--config`, `-Z` and the other unstable flags, `--target-dir`,
+#     `--artifact-dir`, `--lockfile-path`, `--timings`, `--target`, `-C`;
+#   - `+toolchain`: the parent row has no options and rejects `+words`, so
+#     `cargo +nightly build` is Unknown, and so is `cargo -Z x build`.
+# `cargo fmt` without `--check` rewrites source files in place.
+#
+# `--` ends cargo's options (`dashdash = "ends"`); what follows goes to the
+# child program, so a `--config` after `--` is not cargo's. test: the test
+# binary's flags are inert. clippy and fmt: the words after `--` are read as
+# paths, so the rules below can Ask for the flags of rustc/rustfmt that load
+# code or write files (`-Z`, `-C`, `--print-config`, ...). build, check and
+# doc have no operands, so a word after `--` is Unknown.
+
+[[row]]
+key = ["cargo"]
+source = "https://doc.rust-lang.org/cargo/commands/index.html"
+order = "permute"
+dashdash = "ends"
+
+[[row]]
+key = ["cargo", "build"]
+source = "https://doc.rust-lang.org/cargo/commands/cargo-build.html"
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "p", long = "package", value = { takes = "inert" } },
+  { long = "workspace" },
+  { long = "exclude", value = { takes = "inert" } },
+  { long = "lib" },
+  { long = "bins" },
+  { long = "bin", value = { takes = "inert" } },
+  { long = "examples" },
+  { long = "example", value = { takes = "inert" } },
+  { long = "tests" },
+  { long = "test", value = { takes = "inert" } },
+  { long = "benches" },
+  { long = "bench", value = { takes = "inert" } },
+  { long = "all-targets" },
+  { short = "F", long = "features", value = { takes = "inert" } },
+  { long = "all-features" },
+  { long = "no-default-features" },
+  { short = "r", long = "release" },
+  { long = "profile", value = { takes = "inert" } },
+  { long = "manifest-path", value = { takes = "path" } },
+  { long = "message-format", value = { takes = "inert" } },
+  { long = "color", value = { takes = "inert" } },
+  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "locked" },
+  { long = "offline" },
+  { long = "frozen" },
+  { short = "q", long = "quiet" },
+  { short = "v", long = "verbose" },
+  { long = "keep-going" },
+  { long = "ignore-rust-version" },
+]
+
+[[row]]
+key = ["cargo", "check"]
+source = "https://doc.rust-lang.org/cargo/commands/cargo-check.html"
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "p", long = "package", value = { takes = "inert" } },
+  { long = "workspace" },
+  { long = "exclude", value = { takes = "inert" } },
+  { long = "lib" },
+  { long = "bins" },
+  { long = "bin", value = { takes = "inert" } },
+  { long = "examples" },
+  { long = "example", value = { takes = "inert" } },
+  { long = "tests" },
+  { long = "test", value = { takes = "inert" } },
+  { long = "benches" },
+  { long = "bench", value = { takes = "inert" } },
+  { long = "all-targets" },
+  { short = "F", long = "features", value = { takes = "inert" } },
+  { long = "all-features" },
+  { long = "no-default-features" },
+  { short = "r", long = "release" },
+  { long = "profile", value = { takes = "inert" } },
+  { long = "manifest-path", value = { takes = "path" } },
+  { long = "message-format", value = { takes = "inert" } },
+  { long = "color", value = { takes = "inert" } },
+  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "locked" },
+  { long = "offline" },
+  { long = "frozen" },
+  { short = "q", long = "quiet" },
+  { short = "v", long = "verbose" },
+  { long = "keep-going" },
+  { long = "ignore-rust-version" },
+]
+
+# `--no-run` builds the tests without running them; `--doc` runs doctests.
+# The words after `--` are the test binary's flags, such as `--include-ignored`.
+[[row]]
+key = ["cargo", "test"]
+source = "https://doc.rust-lang.org/cargo/commands/cargo-test.html https://doc.rust-lang.org/rustc/tests/index.html"
+order = "permute"
+dashdash = "ends"
+rest = "inert"
+opt = [
+  { short = "p", long = "package", value = { takes = "inert" } },
+  { long = "workspace" },
+  { long = "exclude", value = { takes = "inert" } },
+  { long = "lib" },
+  { long = "bins" },
+  { long = "bin", value = { takes = "inert" } },
+  { long = "examples" },
+  { long = "example", value = { takes = "inert" } },
+  { long = "tests" },
+  { long = "test", value = { takes = "inert" } },
+  { long = "benches" },
+  { long = "bench", value = { takes = "inert" } },
+  { long = "all-targets" },
+  { short = "F", long = "features", value = { takes = "inert" } },
+  { long = "all-features" },
+  { long = "no-default-features" },
+  { short = "r", long = "release" },
+  { long = "profile", value = { takes = "inert" } },
+  { long = "manifest-path", value = { takes = "path" } },
+  { long = "message-format", value = { takes = "inert" } },
+  { long = "color", value = { takes = "inert" } },
+  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "locked" },
+  { long = "offline" },
+  { long = "frozen" },
+  { short = "q", long = "quiet" },
+  { short = "v", long = "verbose" },
+  { long = "keep-going" },
+  { long = "ignore-rust-version" },
+  { long = "no-run" },
+  { long = "no-fail-fast" },
+  { long = "doc" },
+]
+
+# `--fix` is left out (it edits source). The words after `--` go to
+# clippy-driver / rustc, e.g. `-D warnings`.
+[[row]]
+key = ["cargo", "clippy"]
+source = "https://doc.rust-lang.org/cargo/commands/cargo-clippy.html https://doc.rust-lang.org/clippy/usage.html"
+order = "permute"
+dashdash = "ends"
+rest = "path"
+opt = [
+  { short = "p", long = "package", value = { takes = "inert" } },
+  { long = "workspace" },
+  { long = "exclude", value = { takes = "inert" } },
+  { long = "lib" },
+  { long = "bins" },
+  { long = "bin", value = { takes = "inert" } },
+  { long = "examples" },
+  { long = "example", value = { takes = "inert" } },
+  { long = "tests" },
+  { long = "test", value = { takes = "inert" } },
+  { long = "benches" },
+  { long = "bench", value = { takes = "inert" } },
+  { long = "all-targets" },
+  { short = "F", long = "features", value = { takes = "inert" } },
+  { long = "all-features" },
+  { long = "no-default-features" },
+  { short = "r", long = "release" },
+  { long = "profile", value = { takes = "inert" } },
+  { long = "manifest-path", value = { takes = "path" } },
+  { long = "message-format", value = { takes = "inert" } },
+  { long = "color", value = { takes = "inert" } },
+  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "locked" },
+  { long = "offline" },
+  { long = "frozen" },
+  { short = "q", long = "quiet" },
+  { short = "v", long = "verbose" },
+  { long = "keep-going" },
+  { long = "ignore-rust-version" },
+  { long = "no-deps" },
+]
+
+# The words after `--` go to rustfmt, e.g. `--check`.
+[[row]]
+key = ["cargo", "fmt"]
+source = "https://doc.rust-lang.org/cargo/commands/cargo-fmt.html https://github.com/rust-lang/rustfmt#running-rustfmt"
+order = "permute"
+dashdash = "ends"
+rest = "path"
+opt = [
+  { long = "check" },
+  { long = "all" },
+  { short = "p", long = "package", value = { takes = "inert" } },
+  { long = "manifest-path", value = { takes = "path" } },
+  { long = "message-format", value = { takes = "inert" } },
+  { short = "q", long = "quiet" },
+  { short = "v", long = "verbose" },
+]
+
+# `--open` is left out (it starts a browser).
+[[row]]
+key = ["cargo", "doc"]
+source = "https://doc.rust-lang.org/cargo/commands/cargo-doc.html"
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "p", long = "package", value = { takes = "inert" } },
+  { long = "workspace" },
+  { long = "exclude", value = { takes = "inert" } },
+  { long = "lib" },
+  { long = "bins" },
+  { long = "bin", value = { takes = "inert" } },
+  { long = "examples" },
+  { long = "example", value = { takes = "inert" } },
+  { short = "F", long = "features", value = { takes = "inert" } },
+  { long = "all-features" },
+  { long = "no-default-features" },
+  { short = "r", long = "release" },
+  { long = "profile", value = { takes = "inert" } },
+  { long = "manifest-path", value = { takes = "path" } },
+  { long = "message-format", value = { takes = "inert" } },
+  { long = "color", value = { takes = "inert" } },
+  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "locked" },
+  { long = "offline" },
+  { long = "frozen" },
+  { short = "q", long = "quiet" },
+  { short = "v", long = "verbose" },
+  { long = "keep-going" },
+  { long = "ignore-rust-version" },
+  { long = "no-deps" },
+  { long = "document-private-items" },
+]
+
+# Ask: an absolute or `~` manifest path can point at a project outside the
+# working tree, whose build.rs would run. The same targets cover the words
+# after `--` for clippy and fmt; clippy and fmt also ask for the rustc and
+# rustfmt flags that load code, change the toolchain or write files.
+[[rule]]
+id = "cargo-build-ask-nonlocal-target"
+key = ["cargo", "build"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+]
+
+[[rule]]
+id = "cargo-check-ask-nonlocal-target"
+key = ["cargo", "check"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+]
+
+[[rule]]
+id = "cargo-test-ask-nonlocal-target"
+key = ["cargo", "test"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+]
+
+[[rule]]
+id = "cargo-doc-ask-nonlocal-target"
+key = ["cargo", "doc"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+]
+
+[[rule]]
+id = "cargo-clippy-ask-nonlocal-target"
+key = ["cargo", "clippy"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+  { pat = "-Z", kind = "prefix" },
+  { pat = "-C", kind = "prefix" },
+  { pat = "--codegen", kind = "prefix" },
+  { pat = "-L", kind = "prefix" },
+  { pat = "-o", kind = "prefix" },
+  { pat = "--out-dir", kind = "prefix" },
+  { pat = "--emit", kind = "prefix" },
+  { pat = "--print", kind = "prefix" },
+  { pat = "--extern", kind = "prefix" },
+  { pat = "--sysroot", kind = "prefix" },
+  { pat = "--target", kind = "prefix" },
+  { pat = "--remap-path-prefix", kind = "prefix" },
+  { pat = "--pretty", kind = "prefix" },
+]
+
+[[rule]]
+id = "cargo-fmt-ask-nonlocal-target"
+key = ["cargo", "fmt"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "^", kind = "prefix" },
+  { pat = "./.", kind = "prefix" },
+  { pat = ".//", kind = "prefix" },
+  { pat = "--print-config", kind = "prefix" },
+  { pat = "--emit", kind = "prefix" },
+]
