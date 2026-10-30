@@ -15,11 +15,75 @@ use super::dto::{
     PlusWordsDto, RoleDto, RowDto, RuleDto, ScopeDto, TargetDto, ValueDto,
 };
 
-/// Command heads whose tools have dash-less option bundles (`tar xf`) or
-/// single-dash long options (`find -exec`, `ps -ef`) that the option grammar
-/// cannot express (#1039). A row for one of them must set `runs_code`, so it
-/// can never cover a command. Extended in M14.
-const INEXPRESSIBLE_HEADS: [&[u8]; 4] = [b"tar", b"ps", b"ar", b"find"];
+/// Command heads that get no coverable row, whatever the user config says.
+/// A row for one of them must set `runs_code`, so it can never cover a
+/// command: such a command is an Ask by Unknown. Each head is here for one
+/// of these reasons:
+///
+/// - its option syntax is outside the grammar: dash-less bundles (`tar xf`)
+///   or single-dash long options (`find -exec`, `ps -ef`, #1039);
+/// - it runs the program or script it is given, or evaluates its argument
+///   (wrappers, shell builtins that run text, interpreters);
+/// - it opens a connection or a session to another system or a multiplexer
+///   (`ssh`, `docker`, `kubectl`, `tmux`, `socat`);
+/// - it changes what later commands do or schedules code (`trap`, `crontab`).
+///
+/// The `g`-prefixed names are the Homebrew GNU builds of the same tools.
+const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
+    // Option syntax outside the grammar (#1039).
+    b"tar",
+    b"ps",
+    b"ar",
+    b"find",
+    b"gtar",
+    b"gfind",
+    // Shell builtins that run text or replace the shell.
+    b"eval",
+    b"source",
+    b".",
+    b"exec",
+    b"command",
+    b"builtin",
+    b"trap",
+    // Wrappers that run another command.
+    b"xargs",
+    b"gxargs",
+    b"env",
+    b"nohup",
+    b"timeout",
+    b"nice",
+    b"sudo",
+    b"doas",
+    b"watch",
+    b"script",
+    b"parallel",
+    b"flock",
+    b"strace",
+    // `split --filter` runs a command per chunk.
+    b"split",
+    // Remote, container and multiplexer sessions; fd runs `-x`/`-X`.
+    b"ssh",
+    b"docker",
+    b"kubectl",
+    b"socat",
+    b"tmux",
+    b"fd",
+    // Schedules code to run later.
+    b"crontab",
+    // Interpreters: their argument is a program.
+    b"sed",
+    b"gsed",
+    b"awk",
+    b"gawk",
+    b"perl",
+    b"node",
+    b"python",
+    b"python3",
+    b"ruby",
+    b"bash",
+    b"sh",
+    b"zsh",
+];
 
 /// One catalog file's name and text.
 #[derive(Debug, Clone, Copy)]
