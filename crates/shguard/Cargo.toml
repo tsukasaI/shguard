@@ -11,10 +11,11 @@ workspace = true
 
 [dependencies]
 shguard-kernel = { path = "../shguard-kernel", version = "0.0.0" } # version: cargo-deny bans wildcard path dependencies
+shguard-syntax = { path = "../shguard-syntax", version = "0.0.0" } # version: cargo-deny bans wildcard path dependencies
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 thiserror = "2.0.21"
 toml = "1.1.8"
 
 [dev-dependencies]
-shguard-syntax = { path = "../shguard-syntax", version = "0.0.0" } # version: cargo-deny bans wildcard path dependencies
 tempfile = "3.27.0"

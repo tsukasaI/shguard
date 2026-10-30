@@ -13,6 +13,29 @@ pub(super) struct FileDto {
     pub(super) rule: Vec<RuleDto>,
 }
 
+/// The user config: `ask_outcome` plus rows and rules in the catalog schema.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ConfigDto {
+    #[serde(default)]
+    pub(super) ask_outcome: AskOutcome,
+    #[serde(default)]
+    pub(super) row: Vec<RowDto>,
+    #[serde(default)]
+    pub(super) rule: Vec<RuleDto>,
+}
+
+/// What an Ask becomes when the hook answers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AskOutcome {
+    /// Refuse it. The default, since an autonomous session cannot answer.
+    #[default]
+    Deny,
+    /// Let Claude Code ask the user.
+    Ask,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(super) enum RoleDto {

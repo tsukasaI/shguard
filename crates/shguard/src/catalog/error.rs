@@ -62,6 +62,16 @@ pub enum LoadError {
         row: String,
         opt: String,
     },
+    /// A row or rule key segment starts with `-` or `+`, and the key is not
+    /// that of a `runs_code` row. `item` is "row `key`" or "rule `id`".
+    #[error("{file}: {item}: key segment starts with `-` or `+`")]
+    OptionLikeKey { file: String, item: String },
+    /// A file could not be read.
+    #[error("{file}: {source}")]
+    Read {
+        file: String,
+        source: std::io::Error,
+    },
     /// Two rules share an id.
     #[error("{file}: rule `{rule}`: duplicate id")]
     DuplicateRuleId { file: String, rule: String },

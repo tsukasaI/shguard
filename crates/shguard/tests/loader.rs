@@ -493,6 +493,63 @@ fn end_to_end_decisions() {
     assert_eq!(decision(&l, "date +%s"), Decision::Allow);
 }
 
+#[test]
+fn option_like_key_segment() {
+    // The shape that matters: a user row ["rm", "-rf"] next to an embedded
+    // ["rm"] would be selected over it and swallow `-rf`.
+    let rm = row("\"rm\"", "rest = \"path\"\n[[row.opt]]\nshort = \"r\"\n");
+    for seg in ["-rf", "+x", "--force"] {
+        let user = row(&format!("\"rm\", \"{seg}\""), "rest = \"path\"");
+        assert!(
+            errors(&format!("{rm}{user}"))
+                .iter()
+                .any(|e| matches!(e, LoadError::OptionLikeKey { .. })),
+            "{seg}"
+        );
+        // Across files, as an embedded row and a user row.
+        let errs = load(&[
+            Source {
+                name: "embedded.toml",
+                text: &rm,
+            },
+            Source {
+                name: "user.toml",
+                text: &user,
+            },
+        ])
+        .unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, LoadError::OptionLikeKey { file, .. } if file == "user.toml")),
+            "{seg}"
+        );
+    }
+    // A `runs_code` row can never cover a command, so it may be option-like.
+    let code = row("\"rm\", \"-rf\"", "runs_code = true");
+    assert!(load_one(&format!("{rm}{code}")).is_ok());
+    // Rules: rejected unless the key is that of a `runs_code` row.
+    let bad_rule = "[[rule]]\nid = \"r\"\nkey = [\"rm\", \"-rf\"]\noutcome = \"ask\"\n";
+    assert!(
+        errors(&format!("{rm}{bad_rule}"))
+            .iter()
+            .any(|e| matches!(e, LoadError::OptionLikeKey { .. }))
+    );
+    assert!(load_one(&format!("{rm}{code}{bad_rule}")).is_ok());
+}
+
+#[test]
+fn rule_with_only_a_key_hits_every_command_under_it() {
+    // What `[[rule]] key = ["rm"] outcome = "ask"` does: no opts and no
+    // targets means it hits unconditionally, so it can distrust a row.
+    let l = loaded(&format!(
+        "{}[[rule]]\nid = \"distrust\"\nkey = [\"rm\"]\noutcome = \"ask\"\n",
+        row("\"rm\"", "rest = \"path\"\n[[row.opt]]\nshort = \"f\"\n")
+    ));
+    assert_eq!(decision(&l, "rm x"), Decision::Ask);
+    assert_eq!(decision(&l, "rm -f x"), Decision::Ask);
+    assert_eq!(decision(&l, "rm"), Decision::Ask);
+}
+
 fn run_check(args: &[&std::path::Path]) -> Option<i32> {
     let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
         .arg("check")
@@ -514,9 +571,6 @@ fn check_subcommand_status() {
     assert_eq!(run_check(&[&ok]), Some(0));
     assert_eq!(run_check(&[&dup]), Some(1));
     assert_eq!(run_check(&[&dir.path().join("missing.toml")]), Some(1));
-    assert_eq!(run_check(&[]), Some(1));
-    let bare = Command::new(env!("CARGO_BIN_EXE_shguard"))
-        .output()
-        .unwrap();
-    assert_eq!(bare.status.code(), Some(1));
+    // `check` with no files, and the bare binary, are covered in
+    // `hook_contract.rs`.
 }
