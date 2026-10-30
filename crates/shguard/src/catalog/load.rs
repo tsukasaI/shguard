@@ -11,8 +11,8 @@ use shguard_kernel::rule::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
 
 use super::LoadError;
 use super::dto::{
-    DashDashDto, FileDto, OptDto, OrderDto, OutcomeDto, PatKindDto, PlusWordsDto, RoleDto, RowDto,
-    RuleDto, ScopeDto, TargetDto, ValueDto,
+    AskOutcome, ConfigDto, DashDashDto, FileDto, OptDto, OrderDto, OutcomeDto, PatKindDto,
+    PlusWordsDto, RoleDto, RowDto, RuleDto, ScopeDto, TargetDto, ValueDto,
 };
 
 /// Command heads whose tools have dash-less option bundles (`tar xf`) or
@@ -62,27 +62,85 @@ struct Entry {
 /// Every [`LoadError`] found, if there is at least one.
 pub fn load(sources: &[Source<'_>]) -> Result<Loaded, Vec<LoadError>> {
     let mut errs = Vec::new();
-    let mut entries = Vec::new();
-    let mut rule_dtos: Vec<(&str, RuleDto)> = Vec::new();
+    let mut files = Vec::new();
     for src in sources {
-        match toml::from_str::<FileDto>(src.text) {
-            Ok(file) => {
-                for row in file.row {
-                    entries.push(build_row(src.name, row, &mut errs));
-                }
-                rule_dtos.extend(file.rule.into_iter().map(|r| (src.name, r)));
-            }
-            Err(source) => errs.push(LoadError::Toml {
-                file: src.name.to_owned(),
-                source,
-            }),
+        match parse_file(src.name, src.text) {
+            Ok(file) => files.push((src.name.to_owned(), file)),
+            Err(e) => errs.push(e),
         }
+    }
+    load_files(files, errs)
+}
+
+/// A catalog file that parsed and matches the schema, but is not yet checked
+/// against the other files.
+#[derive(Debug)]
+pub struct ParsedFile(FileDto);
+
+/// Parses one catalog file.
+///
+/// # Errors
+///
+/// [`LoadError::Toml`] if the text is not valid TOML or does not match the
+/// schema.
+pub fn parse_file(name: &str, text: &str) -> Result<ParsedFile, LoadError> {
+    toml::from_str::<FileDto>(text)
+        .map(ParsedFile)
+        .map_err(|source| LoadError::Toml {
+            file: name.to_owned(),
+            source,
+        })
+}
+
+/// Parses the user config: `ask_outcome` plus rows and rules in the catalog
+/// schema. The rows and rules come back as a catalog file to be merged with
+/// the others.
+///
+/// # Errors
+///
+/// [`LoadError::Toml`] if the text is not valid TOML or does not match the
+/// schema.
+pub fn parse_config(name: &str, text: &str) -> Result<(AskOutcome, ParsedFile), LoadError> {
+    toml::from_str::<ConfigDto>(text)
+        .map(|c| {
+            (
+                c.ask_outcome,
+                ParsedFile(FileDto {
+                    row: c.row,
+                    rule: c.rule,
+                }),
+            )
+        })
+        .map_err(|source| LoadError::Toml {
+            file: name.to_owned(),
+            source,
+        })
+}
+
+/// Merges and checks parsed files. `errs` are the errors found while
+/// parsing the other files; they are returned with the ones found here.
+///
+/// # Errors
+///
+/// Every [`LoadError`] found, if there is at least one.
+pub fn load_files(
+    files: Vec<(String, ParsedFile)>,
+    mut errs: Vec<LoadError>,
+) -> Result<Loaded, Vec<LoadError>> {
+    let mut entries = Vec::new();
+    let mut rule_dtos: Vec<(String, RuleDto)> = Vec::new();
+    for (name, ParsedFile(file)) in files {
+        for row in file.row {
+            entries.push(build_row(&name, row, &mut errs));
+        }
+        rule_dtos.extend(file.rule.into_iter().map(|r| (name.clone(), r)));
     }
     check_rows(&entries, &mut errs);
     let mut rules = Vec::new();
     let mut rule_ids = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for (index, (file, dto)) in rule_dtos.into_iter().enumerate() {
+    for (index, (file_name, dto)) in rule_dtos.into_iter().enumerate() {
+        let file = file_name.as_str();
         if !seen.insert(dto.id.clone()) {
             errs.push(LoadError::DuplicateRuleId {
                 file: file.to_owned(),
@@ -129,6 +187,24 @@ fn value(v: ValueDto) -> OptValue {
         ValueDto::Flag => OptValue::Flag,
         ValueDto::Takes(r) => OptValue::Takes(role(r)),
         ValueDto::Optional(r) => OptValue::Optional(role(r)),
+    }
+}
+
+/// Whether a key segment starts with `-` or `+`. Such a segment would be
+/// selected ahead of a shorter row and swallow the option (`["rm", "-rf"]`
+/// over `["rm"]`). Only a `runs_code` row may have one, and only as its last
+/// segment spelling a single option (`["python", "-c"]`, #1070): it can never
+/// cover a command, so it cannot widen Allow.
+fn option_like(key: &[String]) -> bool {
+    key.iter().any(|s| s.starts_with(['-', '+']))
+}
+
+/// Whether the key's only option-like segment is the last one and reads as
+/// `-x` or `--name`.
+fn is_option_child(key: &[String]) -> bool {
+    match key.split_last() {
+        Some((last, init)) => !option_like(init) && spelling(last.as_bytes()).is_some(),
+        None => false,
     }
 }
 
@@ -189,6 +265,12 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
         errs.push(LoadError::BadRowKey {
             file: file.to_owned(),
             row: label.clone(),
+        });
+    }
+    if option_like(&dto.key) && !(dto.runs_code && is_option_child(&dto.key)) {
+        errs.push(LoadError::OptionLikeKey {
+            file: file.to_owned(),
+            item: format!("row `{label}`"),
         });
     }
     if dto.source.as_deref().is_none_or(|s| s.trim().is_empty()) {
@@ -427,6 +509,18 @@ fn build_rule(
         errs.push(LoadError::BadRuleKey {
             file: file.to_owned(),
             rule: dto.id.clone(),
+        });
+    }
+    let names_code_row = entries.iter().any(|e| {
+        e.key == key
+            && e.row
+                .as_ref()
+                .is_some_and(|r| r.runs_code() == RunsCode::Yes)
+    });
+    if option_like(&dto.key) && !names_code_row {
+        errs.push(LoadError::OptionLikeKey {
+            file: file.to_owned(),
+            item: format!("rule `{}`", dto.id),
         });
     }
     // Rows whose key is a prefix of the rule's, or extends it.

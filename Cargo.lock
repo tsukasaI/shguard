@@ -847,6 +847,7 @@ name = "shguard"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
  "shguard-kernel",
  "shguard-syntax",
  "tempfile",

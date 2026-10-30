@@ -1,0 +1,2 @@
+# The embedded default catalog. M13 ships it empty: the rows and rules arrive
+# in M14, so until then every Bash command is Unknown.
