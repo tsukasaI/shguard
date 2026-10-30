@@ -2,3 +2,6 @@
 //! catalog, and renders the kernel's verdict as the hook output.
 
 pub mod catalog;
+pub mod config;
+pub mod hook;
+pub mod respond;
