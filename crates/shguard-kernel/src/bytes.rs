@@ -1,8 +1,9 @@
-//! Byte-string helpers: equality, prefix test and lexical path
-//! normalization.
+//! Byte-string helpers: equality, prefix test, ASCII case-fold and lexical
+//! path normalization.
 //!
 //! `normalize_path` is specified against `norm_l`, a logic definition
-//! written as split / filter / join over `/`-separated segments.
+//! written as split / filter / join over `/`-separated segments, and
+//! `fold_ascii` against `fold_l`, which folds byte by byte.
 
 #[cfg(creusot)]
 use creusot_std::prelude::*;
@@ -13,6 +14,77 @@ use creusot_std::prelude::*;
 pub const SLASH: u8 = b'/';
 /// The current-directory segment.
 pub const DOT: u8 = b'.';
+/// The first ASCII uppercase letter.
+pub const UPPER_A: u8 = b'A';
+/// The last ASCII uppercase letter.
+pub const UPPER_Z: u8 = b'Z';
+/// The distance from an ASCII uppercase letter to its lowercase letter.
+pub const CASE_GAP: u8 = b'a' - b'A';
+/// The smallest byte that is not ASCII.
+pub const NON_ASCII: u8 = 0x80;
+
+/// `c` with an ASCII uppercase letter mapped to its lowercase letter; every
+/// other byte is unchanged.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn fold_b(c: u8) -> u8 {
+    pearlite! { if UPPER_A <= c && c <= UPPER_Z { c + CASE_GAP } else { c } }
+}
+
+/// `b` with `fold_b` applied to every byte. Defined by recursion on the last
+/// byte.
+#[cfg(creusot)]
+#[logic(open)]
+#[variant(b.len())]
+pub fn fold_l(b: Seq<u8>) -> Seq<u8> {
+    pearlite! {
+        if b.len() == 0 {
+            Seq::empty()
+        } else {
+            fold_l(b.pop_back()).push_back(fold_b(b[b.len() - 1]))
+        }
+    }
+}
+
+/// `fold_l` keeps the length and folds each byte.
+#[cfg(creusot)]
+#[logic]
+#[variant(b.len())]
+#[ensures(fold_l(b).len() == b.len())]
+#[ensures(forall<k> 0 <= k && k < b.len() ==> fold_l(b)[k] == fold_b(b[k]))]
+pub fn lemma_fold_index(b: Seq<u8>) {
+    if b.len() > 0 {
+        lemma_fold_index(b.pop_back())
+    }
+}
+
+/// ASCII case-fold in place: every byte `A`-`Z` becomes `a`-`z`, every other
+/// byte (including every non-ASCII byte) is unchanged.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures((^v)@ == fold_l(v@)))]
+#[expect(
+    clippy::manual_range_contains,
+    reason = "the comparisons mirror `fold_b`; `RangeInclusive::contains` would need its own spec"
+)]
+pub fn fold_ascii(v: &mut [u8]) {
+    #[cfg(creusot)]
+    let old = snapshot!(v@);
+    let n = v.len();
+    let mut i: usize = 0;
+    #[cfg_attr(creusot, variant(n@ - i@))]
+    #[cfg_attr(creusot, invariant(i@ <= n@ && v@.len() == n@ && (*old).len() == n@))]
+    #[cfg_attr(creusot, invariant(forall<k> 0 <= k && k < i@ ==> v@[k] == fold_b((*old)[k])))]
+    #[cfg_attr(creusot, invariant(forall<k> i@ <= k && k < n@ ==> v@[k] == (*old)[k]))]
+    while i < n {
+        let c = v[i];
+        if UPPER_A <= c && c <= UPPER_Z {
+            v[i] = c + CASE_GAP;
+        }
+        i += 1;
+    }
+    #[cfg(creusot)]
+    proof_assert! { lemma_fold_index(*old); v@.ext_eq(fold_l(*old)) };
+}
 
 /// Byte-wise equality.
 #[cfg_attr(creusot, check(terminates))]
@@ -390,7 +462,18 @@ pub fn normalize_path(p: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bytes_eq, normalize_path, starts_with};
+    use super::{bytes_eq, fold_ascii, normalize_path, starts_with};
+
+    #[test]
+    fn fold_ascii_cases() {
+        let mut v = b"/ETC/Git@[`z{".to_vec();
+        fold_ascii(&mut v);
+        assert_eq!(v, b"/etc/git@[`z{");
+        // Non-ASCII bytes are unchanged (`\u{17F}`, long s, is 0xC5 0xBF).
+        let mut s = "~/.\u{17F}SH".as_bytes().to_vec();
+        fold_ascii(&mut s);
+        assert_eq!(s, "~/.\u{17F}sh".as_bytes());
+    }
 
     #[test]
     fn bytes_eq_cases() {

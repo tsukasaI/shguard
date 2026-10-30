@@ -104,6 +104,24 @@ pub enum LoadError {
     /// A rule target contains `$`.
     #[error("{file}: rule `{rule}`: target contains `$`")]
     TargetHasDollar { file: String, rule: String },
+    /// A `prefix` target ends in `/` and is not `/` itself.
+    #[error(
+        "{file}: rule `{rule}`: prefix target `{pat}` ends in `/`; use `under` without the `/`"
+    )]
+    PrefixEndsInSlash {
+        file: String,
+        rule: String,
+        pat: String,
+    },
+    /// A target's bytes after a leading `~` are not in the normal form
+    /// `normalize_path` gives (`./x`, `a//b`, `x/`).
+    #[error("{file}: rule `{rule}`: target `{pat}` is not in normal form; write `{normal}`")]
+    TargetNotNormal {
+        file: String,
+        rule: String,
+        pat: String,
+        normal: String,
+    },
     /// More rules than a rule id can number.
     #[error("{file}: rule `{rule}`: too many rules")]
     TooManyRules { file: String, rule: String },

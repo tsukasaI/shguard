@@ -334,9 +334,68 @@ fn unnormalized_relative_leads_are_not_allowed() {
 }
 
 #[test]
-#[ignore = "kernel case-fold, #1087 (M7f)"]
+fn unnormalized_relative_leads_hit_the_block_targets() {
+    assert_all(
+        &[
+            "cp x .//.git/hooks/y",
+            "mkdir .//.git/hooks",
+            "rm -rf ././.git",
+            "cp x ././.claude/settings.json",
+            "rm -rf .//",
+            "rm -rf ././",
+            "cp x ./.mcp.json",
+            "cp x .//lefthook.yml",
+        ],
+        Decision::Block,
+    );
+    // `./.foo` was asked by a stopgap before the kernel normalized relative
+    // paths; it is an ordinary relative path.
+    assert_all(&["cp x ./.foo", "rm -rf ./build"], Decision::Allow);
+}
+
+#[test]
 fn case_variants_of_blocked_paths_are_not_allowed() {
     assert_not_allow(&["rm -rf .GIT", "cp x .GIT/hooks/pre-commit"]);
+    assert_all(
+        &[
+            "rm -rf .GIT",
+            "cp x .GIT/hooks/pre-commit",
+            "cp x .Claude/settings.json",
+            "rm -r /ETC",
+            "cp x /DEV/sda",
+            "cp -- x ~/.SSH/authorized_keys",
+        ],
+        Decision::Block,
+    );
+    assert_all(&["cat -- ~/.SSH/id_rsa", "cat .ENV"], Decision::Ask);
+}
+
+#[test]
+fn under_targets_stop_at_a_component_boundary() {
+    assert_all(
+        &["rm -r /etc", "rm -r /etc/", "rm -r /etc/x", "cp x /dev/sda"],
+        Decision::Block,
+    );
+    // Not below the target: only the absolute-path Ask.
+    assert_all(&["rm -r /etcfoo", "cp x /devops/y"], Decision::Ask);
+    assert_all(&["mkdir .github", "cp a .gitignore"], Decision::Allow);
+}
+
+#[test]
+fn prefix_targets_stay_byte_prefixes() {
+    assert_all(
+        &["cp x ^foo", "cat .env.local", "cat ./.env.local"],
+        Decision::Ask,
+    );
+    // `~/.claude.json` is a byte prefix: its backups are asked too.
+    assert_all(&["cat -- ~/.claude.json.backup"], Decision::Ask);
+}
+
+#[test]
+fn non_ascii_paths_are_not_allowed() {
+    // APFS folds Unicode case: `\u{17F}` (long s) can name `~/.ssh`.
+    assert_not_allow(&["cat -- ~/.\u{17F}\u{17F}h/id_rsa", "rm -rf .gi\u{1E6B}"]);
+    assert_all(&["cat \u{65E5}\u{672C}.txt"], Decision::Ask);
 }
 
 #[test]

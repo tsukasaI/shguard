@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use shguard_kernel::ast::{Opaque, Part};
+use shguard_kernel::bytes::normalize_path;
 use shguard_kernel::catalog::{
     Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role, Row,
     RunsCode, ShortName, key_ok,
@@ -566,7 +567,36 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
     let kind = match t.kind {
         PatKindDto::Exact => PatKind::Exact,
         PatKindDto::Prefix => PatKind::Prefix,
+        PatKindDto::Under => PatKind::Under,
     };
+    // A `prefix` that ends in `/` is a component match spelled as a byte
+    // prefix, and the kernel's normalized key drops that `/` (`.git/` would
+    // cover `.github`); `under` says it without the `/`.
+    if matches!(kind, PatKind::Prefix) && t.pat.len() > 1 && t.pat.ends_with('/') {
+        errs.push(LoadError::PrefixEndsInSlash {
+            file: file.to_owned(),
+            rule: rule.to_owned(),
+            pat: t.pat.clone(),
+        });
+        return None;
+    }
+    // The kernel compares normalized words with normalized targets, so a
+    // target out of normal form (`./x`, `a//b`, `x/`) means at best the same
+    // as its normal form; require that form. This check has no proof.
+    let (head, body) = match t.pat.strip_prefix('~') {
+        Some(rest) => ("~", rest),
+        None => ("", t.pat.as_str()),
+    };
+    let normal = normalize_path(body.as_bytes());
+    if normal != body.as_bytes() {
+        errs.push(LoadError::TargetNotNormal {
+            file: file.to_owned(),
+            rule: rule.to_owned(),
+            pat: t.pat.clone(),
+            normal: format!("{head}{}", String::from_utf8_lossy(&normal)),
+        });
+        return None;
+    }
     let pat = Pat::new(target_parts(&t.pat), kind);
     if pat.is_none() {
         errs.push(LoadError::EmptyTarget {
