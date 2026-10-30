@@ -1600,7 +1600,7 @@ pub fn decide(cat: &Catalog, rules: &[Rule], sc: Script) -> Verdict {
 
 #[cfg(test)]
 mod tests {
-    use super::{OptAlts, Verdict, decide};
+    use super::{OptAlts, Verdict, decide, inline_hit, inline_path_check};
     use crate::ast::{AndOr, Connector, Link, Opaque, Part, Pipeline, Script, Simple, Word};
     use crate::catalog::{
         Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role,
@@ -1608,6 +1608,7 @@ mod tests {
     };
     use crate::decision::Decision;
     use crate::rule::{Outcome, Pat, PatKind, Rule, RuleId, Scope};
+    use crate::verdict::UnknownKind;
 
     fn bytes(s: &str) -> Vec<u8> {
         s.as_bytes().to_vec()
@@ -2008,9 +2009,81 @@ mod tests {
             OptValue::Takes(Role::Path),
         );
         let o = Opt::new(OptName::Long(long("opt")), OptValue::Optional(Role::Path));
+        let r = flag(OptName::Short(short(b'r')));
         cat.rows
-            .push(row(&["cp"], gnu(vec![t, o], Role::Path), Cwd::Keeps));
+            .push(row(&["cp"], gnu(vec![t, o, r], Role::Path), Cwd::Keeps));
         cat
+    }
+
+    #[test]
+    fn inline_value_tilde_is_literal() {
+        let cat = catalog_with_cp();
+        // In `-t~/x` the `~` is a literal byte of the option word.
+        check_in(
+            &cat,
+            &[],
+            seq(vec![cmd(&["cp", "-t~/x", "a"])]),
+            Decision::Allow,
+        );
+        // It is a relative path, so it fails after a `cd`.
+        check_in(
+            &cat,
+            &[],
+            seq(vec![cmd(&["cd", "/"]), cmd(&["cp", "-t~/x", "/a"])]),
+            Decision::Ask,
+        );
+        // A `[Tilde]` Prefix target does not hit it, but hits a `~` word.
+        let home = Pat::new(vec![Part::Opaque(Opaque::Tilde)], PatKind::Prefix).expect("non-empty");
+        let r = [block_rule("cp", Vec::new(), vec![home])];
+        check_in(
+            &cat,
+            &r,
+            seq(vec![cmd(&["cp", "-t~/x", "a"])]),
+            Decision::Allow,
+        );
+        let tilde_operand = simple(vec![
+            word(vec![lit("cp")]),
+            // After `--`: a `~` word in option position would be opaque.
+            word(vec![lit("--")]),
+            tilde_word("/x"),
+            word(vec![lit("a")]),
+        ]);
+        check_in(&cat, &r, seq(vec![tilde_operand]), Decision::Block);
+    }
+
+    #[test]
+    fn unreadable_inline_values_fail_closed() {
+        let pat = Pat::new(vec![lit("/etc")], PatKind::Exact).expect("non-empty");
+        let targets = [pat];
+        // `-t$X` with the offset inside the literal prefix: the word is opaque.
+        let opaque = word(vec![lit("-t"), Part::Opaque(Opaque::Var(bytes("X")))]);
+        // `-t/x` with an offset far outside the word.
+        let literal = word(vec![lit("-t/x")]);
+        for (w, off) in [(&opaque, 2), (&literal, 99)] {
+            assert!(inline_hit(&targets, w, off));
+            assert_eq!(
+                inline_path_check(w, off, false),
+                Some(UnknownKind::PathOpaque)
+            );
+            assert_eq!(
+                inline_path_check(w, off, true),
+                Some(UnknownKind::PathOpaque)
+            );
+        }
+        // A readable value is not a hit here.
+        assert!(!inline_hit(&targets, &literal, 2));
+        assert_eq!(inline_path_check(&literal, 2, false), None);
+    }
+
+    #[test]
+    fn inline_value_after_clustered_flag() {
+        let cat = catalog_with_cp();
+        let etc = Pat::new(vec![lit("/etc")], PatKind::Prefix).expect("non-empty");
+        let r = [block_rule("cp", Vec::new(), vec![etc])];
+        let cp = |w: &str, want| check_in(&cat, &r, seq(vec![cmd(&["cp", w, "a"])]), want);
+        // The offset follows the `-r` flag: the value is `/etc/x`, not `rt/etc/x`.
+        cp("-rt/etc/x", Decision::Block);
+        cp("-rt/tmp/x", Decision::Allow);
     }
 
     #[test]

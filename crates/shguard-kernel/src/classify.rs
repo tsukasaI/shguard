@@ -398,12 +398,12 @@ pub fn classify_simple(cat: &Catalog, s: &Simple) -> SimpleClass {
     }
     // The reason from the miss with the longest key so far: kind, word, key
     // length.
-    let mut first: Option<(UnknownKind, usize, usize)> = None;
+    let mut best: Option<(UnknownKind, usize, usize)> = None;
     let mut j: usize = 0;
     #[cfg_attr(creusot, variant(rows@.len() - j@))]
     #[cfg_attr(creusot, invariant(j@ <= rows@.len()))]
     #[cfg_attr(creusot, invariant(forall<m> 0 <= m && m < j@ ==> !row_covers(rows@, m, ws@)))]
-    #[cfg_attr(creusot, invariant(match first {
+    #[cfg_attr(creusot, invariant(match best {
         Some((_, w, _)) => w@ < ws@.len(),
         None => true,
     }))]
@@ -412,16 +412,16 @@ pub fn classify_simple(cat: &Catalog, s: &Simple) -> SimpleClass {
             RowFit::Covers => return SimpleClass::Covered { row: j },
             RowFit::Miss(u, w) => {
                 let len = rows[j].key.len();
-                match first {
-                    Some((_, _, best)) if best >= len => {}
-                    Some(_) | None => first = Some((u, w, len)),
+                match best {
+                    Some((_, _, longest)) if longest >= len => {}
+                    Some(_) | None => best = Some((u, w, len)),
                 }
             }
             RowFit::NoKey => {}
         }
         j += 1;
     }
-    match first {
+    match best {
         None => SimpleClass::Unknown(UnknownKind::NoRow, 0),
         Some((u, w, _)) => SimpleClass::Unknown(u, w),
     }
