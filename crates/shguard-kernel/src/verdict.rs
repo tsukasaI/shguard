@@ -64,24 +64,21 @@ pub enum UnknownKind {
     CodeRole,
     /// The row marks the command as running other code.
     RunsCode,
-    /// The first matching row in catalog order is a parent row (one whose
+    /// The matching row with the longest key is a parent row (one whose
     /// key another row extends) and the command has an operand there:
     /// likely a subcommand the catalog does not list (`git push` with only
     /// `["git"]` and `["git", "status"]`).
     UnknownSubcommand,
-    /// A redirect the model cannot reason about.
-    Redirect,
     /// A path word that is neither literal nor `~` followed by literal
-    /// bytes, so it cannot be compared with rule targets.
+    /// bytes, so it cannot be compared with rule targets. Also an inline
+    /// option value the kernel cannot read (`inline_bad`).
     PathOpaque,
-    /// A literal path word with a `..` segment.
+    /// A literal path word, or an inline option value (`-t/x`, `--dir=/x`),
+    /// with a `..` segment.
     PathDotDot,
-    /// A relative literal path word after an earlier command that changes
-    /// the working directory (`cd / && rm -rf usr`).
+    /// A relative literal path word, or inline option value, after an earlier
+    /// command that changes the working directory (`cd / && rm -rf usr`).
     PathAfterCd,
-    /// A path given inline in an option word (`-t/x`, `--dir=/x`), whose
-    /// bytes the kernel cannot locate yet (#1034).
-    PathInlineValue,
 }
 
 /// Why a verdict is not Allow.

@@ -30,10 +30,14 @@
 //!
 //! An uncovered command's reason is deterministic: `OpaqueCommandName` at
 //! word 0 when the first word is not literal, `NoRow` at 0 when no key
-//! matches, and otherwise the reason of the first matching row in catalog
-//! order (`RunsCode` at 0, the argv parse's Unknown, or `UnknownSubcommand`
-//! at a parent row's first operand). The contracts pin only that the reason
-//! sits at a valid address of an uncovered command, not which reason it is.
+//! matches, and otherwise the reason of the matching row with the longest
+//! key (#1044): the most specific row is the one the command was meant for,
+//! so `git status x` reports the `status` row's `ExtraOperand`, not the
+//! `git` parent row's `UnknownSubcommand`. Rows with equal key lengths keep
+//! catalog order. The reason is `RunsCode` at 0, the argv parse's Unknown, or
+//! `UnknownSubcommand` at a parent row's first operand. The contracts pin
+//! only that the reason sits at a valid address of an uncovered command, not
+//! which reason it is.
 //!
 //! `code_child_l` guards only the exact key spelling: `python -cx` and
 //! `python --version -c x` are not caught by it. The primary defence is giving
@@ -42,7 +46,7 @@
 //! `Code` value (#1070).
 
 #[cfg(creusot)]
-use crate::argv::{ArgvL, argv_spec, has_opaque, lit_prefix};
+use crate::argv::{ArgvL, SlotL, argv_spec, has_opaque, lemma_slots_index, lit_prefix, slots_l};
 use crate::argv::{ArgvResult, Slot, parse_argv, word_view};
 use crate::ast::{Pipeline, Script, Simple, Word};
 use crate::bytes::bytes_eq;
@@ -103,17 +107,17 @@ pub fn code_child_l(rows: Seq<Row>, j: Int, ws: Seq<Word>) -> bool {
 /// `s` is an operand slot.
 #[cfg(creusot)]
 #[logic(open)]
-pub fn is_operand(s: Slot) -> bool {
+pub fn is_operand(s: SlotL) -> bool {
     match s {
-        Slot::Operand(_) => true,
-        Slot::Opts(_) | Slot::OptValue(_) | Slot::DashDash => false,
+        SlotL::Operand(_) => true,
+        SlotL::Opts(_) | SlotL::OptValue(_) | SlotL::DashDash => false,
     }
 }
 
 /// Some slot of `slots` is an operand.
 #[cfg(creusot)]
 #[logic(open)]
-pub fn has_operand(slots: Seq<Slot>) -> bool {
+pub fn has_operand(slots: Seq<SlotL>) -> bool {
     pearlite! { exists<t> 0 <= t && t < slots.len() && is_operand(slots[t]) }
 }
 
@@ -299,14 +303,18 @@ fn code_child(rows: &[Row], j: usize, ws: &[Word]) -> bool {
 /// The index of the first operand slot, if any.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(match result {
-    None => !has_operand(slots@),
-    Some(k) => k@ < slots@.len() && is_operand(slots@[k@]),
+    None => !has_operand(slots_l(slots@)),
+    Some(k) => k@ < slots@.len() && k@ < slots_l(slots@).len()
+        && is_operand(slots_l(slots@)[k@]),
 }))]
 fn first_operand(slots: &[Slot]) -> Option<usize> {
+    #[cfg(creusot)]
+    proof_assert! { lemma_slots_index(slots@); true };
     let mut k: usize = 0;
     #[cfg_attr(creusot, variant(slots@.len() - k@))]
     #[cfg_attr(creusot, invariant(k@ <= slots@.len()))]
-    #[cfg_attr(creusot, invariant(forall<u> 0 <= u && u < k@ ==> !is_operand(slots@[u])))]
+    #[cfg_attr(creusot, invariant(forall<u> 0 <= u && u < k@
+        ==> !is_operand(slots_l(slots@)[u])))]
     while k < slots.len() {
         match slots[k] {
             Slot::Operand(_) => return Some(k),
@@ -388,30 +396,34 @@ pub fn classify_simple(cat: &Catalog, s: &Simple) -> SimpleClass {
         };
         return SimpleClass::Unknown(UnknownKind::OpaqueCommandName, 0);
     }
-    let mut first: Option<(UnknownKind, usize)> = None;
+    // The reason from the miss with the longest key so far: kind, word, key
+    // length.
+    let mut best: Option<(UnknownKind, usize, usize)> = None;
     let mut j: usize = 0;
     #[cfg_attr(creusot, variant(rows@.len() - j@))]
     #[cfg_attr(creusot, invariant(j@ <= rows@.len()))]
     #[cfg_attr(creusot, invariant(forall<m> 0 <= m && m < j@ ==> !row_covers(rows@, m, ws@)))]
-    #[cfg_attr(creusot, invariant(match first {
-        Some((_, w)) => w@ < ws@.len(),
+    #[cfg_attr(creusot, invariant(match best {
+        Some((_, w, _)) => w@ < ws@.len(),
         None => true,
     }))]
     while j < rows.len() {
         match row_fit(rows, j, ws) {
             RowFit::Covers => return SimpleClass::Covered { row: j },
             RowFit::Miss(u, w) => {
-                if first.is_none() {
-                    first = Some((u, w));
+                let len = rows[j].key.len();
+                match best {
+                    Some((_, _, longest)) if longest >= len => {}
+                    Some(_) | None => best = Some((u, w, len)),
                 }
             }
             RowFit::NoKey => {}
         }
         j += 1;
     }
-    match first {
+    match best {
         None => SimpleClass::Unknown(UnknownKind::NoRow, 0),
-        Some((u, w)) => SimpleClass::Unknown(u, w),
+        Some((u, w, _)) => SimpleClass::Unknown(u, w),
     }
 }
 
@@ -758,7 +770,8 @@ mod tests {
         );
         assert_eq!(
             classify_simple(&cat, &cmd(&["python", "-c", "x"])),
-            unknown(UnknownKind::RunsCode, 1)
+            unknown(UnknownKind::RunsCode, 0),
+            "the longer key's own RunsCode (word 0) wins over the parent's (word 1)"
         );
     }
 
@@ -785,8 +798,13 @@ mod tests {
         );
         assert_eq!(
             classify_simple(&catalog(), &cmd(&["git", "status", "x"])),
-            unknown(UnknownKind::UnknownSubcommand, 1),
-            "the first matching row's reason wins"
+            unknown(UnknownKind::ExtraOperand, 2),
+            "the row with the longest key wins"
+        );
+        assert_eq!(
+            classify_simple(&catalog(), &cmd(&["git", "status", "--bogus"])),
+            unknown(UnknownKind::UnknownOption, 2),
+            "the option miss is reported under the `status` row"
         );
     }
 

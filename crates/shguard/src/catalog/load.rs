@@ -344,7 +344,7 @@ fn has_key(entries: &[Entry], key: &[Vec<u8>]) -> bool {
 /// segment must take a `Code` value.
 fn check_code_child(child: &Entry, entries: &[Entry], errs: &mut Vec<LoadError>) {
     let Some(row) = &child.row else { return };
-    if !row.runs_code() {
+    if row.runs_code() == RunsCode::No {
         return;
     }
     let Some((last, parent_key)) = child.key.split_last() else {

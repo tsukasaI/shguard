@@ -22,7 +22,12 @@
 //! - A long option matches a long name byte for byte (no abbreviation); a
 //!   short cluster is walked byte by byte (`cluster_l`).
 //! - An `Optional` option takes its value only inline (`--opt=v`, `-ov`),
-//!   never from the next word (#1033).
+//!   never from the next word (#1033). The slot of a word with an inline
+//!   value carries the byte offset where the value starts in the word's
+//!   known bytes (`SlotL` in the spec): the index after `=` in a long
+//!   option, after the value-taking option in a cluster. The offset may
+//!   equal the word's length (`--file=` has an empty value). The program
+//!   proves it equal to the spec's split point (#1034).
 //! - The k-th operand gets `positionals[k]`, else `rest`.
 //! - A `Code` role on an operand or an option value is Unknown. The first
 //!   Unknown, left to right, wins.
@@ -63,8 +68,10 @@ pub enum Phase {
 pub enum Slot {
     /// An option word: one long option, or a cluster of short options.
     /// `Some(role)` when the word also carries the value of its last option
-    /// inline (`--lines=5`, `-n5`); `None` otherwise.
-    Opts(Option<Role>),
+    /// inline (`--lines=5`, `-n5`), with the byte offset in the word where
+    /// that value starts (`--lines=5`: 8; `-n5`: 2; `--lines=`: the word's
+    /// length, an empty value); `None` otherwise.
+    Opts(Option<(Role, usize)>),
     /// The value of the option on the previous word (`5` in `-n 5`).
     OptValue(Role),
     /// An operand, with the role the grammar gives it.
@@ -125,10 +132,37 @@ pub enum ArgvResult {
 pub enum Tail {
     /// The last option is a flag.
     Done,
-    /// The last option takes a value of this role, given inline.
-    Inline(Role),
+    /// The last option takes a value of this role, given inline. The offset
+    /// is the index in the word's known bytes where the value starts
+    /// (`--file=` gives the index after `=`; `-ov` the index of `v`).
+    Inline(Role, usize),
     /// The last option takes a value of this role from the next word.
     Next(Role),
+}
+
+/// The spec's counterpart of [`Tail`]: the offset is an `Int`.
+#[cfg(creusot)]
+pub enum TailL {
+    /// The last option is a flag.
+    Done,
+    /// The last option takes an inline value of this role, starting at this
+    /// byte offset.
+    Inline(Role, Int),
+    /// The last option takes a value of this role from the next word.
+    Next(Role),
+}
+
+/// The spec's counterpart of [`Slot`]: an inline value's offset is an `Int`.
+#[cfg(creusot)]
+pub enum SlotL {
+    /// See [`Slot::Opts`].
+    Opts(Option<(Role, Int)>),
+    /// See [`Slot::OptValue`].
+    OptValue(Role),
+    /// See [`Slot::Operand`].
+    Operand(Role),
+    /// See [`Slot::DashDash`].
+    DashDash,
 }
 
 /// The spec's reading of one word in option position.
@@ -141,14 +175,14 @@ pub enum WordL {
     /// The `--` that ends options.
     EndOpts,
     /// Option word: the `seen` list after it, and how it ends.
-    Opts(Seq<Int>, Tail),
+    Opts(Seq<Int>, TailL),
 }
 
 /// The spec's result: the logic counterpart of [`ArgvResult`].
 #[cfg(creusot)]
 pub enum ArgvL {
     /// Slots and the `seen` option indices.
-    Parsed(Seq<Slot>, Seq<Int>),
+    Parsed(Seq<SlotL>, Seq<Int>),
     /// Unknown kind and word index.
     Unknown(UnknownKind, Int),
 }
@@ -269,21 +303,21 @@ pub fn long_l(opts: Seq<Opt>, b: Seq<u8>, seen: Seq<Int>) -> WordL {
                 if e < b.len() {
                     WordL::Fail(UnknownKind::FlagGivenValue)
                 } else {
-                    WordL::Opts(seen.push_back(o), Tail::Done)
+                    WordL::Opts(seen.push_back(o), TailL::Done)
                 }
             }
             OptValue::Takes(r) => {
                 if e < b.len() {
-                    WordL::Opts(seen.push_back(o), Tail::Inline(r))
+                    WordL::Opts(seen.push_back(o), TailL::Inline(r, e + 1))
                 } else {
-                    WordL::Opts(seen.push_back(o), Tail::Next(r))
+                    WordL::Opts(seen.push_back(o), TailL::Next(r))
                 }
             }
             OptValue::Optional(r) => {
                 if e < b.len() {
-                    WordL::Opts(seen.push_back(o), Tail::Inline(r))
+                    WordL::Opts(seen.push_back(o), TailL::Inline(r, e + 1))
                 } else {
-                    WordL::Opts(seen.push_back(o), Tail::Done)
+                    WordL::Opts(seen.push_back(o), TailL::Done)
                 }
             }
         }
@@ -300,7 +334,7 @@ pub fn long_l(opts: Seq<Opt>, b: Seq<u8>, seen: Seq<Int>) -> WordL {
 #[variant(b.len() - j)]
 pub fn cluster_l(opts: Seq<Opt>, b: Seq<u8>, j: Int, seen: Seq<Int>) -> WordL {
     if j >= b.len() {
-        WordL::Opts(seen, Tail::Done)
+        WordL::Opts(seen, TailL::Done)
     } else {
         let o = find_short_l(opts, b[j], 0);
         if o >= opts.len() {
@@ -310,16 +344,16 @@ pub fn cluster_l(opts: Seq<Opt>, b: Seq<u8>, j: Int, seen: Seq<Int>) -> WordL {
                 OptValue::Flag => cluster_l(opts, b, j + 1, seen.push_back(o)),
                 OptValue::Takes(r) => {
                     if j + 1 < b.len() {
-                        WordL::Opts(seen.push_back(o), Tail::Inline(r))
+                        WordL::Opts(seen.push_back(o), TailL::Inline(r, j + 1))
                     } else {
-                        WordL::Opts(seen.push_back(o), Tail::Next(r))
+                        WordL::Opts(seen.push_back(o), TailL::Next(r))
                     }
                 }
                 OptValue::Optional(r) => {
                     if j + 1 < b.len() {
-                        WordL::Opts(seen.push_back(o), Tail::Inline(r))
+                        WordL::Opts(seen.push_back(o), TailL::Inline(r, j + 1))
                     } else {
-                        WordL::Opts(seen.push_back(o), Tail::Done)
+                        WordL::Opts(seen.push_back(o), TailL::Done)
                     }
                 }
             }
@@ -453,7 +487,7 @@ pub fn argv_go(
     i: Int,
     ph: Phase,
     k: Int,
-    slots: Seq<Slot>,
+    slots: Seq<SlotL>,
     seen: Seq<Int>,
 ) -> ArgvL {
     pearlite! {
@@ -465,25 +499,25 @@ pub fn argv_go(
                     None => ArgvL::Unknown(UnknownKind::ExtraOperand, i),
                     Some(Role::Code) => ArgvL::Unknown(UnknownKind::CodeRole, i),
                     Some(r) => argv_go(g, ws, i + 1, operand_phase_l(ph, g.permute), k + 1,
-                        slots.push_back(Slot::Operand(r)), seen),
+                        slots.push_back(SlotL::Operand(r)), seen),
                 },
                 WordL::Fail(u) => ArgvL::Unknown(u, i),
                 WordL::EndOpts => argv_go(g, ws, i + 1, Phase::AfterDashDash, k,
-                    slots.push_back(Slot::DashDash), seen),
-                WordL::Opts(s, Tail::Done) => argv_go(g, ws, i + 1, ph, k,
-                    slots.push_back(Slot::Opts(None)), s),
-                WordL::Opts(s, Tail::Inline(r)) => if r == Role::Code {
+                    slots.push_back(SlotL::DashDash), seen),
+                WordL::Opts(s, TailL::Done) => argv_go(g, ws, i + 1, ph, k,
+                    slots.push_back(SlotL::Opts(None)), s),
+                WordL::Opts(s, TailL::Inline(r, off)) => if r == Role::Code {
                     ArgvL::Unknown(UnknownKind::CodeRole, i)
                 } else {
-                    argv_go(g, ws, i + 1, ph, k, slots.push_back(Slot::Opts(Some(r))), s)
+                    argv_go(g, ws, i + 1, ph, k, slots.push_back(SlotL::Opts(Some((r, off)))), s)
                 },
-                WordL::Opts(s, Tail::Next(r)) => if i + 1 >= ws.len() {
+                WordL::Opts(s, TailL::Next(r)) => if i + 1 >= ws.len() {
                     ArgvL::Unknown(UnknownKind::MissingValue, i)
                 } else if r == Role::Code {
                     ArgvL::Unknown(UnknownKind::CodeRole, i + 1)
                 } else {
                     argv_go(g, ws, i + 2, ph, k,
-                        slots.push_back(Slot::Opts(None)).push_back(Slot::OptValue(r)), s)
+                        slots.push_back(SlotL::Opts(None)).push_back(SlotL::OptValue(r)), s)
                 },
             }
         }
@@ -512,13 +546,55 @@ pub fn ints(s: Seq<usize>) -> Seq<Int> {
     }
 }
 
+/// The logic view of a [`Slot`].
+#[cfg(creusot)]
+#[logic(open)]
+pub fn slot_l(s: Slot) -> SlotL {
+    pearlite! {
+        match s {
+            Slot::Opts(None) => SlotL::Opts(None),
+            Slot::Opts(Some((r, o))) => SlotL::Opts(Some((r, o@))),
+            Slot::OptValue(r) => SlotL::OptValue(r),
+            Slot::Operand(r) => SlotL::Operand(r),
+            Slot::DashDash => SlotL::DashDash,
+        }
+    }
+}
+
+/// The logic views of `s`, in order.
+#[cfg(creusot)]
+#[logic(open)]
+#[variant(s.len())]
+pub fn slots_l(s: Seq<Slot>) -> Seq<SlotL> {
+    pearlite! {
+        if s.len() == 0 {
+            Seq::empty()
+        } else {
+            slots_l(s.pop_back()).push_back(slot_l(s[s.len() - 1]))
+        }
+    }
+}
+
+/// The logic view of a [`Tail`].
+#[cfg(creusot)]
+#[logic(open)]
+pub fn tail_l(t: Tail) -> TailL {
+    pearlite! {
+        match t {
+            Tail::Done => TailL::Done,
+            Tail::Inline(r, o) => TailL::Inline(r, o@),
+            Tail::Next(r) => TailL::Next(r),
+        }
+    }
+}
+
 /// The logic view of an [`ArgvResult`].
 #[cfg(creusot)]
 #[logic(open(crate))]
 pub fn argv_view(r: ArgvResult) -> ArgvL {
     pearlite! {
         match r {
-            ArgvResult::Parsed(p) => ArgvL::Parsed(p.slots@, ints(p.seen@)),
+            ArgvResult::Parsed(p) => ArgvL::Parsed(slots_l(p.slots@), ints(p.seen@)),
             ArgvResult::Unknown(u, i) => ArgvL::Unknown(u, i@),
         }
     }
@@ -544,23 +620,43 @@ pub fn lemma_ints_index(s: Seq<usize>) {
     }
 }
 
+/// `slots_l` distributes over appending one slot.
+#[cfg(creusot)]
+#[logic]
+#[ensures(slots_l(s.push_back(x)) == slots_l(s).push_back(slot_l(x)))]
+pub fn lemma_slots_snoc(s: Seq<Slot>, x: Slot) {
+    lemma_snoc_pop(s, x)
+}
+
+/// `slots_l` keeps the length and maps each element to its logic view.
+#[cfg(creusot)]
+#[logic]
+#[variant(s.len())]
+#[ensures(slots_l(s).len() == s.len())]
+#[ensures(forall<u> 0 <= u && u < s.len() ==> slots_l(s)[u] == slot_l(s[u]))]
+pub fn lemma_slots_index(s: Seq<Slot>) {
+    if s.len() > 0 {
+        lemma_slots_index(s.pop_back())
+    }
+}
+
 /// The slot is not a code position. `argv_spec` never builds one: every
 /// `Code` role is Unknown.
 #[cfg(creusot)]
 #[logic(open)]
-pub fn slot_no_code(s: Slot) -> bool {
+pub fn slot_no_code(s: SlotL) -> bool {
     match s {
-        Slot::Opts(Some(r)) => r != Role::Code,
-        Slot::OptValue(r) => r != Role::Code,
-        Slot::Operand(r) => r != Role::Code,
-        Slot::Opts(None) | Slot::DashDash => true,
+        SlotL::Opts(Some((r, _))) => r != Role::Code,
+        SlotL::OptValue(r) => r != Role::Code,
+        SlotL::Operand(r) => r != Role::Code,
+        SlotL::Opts(None) | SlotL::DashDash => true,
     }
 }
 
 /// No slot of `slots` is a code position.
 #[cfg(creusot)]
 #[logic(open)]
-pub fn no_code(slots: Seq<Slot>) -> bool {
+pub fn no_code(slots: Seq<SlotL>) -> bool {
     pearlite! { forall<t> 0 <= t && t < slots.len() ==> slot_no_code(slots[t]) }
 }
 
@@ -579,7 +675,7 @@ pub fn lemma_go_no_code(
     i: Int,
     ph: Phase,
     k: Int,
-    slots: Seq<Slot>,
+    slots: Seq<SlotL>,
     seen: Seq<Int>,
 ) {
     pearlite! {
@@ -589,23 +685,23 @@ pub fn lemma_go_no_code(
                     None => (),
                     Some(Role::Code) => (),
                     Some(r) => lemma_go_no_code(g, ws, i + 1, operand_phase_l(ph, g.permute),
-                        k + 1, slots.push_back(Slot::Operand(r)), seen),
+                        k + 1, slots.push_back(SlotL::Operand(r)), seen),
                 },
                 WordL::Fail(_) => (),
                 WordL::EndOpts => lemma_go_no_code(g, ws, i + 1, Phase::AfterDashDash, k,
-                    slots.push_back(Slot::DashDash), seen),
-                WordL::Opts(s, Tail::Done) => lemma_go_no_code(g, ws, i + 1, ph, k,
-                    slots.push_back(Slot::Opts(None)), s),
-                WordL::Opts(s, Tail::Inline(r)) => if r == Role::Code {
+                    slots.push_back(SlotL::DashDash), seen),
+                WordL::Opts(s, TailL::Done) => lemma_go_no_code(g, ws, i + 1, ph, k,
+                    slots.push_back(SlotL::Opts(None)), s),
+                WordL::Opts(s, TailL::Inline(r, off)) => if r == Role::Code {
                     ()
                 } else {
-                    lemma_go_no_code(g, ws, i + 1, ph, k, slots.push_back(Slot::Opts(Some(r))), s)
+                    lemma_go_no_code(g, ws, i + 1, ph, k, slots.push_back(SlotL::Opts(Some((r, off)))), s)
                 },
-                WordL::Opts(s, Tail::Next(r)) => if i + 1 >= ws.len() || r == Role::Code {
+                WordL::Opts(s, TailL::Next(r)) => if i + 1 >= ws.len() || r == Role::Code {
                     ()
                 } else {
                     lemma_go_no_code(g, ws, i + 2, ph, k,
-                        slots.push_back(Slot::Opts(None)).push_back(Slot::OptValue(r)), s)
+                        slots.push_back(SlotL::Opts(None)).push_back(SlotL::OptValue(r)), s)
                 },
             }
         }
@@ -629,7 +725,7 @@ fn kind_is(r: Kind, l: WordL, before: Seq<usize>, after: Seq<usize>) -> bool {
         Kind::Operand => l == WordL::Operand && after == before,
         Kind::Fail(u) => l == WordL::Fail(u),
         Kind::EndOpts => l == WordL::EndOpts && after == before,
-        Kind::Opts(t) => l == WordL::Opts(ints(after), t),
+        Kind::Opts(t) => l == WordL::Opts(ints(after), tail_l(t)),
     }
 }
 
@@ -641,6 +737,16 @@ fn push_ix(seen: &mut Vec<usize>, o: usize) {
     #[cfg(creusot)]
     proof_assert! { lemma_ints_snoc(seen@, o); true };
     seen.push(o);
+}
+
+/// Appends a slot to `slots`.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures((^slots)@ == slots@.push_back(s)))]
+#[cfg_attr(creusot, ensures(slots_l((^slots)@) == slots_l(slots@).push_back(slot_l(s))))]
+fn push_slot(slots: &mut Vec<Slot>, s: Slot) {
+    #[cfg(creusot)]
+    proof_assert! { lemma_slots_snoc(slots@, s); true };
+    slots.push(s);
 }
 
 /// The literal view of `w`: its known bytes and whether it is opaque.
@@ -810,7 +916,7 @@ fn long_opt(opts: &[Opt], b: &[u8], seen: &mut Vec<usize>) -> Kind {
         OptValue::Takes(r) => {
             push_ix(seen, o);
             if e < b.len() {
-                Kind::Opts(Tail::Inline(r))
+                Kind::Opts(Tail::Inline(r, e + 1))
             } else {
                 Kind::Opts(Tail::Next(r))
             }
@@ -818,7 +924,7 @@ fn long_opt(opts: &[Opt], b: &[u8], seen: &mut Vec<usize>) -> Kind {
         OptValue::Optional(r) => {
             push_ix(seen, o);
             if e < b.len() {
-                Kind::Opts(Tail::Inline(r))
+                Kind::Opts(Tail::Inline(r, e + 1))
             } else {
                 Kind::Opts(Tail::Done)
             }
@@ -850,7 +956,7 @@ fn cluster(opts: &[Opt], b: &[u8], seen: &mut Vec<usize>) -> Kind {
             OptValue::Takes(r) => {
                 push_ix(seen, o);
                 return if j + 1 < b.len() {
-                    Kind::Opts(Tail::Inline(r))
+                    Kind::Opts(Tail::Inline(r, j + 1))
                 } else {
                     Kind::Opts(Tail::Next(r))
                 };
@@ -858,7 +964,7 @@ fn cluster(opts: &[Opt], b: &[u8], seen: &mut Vec<usize>) -> Kind {
             OptValue::Optional(r) => {
                 push_ix(seen, o);
                 return if j + 1 < b.len() {
-                    Kind::Opts(Tail::Inline(r))
+                    Kind::Opts(Tail::Inline(r, j + 1))
                 } else {
                     Kind::Opts(Tail::Done)
                 };
@@ -990,14 +1096,14 @@ pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
     #[cfg(creusot)]
     proof_assert! {
         slots@.ext_eq(Seq::empty()) && seen@.ext_eq(Seq::empty())
-            && ints(seen@) == Seq::empty()
+            && ints(seen@) == Seq::empty() && slots_l(slots@) == Seq::empty()
     };
     #[cfg_attr(creusot, variant(ws@.len() - i@))]
     #[cfg_attr(creusot, invariant(k@ <= i@))]
     #[cfg_attr(creusot, invariant(start@ <= ws@.len() ==>
         i@ <= ws@.len() && slots@.len() == i@ - start@))]
     #[cfg_attr(creusot, invariant(
-        argv_go(*g, ws@, i@, ph, k@, slots@, ints(seen@)) == argv_spec(*g, ws@, start@)))]
+        argv_go(*g, ws@, i@, ph, k@, slots_l(slots@), ints(seen@)) == argv_spec(*g, ws@, start@)))]
     while i < ws.len() {
         let kind = match ph {
             Phase::Options => {
@@ -1015,7 +1121,7 @@ pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
                 None => return ArgvResult::Unknown(UnknownKind::ExtraOperand, i),
                 Some(Role::Code) => return ArgvResult::Unknown(UnknownKind::CodeRole, i),
                 Some(r @ (Role::Inert | Role::Path)) => {
-                    slots.push(Slot::Operand(r));
+                    push_slot(&mut slots, Slot::Operand(r));
                     k += 1;
                     ph = operand_phase(ph, g.permute);
                     i += 1;
@@ -1023,19 +1129,19 @@ pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
             },
             Kind::Fail(u) => return ArgvResult::Unknown(u, i),
             Kind::EndOpts => {
-                slots.push(Slot::DashDash);
+                push_slot(&mut slots, Slot::DashDash);
                 ph = Phase::AfterDashDash;
                 i += 1;
             }
             Kind::Opts(Tail::Done) => {
-                slots.push(Slot::Opts(None));
+                push_slot(&mut slots, Slot::Opts(None));
                 i += 1;
             }
-            Kind::Opts(Tail::Inline(Role::Code)) => {
+            Kind::Opts(Tail::Inline(Role::Code, _)) => {
                 return ArgvResult::Unknown(UnknownKind::CodeRole, i);
             }
-            Kind::Opts(Tail::Inline(r @ (Role::Inert | Role::Path))) => {
-                slots.push(Slot::Opts(Some(r)));
+            Kind::Opts(Tail::Inline(r @ (Role::Inert | Role::Path), off)) => {
+                push_slot(&mut slots, Slot::Opts(Some((r, off))));
                 i += 1;
             }
             Kind::Opts(Tail::Next(r)) => {
@@ -1045,8 +1151,8 @@ pub fn parse_argv(g: &Grammar, ws: &[Word], start: usize) -> ArgvResult {
                 if let Role::Code = r {
                     return ArgvResult::Unknown(UnknownKind::CodeRole, i + 1);
                 }
-                slots.push(Slot::Opts(None));
-                slots.push(Slot::OptValue(r));
+                push_slot(&mut slots, Slot::Opts(None));
+                push_slot(&mut slots, Slot::OptValue(r));
                 i += 2;
             }
         }
@@ -1153,7 +1259,7 @@ mod tests {
         );
         assert_eq!(
             parse(&g, &argv(&["-rfn5"])),
-            parsed(&[Slot::Opts(Some(Role::Inert))], &[R, F, N])
+            parsed(&[Slot::Opts(Some((Role::Inert, 4)))], &[R, F, N])
         );
         assert_eq!(
             parse(&g, &argv(&["-rx"])),
@@ -1166,7 +1272,7 @@ mod tests {
         let g = gnu();
         assert_eq!(
             parse(&g, &argv(&["-n5"])),
-            parsed(&[Slot::Opts(Some(Role::Inert))], &[N])
+            parsed(&[Slot::Opts(Some((Role::Inert, 2)))], &[N])
         );
         assert_eq!(
             parse(&g, &argv(&["-n", "5"])),
@@ -1201,13 +1307,14 @@ mod tests {
         let g = gnu();
         assert_eq!(
             parse(&g, &argv(&["--lines=5"])),
-            parsed(&[Slot::Opts(Some(Role::Inert))], &[N])
+            parsed(&[Slot::Opts(Some((Role::Inert, 8)))], &[N])
         );
         assert_eq!(
             parse(&g, &argv(&["--color=", "--lines", "5"])),
             parsed(
                 &[
-                    Slot::Opts(Some(Role::Inert)),
+                    // `--color=` gives an empty value at the word's end.
+                    Slot::Opts(Some((Role::Inert, 8))),
                     OPTS,
                     Slot::OptValue(Role::Inert)
                 ],
@@ -1318,7 +1425,7 @@ mod tests {
         ];
         assert_eq!(
             parse(&g, &ws),
-            parsed(&[Slot::Opts(Some(Role::Inert))], &[C])
+            parsed(&[Slot::Opts(Some((Role::Inert, 8)))], &[C])
         );
     }
 
@@ -1466,11 +1573,11 @@ mod tests {
         assert_eq!(parse(&g, &ws), unknown(UnknownKind::OpaqueOption, 2));
         assert_eq!(
             parse(&g, &argv(&["--interactive=always", "x"])),
-            parsed(&[Slot::Opts(Some(Role::Inert)), PATH], &[I])
+            parsed(&[Slot::Opts(Some((Role::Inert, 14))), PATH], &[I])
         );
         assert_eq!(
             parse(&g, &argv(&["--backup=x"])),
-            parsed(&[Slot::Opts(Some(Role::Path))], &[B])
+            parsed(&[Slot::Opts(Some((Role::Path, 9)))], &[B])
         );
         assert_eq!(
             parse(&g, &argv(&["--exec", "x"])),
@@ -1487,7 +1594,7 @@ mod tests {
         let g = optional();
         assert_eq!(
             parse(&g, &argv(&["-iSUF"])),
-            parsed(&[Slot::Opts(Some(Role::Inert))], &[I])
+            parsed(&[Slot::Opts(Some((Role::Inert, 2)))], &[I])
         );
         assert_eq!(
             parse(&g, &argv(&["-i", "SUF"])),
@@ -1496,7 +1603,7 @@ mod tests {
         // The suffix `E`, not `-i -E`.
         assert_eq!(
             parse(&g, &argv(&["-iE"])),
-            parsed(&[Slot::Opts(Some(Role::Inert))], &[I])
+            parsed(&[Slot::Opts(Some((Role::Inert, 2)))], &[I])
         );
         assert_eq!(parse(&g, &argv(&["-Ei"])), parsed(&[OPTS], &[E, I]));
     }
@@ -1653,7 +1760,7 @@ mod tests {
         );
         assert_eq!(
             parse(&g, &argv(&["-n=5"])),
-            parsed(&[Slot::Opts(Some(Role::Inert))], &[N])
+            parsed(&[Slot::Opts(Some((Role::Inert, 2)))], &[N])
         );
 
         let strict = rm_strict();
@@ -1684,7 +1791,7 @@ mod tests {
         );
         assert_eq!(
             parse(&out, &argv(&["--output=x"])),
-            parsed(&[Slot::Opts(Some(Role::Path))], &[0])
+            parsed(&[Slot::Opts(Some((Role::Path, 9)))], &[0])
         );
 
         // An option value is not counted as an operand.

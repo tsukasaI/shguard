@@ -287,7 +287,8 @@ impl Grammar {
     /// - `plus`: how a `+word` is read where options are still read, and
     ///   after the first operand with [`Order::Strict`].
     ///
-    /// The two choices are stored as the booleans the accessors return.
+    /// The two choices are stored as booleans; the accessors return the enums
+    /// again.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(result.opts@ == opts@ && result.positionals@ == positionals@
         && result.rest == rest && result.permute == (order == Order::Permute)
@@ -343,20 +344,34 @@ impl Grammar {
         self.rest
     }
 
-    /// Whether options may follow operands.
+    /// Whether options may follow operands: [`Order::Permute`] when they may.
     #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.permute))]
+    #[cfg_attr(creusot, ensures(match result {
+        Order::Permute => self.permute,
+        Order::Strict => !self.permute,
+    }))]
     #[must_use]
-    pub fn permute(&self) -> bool {
-        self.permute
+    pub fn permute(&self) -> Order {
+        if self.permute {
+            Order::Permute
+        } else {
+            Order::Strict
+        }
     }
 
-    /// Whether `--` ends option parsing.
+    /// Whether `--` ends option parsing: [`DashDash::Ends`] when it does.
     #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.dashdash))]
+    #[cfg_attr(creusot, ensures(match result {
+        DashDash::Ends => self.dashdash,
+        DashDash::Literal => !self.dashdash,
+    }))]
     #[must_use]
-    pub fn dashdash(&self) -> bool {
-        self.dashdash
+    pub fn dashdash(&self) -> DashDash {
+        if self.dashdash {
+            DashDash::Ends
+        } else {
+            DashDash::Literal
+        }
     }
 
     /// How a `+word` in option position is read.
@@ -418,7 +433,8 @@ impl Row {
     /// Builds a row, or `None` when `key` is empty or has an empty segment.
     ///
     /// Subcommands are flattened into the key (`["git", "status"]`).
-    /// `runs_code` and `cwd` are stored as the booleans the accessors return.
+    /// `runs_code` and `cwd` are stored as booleans; the accessors return the
+    /// enums again.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(match result {
         Some(r) => r.key@ == key@ && r.grammar == grammar
@@ -464,20 +480,35 @@ impl Row {
         &self.grammar
     }
 
-    /// Whether the command runs other code.
+    /// Whether the command runs other code: [`RunsCode::Yes`] when it does.
     #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.runs_code))]
+    #[cfg_attr(creusot, ensures(match result {
+        RunsCode::Yes => self.runs_code,
+        RunsCode::No => !self.runs_code,
+    }))]
     #[must_use]
-    pub fn runs_code(&self) -> bool {
-        self.runs_code
+    pub fn runs_code(&self) -> RunsCode {
+        if self.runs_code {
+            RunsCode::Yes
+        } else {
+            RunsCode::No
+        }
     }
 
-    /// Whether the command changes the working directory.
+    /// Whether the command changes the working directory: [`Cwd::Changes`]
+    /// when it does.
     #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.changes_cwd))]
+    #[cfg_attr(creusot, ensures(match result {
+        Cwd::Changes => self.changes_cwd,
+        Cwd::Keeps => !self.changes_cwd,
+    }))]
     #[must_use]
-    pub fn changes_cwd(&self) -> bool {
-        self.changes_cwd
+    pub fn changes_cwd(&self) -> Cwd {
+        if self.changes_cwd {
+            Cwd::Changes
+        } else {
+            Cwd::Keeps
+        }
     }
 }
 
@@ -651,13 +682,13 @@ mod tests {
         .expect("valid key");
         assert_eq!(row.key(), [bytes("git"), bytes("status")]);
         assert_eq!(*row.grammar(), grammar());
-        assert!(!row.runs_code());
-        assert!(row.changes_cwd());
+        assert_eq!(row.runs_code(), RunsCode::No);
+        assert_eq!(row.changes_cwd(), Cwd::Changes);
 
         let other =
             Row::new(vec![bytes("sh")], grammar(), RunsCode::Yes, Cwd::Keeps).expect("valid key");
-        assert!(other.runs_code());
-        assert!(!other.changes_cwd());
+        assert_eq!(other.runs_code(), RunsCode::Yes);
+        assert_eq!(other.changes_cwd(), Cwd::Keeps);
 
         assert!(Row::new(Vec::new(), grammar(), RunsCode::No, Cwd::Keeps).is_none());
         assert!(Row::new(vec![Vec::new()], grammar(), RunsCode::No, Cwd::Keeps).is_none());
@@ -697,8 +728,8 @@ mod tests {
         assert_eq!(g.opts(), [opt]);
         assert_eq!(g.positionals(), [Role::Inert]);
         assert_eq!(g.rest(), Some(Role::Path));
-        assert!(g.permute());
-        assert!(!g.dashdash());
+        assert_eq!(g.permute(), Order::Permute);
+        assert_eq!(g.dashdash(), DashDash::Literal);
         assert_eq!(g.plus_words(), PlusWords::Operand);
 
         let strict = Grammar::new(
@@ -709,8 +740,8 @@ mod tests {
             DashDash::Ends,
             PlusWords::Reject,
         );
-        assert!(!strict.permute());
-        assert!(strict.dashdash());
+        assert_eq!(strict.permute(), Order::Strict);
+        assert_eq!(strict.dashdash(), DashDash::Ends);
 
         let row = Row::new(vec![bytes("ls")], g, RunsCode::No, Cwd::Keeps).expect("valid key");
         let global = Global::new(bytes("git"), grammar()).expect("valid head");
