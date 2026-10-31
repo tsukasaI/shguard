@@ -91,9 +91,14 @@
 //!   ASCII fold above cannot see;
 //! - `PathAfterCd`: a relative path word (no leading `/`, no `~`) after an
 //!   earlier covered command, in address order, whose selected row has
-//!   `changes_cwd`.
+//!   `changes_cwd`;
+//! - `SensitiveAfterCd`: the command itself, path words or not, when its
+//!   selected row is `cwd_sensitive` and such an earlier command exists
+//!   (`cd /x && git status` reads `/x`'s `.git/config`).
 //!
-//! These checks read the raw lead: not folded, not normalized.
+//! The checks on words read the raw lead: not folded, not normalized.
+//! `SensitiveAfterCd` reads no word; it sits with them because it is
+//! decided by the same `cwd` state (`path_fail_row`).
 //!
 //! The same four checks apply to an inline path value
 //! (`inline_path_fails`). An empty value (`--file=`) is relative, so it fails
@@ -592,13 +597,14 @@ pub fn path_fail_parsed(ws: Seq<Word>, start: Int, slots: Seq<SlotL>, cwd: bool)
 }
 
 /// The command with words `ws` fails a path check through the parse of
-/// `row`.
+/// `row`. A `cwd_sensitive` row fails it after a `cd` whatever its words.
 #[cfg(creusot)]
 #[logic(open(crate))]
 pub fn path_fail_row(row: Row, ws: Seq<Word>, cwd: bool) -> bool {
     pearlite! {
         match argv_spec(row.grammar, ws, row.key@.len()) {
-            ArgvL::Parsed(slots, _) => path_fail_parsed(ws, row.key@.len(), slots, cwd),
+            ArgvL::Parsed(slots, _) => (cwd && row.cwd_sensitive)
+                || path_fail_parsed(ws, row.key@.len(), slots, cwd),
             ArgvL::Unknown(_, _) => false,
         }
     }
@@ -1565,6 +1571,8 @@ fn scan_simple(
                     let mut ask: Option<Reason> = None;
                     if let Some((u, w)) = path_check(ws, start, &p.slots, cwd) {
                         ask = Some(Reason::Unknown(u, word_at(at, w)));
+                    } else if cwd && r.cwd_sensitive {
+                        ask = Some(Reason::Unknown(UnknownKind::SensitiveAfterCd, at));
                     }
                     let mut block: Option<Reason> = None;
                     let mut j: usize = 0;
@@ -1797,6 +1805,7 @@ mod tests {
                 ),
                 row(&["echo"], gnu(Vec::new(), Role::Inert), Cwd::Keeps),
                 row(&["cat"], gnu(Vec::new(), Role::Path), Cwd::Keeps),
+                row(&["git"], gnu(Vec::new(), Role::Inert), Cwd::Sensitive),
                 row(
                     &["sh"],
                     Grammar::new(
@@ -1975,6 +1984,49 @@ mod tests {
         check(sc, Decision::Ask);
         // Without the cd, the same rm is Allow.
         check(seq(vec![cmd(&["rm", "-rf", "usr"])]), Decision::Allow);
+    }
+
+    #[test]
+    fn cwd_sensitive_after_cd_is_ask() {
+        let after = |conn: Connector, first: &[&str], then: &[&str]| {
+            Script::new(vec![AndOr::new(
+                pipe(vec![cmd(first)]),
+                vec![Link::new(conn, pipe(vec![cmd(then)]))],
+            )])
+        };
+        // `git` alone, and with an inert operand, is Allow.
+        check(seq(vec![cmd(&["git"])]), Decision::Allow);
+        check(seq(vec![cmd(&["git", "status"])]), Decision::Allow);
+        // After a cd, absolute or relative, it is Ask with or without words.
+        check(
+            after(Connector::And, &["cd", "/x"], &["git"]),
+            Decision::Ask,
+        );
+        check(
+            after(Connector::Or, &["cd", "sub"], &["git", "status"]),
+            Decision::Ask,
+        );
+        check(seq(vec![cmd(&["cd", "/x"]), cmd(&["git"])]), Decision::Ask);
+        // A cd later in the script does not reach back.
+        check(
+            seq(vec![cmd(&["git"]), cmd(&["cd", "/x"])]),
+            Decision::Allow,
+        );
+        // A row that keeps the cwd and has no path word stays Allow.
+        check(
+            after(Connector::And, &["cd", "/x"], &["echo", "hi"]),
+            Decision::Allow,
+        );
+        check(
+            after(Connector::And, &["cd", "/x"], &["ls"]),
+            Decision::Allow,
+        );
+        // In a pipeline after a cd it is Ask too.
+        let piped = Script::new(vec![AndOr::new(
+            pipe(vec![cmd(&["cd", "/x"]), cmd(&["git"])]),
+            Vec::new(),
+        )]);
+        check(piped, Decision::Ask);
     }
 
     #[test]
