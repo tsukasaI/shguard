@@ -8,6 +8,12 @@
   `-X`/`--exec-batch`, `-l`/`--list-details`, `-C`/`--base-directory` or
   `--ignore-file`; `fd` from `/` or a home directory is Ask, and so is `fd`
   after a `cd` (#1111).
+- Embedded rows for `git add`, `git commit`, `git fetch`, `git switch`,
+  `git stash` (with `list`, `show`, `pop`, `apply`), a GET-only `gh api`,
+  `eza` and `tree`; `git log` takes `-<number>` (`-5`). A bare `git commit`
+  is Allowed and opens the editor (#1115).
+- README recipes for user rows the catalog leaves out: `gh pr create`, `jq`,
+  `nix build` (#1115).
 
 ### Changed
 

@@ -752,6 +752,251 @@ value = { takes = "inert" }
 long = "search-path"
 value = { takes = "path" }
 
+# eza lists files. Left out: options whose value is optional (--icons,
+# --color, --classify, --hyperlink, --absolute, --code, --loc): clap reads the
+# next word as that value, which the grammar cannot express; --stdin,
+# --color-scale (takes any number of values), -Z, -M, -O and -@.
+[[row]]
+key = ["eza"]
+source = "https://github.com/eza-community/eza#readme https://github.com/eza-community/eza/blob/main/src/options/parser.rs"
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "1"
+long = "oneline"
+[[row.opt]]
+short = "l"
+long = "long"
+[[row.opt]]
+short = "G"
+long = "grid"
+[[row.opt]]
+short = "x"
+long = "across"
+[[row.opt]]
+short = "R"
+long = "recurse"
+[[row.opt]]
+short = "T"
+long = "tree"
+[[row.opt]]
+short = "L"
+long = "level"
+value = { takes = "inert" }
+[[row.opt]]
+short = "a"
+long = "all"
+[[row.opt]]
+short = "A"
+long = "almost-all"
+[[row.opt]]
+short = "d"
+long = "treat-dirs-as-files"
+[[row.opt]]
+short = "D"
+long = "only-dirs"
+[[row.opt]]
+short = "f"
+long = "only-files"
+[[row.opt]]
+short = "X"
+long = "dereference"
+[[row.opt]]
+long = "follow-symlinks"
+[[row.opt]]
+short = "I"
+long = "ignore-glob"
+value = { takes = "inert" }
+[[row.opt]]
+long = "git-ignore"
+[[row.opt]]
+long = "group-directories-first"
+[[row.opt]]
+long = "group-directories-last"
+[[row.opt]]
+short = "s"
+long = "sort"
+value = { takes = "inert" }
+[[row.opt]]
+short = "r"
+long = "reverse"
+[[row.opt]]
+short = "h"
+long = "header"
+[[row.opt]]
+short = "i"
+long = "inode"
+[[row.opt]]
+short = "o"
+long = "octal-permissions"
+[[row.opt]]
+short = "H"
+long = "links"
+[[row.opt]]
+short = "b"
+long = "binary"
+[[row.opt]]
+short = "B"
+long = "bytes"
+[[row.opt]]
+short = "g"
+long = "group"
+[[row.opt]]
+long = "smart-group"
+[[row.opt]]
+short = "n"
+long = "numeric"
+[[row.opt]]
+short = "t"
+long = "time"
+value = { takes = "inert" }
+[[row.opt]]
+short = "m"
+long = "modified"
+[[row.opt]]
+short = "u"
+long = "accessed"
+[[row.opt]]
+long = "changed"
+[[row.opt]]
+short = "U"
+long = "created"
+[[row.opt]]
+long = "time-style"
+value = { takes = "inert" }
+[[row.opt]]
+long = "git"
+[[row.opt]]
+long = "no-permissions"
+[[row.opt]]
+long = "no-filesize"
+[[row.opt]]
+long = "no-user"
+[[row.opt]]
+long = "no-time"
+[[row.opt]]
+long = "no-git"
+[[row.opt]]
+long = "no-quotes"
+[[row.opt]]
+short = "w"
+long = "width"
+value = { takes = "inert" }
+[[row.opt]]
+short = "?"
+long = "help"
+[[row.opt]]
+short = "v"
+long = "version"
+
+# tree lists directories. A short option's value is the next word after the
+# cluster (`-L 2`, and `-La 2` is `-L 2 -a`), never the rest of the cluster,
+# so the row can read a cluster differently from tree (`a` as the value of
+# `-L`, then `2` as a path); either way tree only lists names, and a path
+# operand gets the stricter checks. Left out: -o (writes the listing to a
+# file), --fromfile and --fromtabfile (read paths from a file), --gitfile and
+# --infofile (read a named file), -H/-X and the HTML options, -T, -R,
+# --hyperlink, --opt-toggle.
+[[row]]
+key = ["tree"]
+source = "https://oldmanprogrammer.net/source.php?dir=projects/tree https://github.com/Old-Man-Programmer/tree/blob/master/tree.c"
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "a"
+[[row.opt]]
+short = "d"
+[[row.opt]]
+short = "l"
+[[row.opt]]
+short = "f"
+[[row.opt]]
+short = "x"
+[[row.opt]]
+short = "L"
+value = { takes = "inert" }
+[[row.opt]]
+short = "P"
+value = { takes = "inert" }
+[[row.opt]]
+short = "I"
+value = { takes = "inert" }
+[[row.opt]]
+short = "s"
+[[row.opt]]
+short = "h"
+[[row.opt]]
+short = "D"
+[[row.opt]]
+short = "F"
+[[row.opt]]
+short = "p"
+[[row.opt]]
+short = "u"
+[[row.opt]]
+short = "g"
+[[row.opt]]
+short = "C"
+[[row.opt]]
+short = "n"
+[[row.opt]]
+short = "i"
+[[row.opt]]
+short = "J"
+[[row.opt]]
+short = "r"
+[[row.opt]]
+short = "t"
+[[row.opt]]
+short = "c"
+[[row.opt]]
+short = "U"
+[[row.opt]]
+short = "v"
+[[row.opt]]
+short = "Q"
+[[row.opt]]
+short = "N"
+[[row.opt]]
+short = "q"
+[[row.opt]]
+long = "gitignore"
+[[row.opt]]
+long = "ignore-case"
+[[row.opt]]
+long = "matchdirs"
+[[row.opt]]
+long = "prune"
+[[row.opt]]
+long = "noreport"
+[[row.opt]]
+long = "dirsfirst"
+[[row.opt]]
+long = "filesfirst"
+[[row.opt]]
+long = "si"
+[[row.opt]]
+long = "du"
+[[row.opt]]
+long = "inodes"
+[[row.opt]]
+long = "device"
+[[row.opt]]
+long = "charset"
+value = { takes = "inert" }
+[[row.opt]]
+long = "filelimit"
+value = { takes = "inert" }
+[[row.opt]]
+long = "sort"
+value = { takes = "inert" }
+[[row.opt]]
+long = "help"
+[[row.opt]]
+long = "version"
+
 # Deleting a top-level directory recursively. The data directories (/Users,
 # /home, /var, /opt, /private, /Library, /Applications) match only themselves,
 # so `rm -r /var/tmp/x` is an Ask (absolute path), not a Block. A `~` word
@@ -1207,6 +1452,33 @@ targets = [
 id = "fd-ask-broad"
 key = ["fd"]
 outcome = "ask"
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "prefix" },
+  { pat = "/Users", kind = "prefix" },
+  { pat = "/home", kind = "prefix" },
+  { pat = "/root", kind = "prefix" },
+]
+
+# tree is recursive, and eza is with -R or -T: they list every name under
+# `/` or a home directory.
+[[rule]]
+id = "tree-ask-broad"
+key = ["tree"]
+outcome = "ask"
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "prefix" },
+  { pat = "/Users", kind = "prefix" },
+  { pat = "/home", kind = "prefix" },
+  { pat = "/root", kind = "prefix" },
+]
+
+[[rule]]
+id = "eza-ask-recursive-broad"
+key = ["eza"]
+outcome = "ask"
+opts = [["-R", "-T"]]
 targets = [
   { pat = "/", kind = "exact" },
   { pat = "~", kind = "prefix" },

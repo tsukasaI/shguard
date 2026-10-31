@@ -80,9 +80,10 @@ unquoted `$X`, globs, other redirects such as `> file` or `<`, subshells,
 braces, assignments, `&`) is Ask, whatever the command.
 
 The embedded catalog (`catalog/*.toml`) covers read-mostly shell tools, `fd`
-(without `-x`, `-X` and `-l`), read commands of `git` and `push`, read
-commands of `gh`, and `cargo` build, check, test, clippy, fmt and doc. Every
-row names its upstream source.
+(without `-x`, `-X` and `-l`), `eza`, `tree`, read commands of `git`, its
+local writes `add`, `commit`, `switch` and `stash`, `fetch` and `push`, read
+commands of `gh` and a GET-only `gh api`, and `cargo` build, check, test,
+clippy, fmt and doc. Every row names its upstream source.
 
 ### After a `cd`
 
@@ -130,6 +131,78 @@ leaves those options out or declares that they take a `code` value
 needs its own rule with `key = ["fdfind"]`. `fd` already has an embedded
 row, and a second row with the same key is a load error, so user rows are
 for `fdfind`, `split` and `gsplit`.
+
+### Rows the catalog leaves out
+
+Some commands are left out of the embedded catalog on purpose. Each recipe
+below is a user `[[row]]`: adding it widens Allow, and the risk named next
+to it is yours.
+
+- `gh pr create` and `gh issue create` write to GitHub. A `--body-file`
+  option would post any file the agent names, so the recipe takes the body
+  inline.
+- `jq`: `--arg name value` and `--argjson` take two values, which the grammar
+  cannot express, so they stay Unknown. `jq -n env` and `$ENV` print the
+  environment, tokens included, and `jq . <file>` reads any file; add a
+  `[[rule]]` with the credential targets of the embedded `cat` rule.
+- `nix build`, `nix flake check`, `darwin-rebuild build`: they evaluate and
+  build Nix code, and an installable can name a remote flake
+  (`github:o/r#x`), which is code from outside the repository.
+- `git checkout` and `git restore` have no recipe: a row cannot require an
+  option, so a row that allows `git checkout -b x` also allows
+  `git checkout f`, which throws away local changes. Use `git switch -c`.
+
+```toml
+[[row]]
+key = ["gh", "pr", "create"]
+source = "https://cli.github.com/manual/gh_pr_create"
+cwd_sensitive = true      # required under the embedded `gh pr` row
+order = "permute"
+dashdash = "ends"
+positionals = []
+opt = [
+  { short = "t", long = "title", value = { takes = "inert" } },
+  { short = "b", long = "body", value = { takes = "inert" } },
+  { short = "B", long = "base", value = { takes = "inert" } },
+  { short = "d", long = "draft" },
+]
+
+[[row]]
+key = ["jq"]
+source = "https://jqlang.org/manual/"
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]   # the filter
+rest = "path"
+opt = [
+  { short = "r", long = "raw-output" },
+  { short = "c", long = "compact-output" },
+  { short = "n", long = "null-input" },
+  { short = "s", long = "slurp" },
+  { short = "e", long = "exit-status" },
+]
+
+# A child key needs a row for its parent key.
+[[row]]
+key = ["nix"]
+source = "https://nix.dev/manual/nix/latest/command-ref/new-cli/nix"
+cwd_sensitive = true
+order = "strict"
+dashdash = "ends"
+positionals = []
+
+[[row]]
+key = ["nix", "build"]
+source = "https://nix.dev/manual/nix/latest/command-ref/new-cli/nix3-build"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+opt = [{ short = "L", long = "print-build-logs" }, { long = "no-link" }]
+```
+
+The grammar has no option with more than one value and cannot require an
+option (`git commit` without `-m` opens the editor and waits).
 
 A config or catalog that fails to load makes the hook deny every Bash call,
 with the first error as the reason. `shguard check <file.toml>...` checks

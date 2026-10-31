@@ -20,6 +20,15 @@ const GUARDFALL_ALLOWED: &[&str] = &[
     "fd -e rs",
     "fd -ex foo",
     "fd -tx foo",
+    // A commit message is text, and `--amend` rewrites only the local
+    // commit; `fetch` downloads from a configured remote (#1115).
+    "git commit --amend",
+    "git commit -m \"chore: bump deps (retest)\"",
+    "git commit -m \"docs: clarify wording (e.g.)\"",
+    "git commit -m \"fix(rules): keep x (see: y)\"",
+    "git commit -m 'fix(rules): x (see: y)'",
+    "git commit -m 'rm -rf /'",
+    "git fetch origin",
     "git log --format='%(refname)'",
     "git log --oneline",
     "git log | grep x | head",

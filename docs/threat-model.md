@@ -80,6 +80,11 @@ recorded, not hidden.
   `<helper>::` remotes other than `ext::` (#1096), glob refspecs
   (`'refs/heads/*:refs/heads/*'`, #1095), `--follow-tags` (#1097), and
   relative local remotes (`git push sub/repo main`, #1100).
+- **git fetch remotes.** Fetches from `ext::` remotes, from the same URL
+  schemes as push and with a `+` refspec are Ask. Still Allow, as for push:
+  the scp form (`git fetch git@host:o/r`) and other `<helper>::` remotes. A
+  fetch writes only remote-tracking refs and `FETCH_HEAD`, or the local refs
+  an explicit `src:dst` refspec names.
 - **git format placeholders.** `%G?`-style placeholders in a quoted
   `--format` (`git log '--format=%G?'`) verify signatures through
   `gpg.program`, as `--show-signature` would (#1099).
