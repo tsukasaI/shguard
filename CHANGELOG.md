@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 - 2026-10-31
 
 A rebuild. The 0.9 engine is preserved at the tag `legacy-v0.9.5`.
 
