@@ -377,6 +377,12 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             row: label.clone(),
         });
     }
+    if dto.changes_cwd && dto.cwd_sensitive {
+        errs.push(LoadError::ConflictingCwd {
+            file: file.to_owned(),
+            row: label.clone(),
+        });
+    }
     let mut opts = Vec::new();
     let mut shorts: Vec<u8> = Vec::new();
     let mut longs: Vec<Vec<u8>> = Vec::new();
@@ -435,6 +441,8 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             },
             if dto.changes_cwd {
                 Cwd::Changes
+            } else if dto.cwd_sensitive {
+                Cwd::Sensitive
             } else {
                 Cwd::Keeps
             },

@@ -196,12 +196,17 @@ pub enum RunsCode {
     No,
 }
 
-/// Whether a command changes the working directory.
+/// How a command relates to the working directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(creusot, derive(DeepModel))]
 pub enum Cwd {
     /// The command changes the working directory (`cd`, `pushd`).
     Changes,
+    /// The command leaves the working directory alone, but what it does
+    /// depends on configuration found there (`git` reads `.git/config`,
+    /// which can name programs to run), so it is asked after an earlier
+    /// command that changes the working directory.
+    Sensitive,
     /// The command leaves the working directory alone.
     Keeps,
 }
@@ -419,6 +424,7 @@ pub struct Row {
     pub(crate) grammar: Grammar,
     pub(crate) runs_code: bool,
     pub(crate) changes_cwd: bool,
+    pub(crate) cwd_sensitive: bool,
 }
 
 #[cfg(creusot)]
@@ -439,7 +445,8 @@ impl Row {
     #[cfg_attr(creusot, ensures(match result {
         Some(r) => r.key@ == key@ && r.grammar == grammar
             && r.runs_code == (runs_code == RunsCode::Yes)
-            && r.changes_cwd == (cwd == Cwd::Changes),
+            && r.changes_cwd == (cwd == Cwd::Changes)
+            && r.cwd_sensitive == (cwd == Cwd::Sensitive),
         None => !key_wf(key@),
     }))]
     #[must_use]
@@ -448,9 +455,10 @@ impl Row {
             RunsCode::Yes => true,
             RunsCode::No => false,
         };
-        let changes_cwd = match cwd {
-            Cwd::Changes => true,
-            Cwd::Keeps => false,
+        let (changes_cwd, cwd_sensitive) = match cwd {
+            Cwd::Changes => (true, false),
+            Cwd::Sensitive => (false, true),
+            Cwd::Keeps => (false, false),
         };
         if key_ok(&key) {
             Some(Row {
@@ -458,6 +466,7 @@ impl Row {
                 grammar,
                 runs_code,
                 changes_cwd,
+                cwd_sensitive,
             })
         } else {
             None
@@ -495,17 +504,21 @@ impl Row {
         }
     }
 
-    /// Whether the command changes the working directory: [`Cwd::Changes`]
-    /// when it does.
+    /// How the command relates to the working directory: [`Cwd::Changes`]
+    /// when it changes it, [`Cwd::Sensitive`] when its configuration is read
+    /// from it.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(match result {
         Cwd::Changes => self.changes_cwd,
-        Cwd::Keeps => !self.changes_cwd,
+        Cwd::Sensitive => !self.changes_cwd && self.cwd_sensitive,
+        Cwd::Keeps => !self.changes_cwd && !self.cwd_sensitive,
     }))]
     #[must_use]
-    pub fn changes_cwd(&self) -> Cwd {
+    pub fn cwd(&self) -> Cwd {
         if self.changes_cwd {
             Cwd::Changes
+        } else if self.cwd_sensitive {
+            Cwd::Sensitive
         } else {
             Cwd::Keeps
         }
@@ -683,12 +696,15 @@ mod tests {
         assert_eq!(row.key(), [bytes("git"), bytes("status")]);
         assert_eq!(*row.grammar(), grammar());
         assert_eq!(row.runs_code(), RunsCode::No);
-        assert_eq!(row.changes_cwd(), Cwd::Changes);
+        assert_eq!(row.cwd(), Cwd::Changes);
 
         let other =
             Row::new(vec![bytes("sh")], grammar(), RunsCode::Yes, Cwd::Keeps).expect("valid key");
         assert_eq!(other.runs_code(), RunsCode::Yes);
-        assert_eq!(other.changes_cwd(), Cwd::Keeps);
+        assert_eq!(other.cwd(), Cwd::Keeps);
+        let git = Row::new(vec![bytes("git")], grammar(), RunsCode::No, Cwd::Sensitive)
+            .expect("valid key");
+        assert_eq!(git.cwd(), Cwd::Sensitive);
 
         assert!(Row::new(Vec::new(), grammar(), RunsCode::No, Cwd::Keeps).is_none());
         assert!(Row::new(vec![Vec::new()], grammar(), RunsCode::No, Cwd::Keeps).is_none());

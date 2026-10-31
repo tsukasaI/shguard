@@ -51,6 +51,9 @@ pub enum LoadError {
     /// segment.
     #[error("{file}: row `{row}`: no parent row")]
     OrphanRow { file: String, row: String },
+    /// A row sets both `changes_cwd` and `cwd_sensitive`.
+    #[error("{file}: row `{row}`: sets both `changes_cwd` and `cwd_sensitive`")]
+    ConflictingCwd { file: String, row: String },
     /// A row whose head the grammar cannot express (#1039) does not run code.
     #[error("{file}: row `{row}`: head is not expressible, so the row must set `runs_code`")]
     DenylistedHead { file: String, row: String },

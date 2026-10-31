@@ -84,6 +84,9 @@ pub enum UnknownKind {
     /// A relative literal path word, or inline option value, after an earlier
     /// command that changes the working directory (`cd / && rm -rf usr`).
     PathAfterCd,
+    /// A command whose configuration is read from the working directory,
+    /// after an earlier command that changes it (`cd /x && git status`).
+    SensitiveAfterCd,
 }
 
 /// Why a verdict is not Allow.
