@@ -28,7 +28,8 @@ against its specification of the promise above, for every input.
 
 Download `shguard-<target>` for your platform from
 [Releases](https://github.com/tsukasaI/shguard/releases), check it against
-`SHA256SUMS`, and put it on `PATH` as `shguard`. Or, from a checkout:
+`SHA256SUMS`, make it executable (`chmod +x`), and put it on `PATH` as
+`shguard`. Or, from a checkout:
 
 ```console
 $ cargo install --locked --path crates/shguard

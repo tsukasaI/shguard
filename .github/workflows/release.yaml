@@ -17,8 +17,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # The tag should point at a main commit whose `verify` run (with proofs)
-  # was green; this re-checks only what a mistagged commit would break.
+  # Proofs ran in `verify` on main, and `proofs` is a required check there,
+  # so a tag on a main commit carries them; this job refuses any other commit
+  # and re-checks what a mistagged commit would break.
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -26,6 +27,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+      - name: Tag is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "${GITHUB_SHA}" FETCH_HEAD
       - name: Install toolchain
         run: rustup toolchain install --no-self-update
       - name: Tag matches the crate version
@@ -35,7 +41,7 @@ jobs:
           test "v${version}" = "${GITHUB_REF_NAME}" \
             || { echo "tag ${GITHUB_REF_NAME} != crate version ${version}"; exit 1; }
       - name: CHANGELOG has a section for the version
-        run: grep -q "^## ${GITHUB_REF_NAME#v} " CHANGELOG.md
+        run: grep -qF -- "## ${GITHUB_REF_NAME#v} " CHANGELOG.md
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
@@ -66,6 +72,10 @@ jobs:
           rustup toolchain install --no-self-update
           rustup target add ${{ matrix.target }}
       - run: cargo build --locked --release -p shguard --target ${{ matrix.target }}
+      # x86_64 Darwin is cross-built on an arm runner, so it is not run here.
+      - name: Smoke test
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: target/${{ matrix.target }}/release/shguard --version
       - name: Stage binary
         run: |
           mkdir -p dist
