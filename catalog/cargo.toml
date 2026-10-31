@@ -330,7 +330,7 @@ targets = [
   # rustc reads short-option clusters (getopts): after a flag that takes no
   # value, the rest of the word is the next option, so `-go/tmp/x` is
   # `-g -o /tmp/x`. Ask every word that starts with such a flag (the ASCII
-  # fold covers `-G`, `-V`, `-H`; `-O` is caught by `-o`).
+  # fold covers `-G`, `-V`, `-H`; `-O` is caught by `-o`, `-l` by `-L`).
   { pat = "-g", kind = "prefix" },
   { pat = "-v", kind = "prefix" },
   { pat = "-h", kind = "prefix" },

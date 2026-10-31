@@ -193,6 +193,8 @@ fn every_cargo_row_has_an_allowed_command() {
         "cargo clippy",
         "cargo clippy --workspace --all-targets -- -D warnings",
         "cargo clippy --no-deps -- -D clippy::all",
+        "cargo clippy -- -Dwarnings",
+        "cargo clippy -- -Wclippy::pedantic",
         "cargo fmt",
         "cargo fmt --all",
         "cargo fmt --all -- --check",
