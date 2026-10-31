@@ -26,7 +26,9 @@ against its specification of the promise above, for every input.
 
 ## Install
 
-From a checkout:
+Download `shguard-<target>` for your platform from
+[Releases](https://github.com/tsukasaI/shguard/releases), check it against
+`SHA256SUMS`, and put it on `PATH` as `shguard`. Or, from a checkout:
 
 ```console
 $ cargo install --locked --path crates/shguard
@@ -150,7 +152,8 @@ Unknown input is Ask now: 0.9 allowed what no rule matched.
 
 ## Status
 
-Pre-release. The previous implementation is preserved at the tag
+0.10.0 is the first release of the rebuild (see `CHANGELOG.md`). The
+previous implementation is preserved at the tag
 `legacy-v0.9.5`. `acceptance/` holds command corpora carried over from it;
 each row's decision fields describe the old engine, not expectations for the
 new one.
