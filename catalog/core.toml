@@ -636,6 +636,8 @@ targets = [
   { pat = "/lib", kind = "under" },
   { pat = "/lib32", kind = "under" },
   { pat = "/lib64", kind = "under" },
+  { pat = "/libx32", kind = "under" },
+  { pat = "/libexec", kind = "under" },
   { pat = "/System", kind = "under" },
 ]
 

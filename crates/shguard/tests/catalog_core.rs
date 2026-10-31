@@ -380,6 +380,8 @@ fn under_targets_stop_at_a_component_boundary() {
             "cp x /dev/sda",
             "rm -r /lib64",
             "rm -r /lib32/x",
+            "rm -r /libx32",
+            "rm -r /libexec/x",
         ],
         Decision::Block,
     );
