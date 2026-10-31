@@ -23,6 +23,14 @@ ask_outcome = "ask"
 # id = "ask-every-rm"
 # key = ["rm"]
 # outcome = "ask"
+# reason = "say which files and why"   # optional; added to the hook's reason
+
+# A hint adds text to the reason when a command under its key is Unknown.
+# It changes no decision. A key may have one hint only, embedded ones
+# included (`find`, `git checkout`, `git restore`).
+# [[hint]]
+# key = ["make"]
+# text = "run the targets through `cargo` instead"
 "#;
 
 /// The `hooks` entry for Claude Code's settings.json that runs `exe` before

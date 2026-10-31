@@ -954,3 +954,80 @@ fn check_subcommand_status() {
     // `check` with no files, and the bare binary, are covered in
     // `hook_contract.rs`.
 }
+
+/// #1112: rule reasons and hints.
+#[test]
+fn reason_and_hint_texts_are_checked() {
+    let rm = row("\"rm\"", "rest = \"path\"");
+    let ok = format!(
+        "{rm}{}[[hint]]\nkey = [\"find\"]\ntext = \"use fd\"\n",
+        rule("reason = \"rm -r of / is never wanted\"")
+    );
+    let l = loaded(&ok);
+    assert_eq!(
+        l.rule_reasons,
+        vec![Some("rm -r of / is never wanted".to_owned())]
+    );
+    assert_eq!(l.hints.len(), 1);
+    assert_eq!(
+        loaded(&format!("{rm}{}", rule(""))).rule_reasons,
+        vec![None]
+    );
+    let long = "x".repeat(301);
+    for bad in [
+        "",
+        "   ",
+        "two\\nlines",
+        "tab\\there",
+        "bidi \\u202e txt",
+        "line \\u2028 sep",
+        "zero \\u200b width",
+        "bom \\ufeff",
+        "arabic mark \\u061c",
+        long.as_str(),
+    ] {
+        let text = format!("{rm}{}", rule(&format!("reason = \"{bad}\"")));
+        assert!(
+            errors(&text)
+                .iter()
+                .any(|e| matches!(e, LoadError::BadText { .. })),
+            "reason {bad:?}"
+        );
+        let hint = format!("[[hint]]\nkey = [\"find\"]\ntext = \"{bad}\"\n");
+        assert!(
+            errors(&hint)
+                .iter()
+                .any(|e| matches!(e, LoadError::BadText { .. })),
+            "hint {bad:?}"
+        );
+    }
+    assert!(
+        load_one(&format!(
+            "{rm}{}",
+            rule(&format!("reason = \"{}\"", "x".repeat(300)))
+        ))
+        .is_ok()
+    );
+    for key in ["[]", "[\"\"]", "[\"git\", \"-c\"]", "[\"+x\"]"] {
+        let hint = format!("[[hint]]\nkey = {key}\ntext = \"t\"\n");
+        assert!(
+            errors(&hint)
+                .iter()
+                .any(|e| matches!(e, LoadError::BadHintKey { .. })),
+            "{key}"
+        );
+    }
+    let dup =
+        "[[hint]]\nkey = [\"find\"]\ntext = \"a\"\n[[hint]]\nkey = [\"find\"]\ntext = \"b\"\n";
+    assert!(
+        errors(dup)
+            .iter()
+            .any(|e| matches!(e, LoadError::DuplicateHint { .. }))
+    );
+    // A hint needs no row, and unknown fields are refused.
+    assert!(load_one("[[hint]]\nkey = [\"find\"]\ntext = \"t\"\n").is_ok());
+    assert!(matches!(
+        errors("[[hint]]\nkey = [\"find\"]\ntext = \"t\"\nbogus = 1\n")[0],
+        LoadError::Toml { .. }
+    ));
+}

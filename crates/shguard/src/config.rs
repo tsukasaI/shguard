@@ -9,6 +9,7 @@
 //!
 //! [[row]]    # exactly the catalog row schema; `source` is required
 //! [[rule]]   # exactly the catalog rule schema; outcome "block" or "ask"
+//! [[hint]]   # key and text: added to the reason of an Unknown command
 //! ```
 //!
 //! Rows and rules are merged with the embedded catalog through the same

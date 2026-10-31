@@ -9,13 +9,16 @@
 //! 4. Otherwise the kernel decides.
 //! 5. Every Ask goes through `ask_outcome`; a Block is always a deny.
 //!
-//! The reasons say what was found. None of them says a command is safe.
+//! The reasons say what was found. None of them says a command is safe, and
+//! none holds bytes of the command: a rule's `reason` and a hint's `text`
+//! come from the catalog files.
 
+use shguard_kernel::ast::{Part, Script};
 use shguard_kernel::decide::{Verdict, decide};
 use shguard_kernel::verdict::{Addr, Reason, UnknownKind};
 use shguard_syntax::parse;
 
-use crate::catalog::LoadError;
+use crate::catalog::{Hint, LoadError, Loaded};
 use crate::config::{AskOutcome, Settings};
 use crate::hook::{Request, Response, parse_request, render};
 use serde_json::Value;
@@ -105,22 +108,72 @@ fn judge(command: &str, settings: &Settings) -> Judged {
     let loaded = &settings.loaded;
     match decide(&loaded.catalog, &loaded.rules, script) {
         Verdict::Allow(_) => Judged::Allow("covered by the catalog; no rule hit".to_owned()),
-        Verdict::Ask(_, reason) => Judged::Ask(reason_text(&reason, &loaded.rule_ids)),
-        Verdict::Block(_, reason) => Judged::Deny(reason_text(&reason, &loaded.rule_ids)),
+        Verdict::Ask(script, reason) => Judged::Ask(reason_text(&reason, &script, loaded)),
+        Verdict::Block(script, reason) => Judged::Deny(reason_text(&reason, &script, loaded)),
     }
 }
 
-fn reason_text(reason: &Reason, rule_ids: &[String]) -> String {
-    match reason {
+/// The reason for a verdict, with its guidance text appended.
+fn reason_text(reason: &Reason, script: &Script, loaded: &Loaded) -> String {
+    let base = match reason {
         Reason::Unknown(kind, addr) => format!("{} ({})", unknown(*kind), addr_text(*addr)),
         Reason::Rule(id, addr) => {
             let name = usize::try_from(id.0)
                 .ok()
-                .and_then(|i| rule_ids.get(i))
+                .and_then(|i| loaded.rule_ids.get(i))
                 .map_or_else(|| format!("#{}", id.0), Clone::clone);
             format!("rule `{name}` hit ({})", addr_text(*addr))
         }
+    };
+    match guidance(reason, script, loaded) {
+        Some(text) => format!("{base}; {text}"),
+        None => base,
     }
+}
+
+/// The text a catalog file attaches to a verdict's reason: the hit rule's
+/// `reason`, or the hint for an Unknown command's key. It comes from the
+/// catalog files, never from the command.
+fn guidance<'a>(reason: &Reason, script: &Script, loaded: &'a Loaded) -> Option<&'a str> {
+    match reason {
+        Reason::Unknown(_, addr) => hint_for(script, *addr, &loaded.hints),
+        Reason::Rule(id, _) => usize::try_from(id.0)
+            .ok()
+            .and_then(|i| loaded.rule_reasons.get(i))
+            .and_then(Option::as_deref),
+    }
+}
+
+/// The text of the hint with the longest key that the command at `addr`
+/// starts with. Only the literal words at the start of the command are
+/// compared; the first word with an opaque part ends the comparison.
+fn hint_for<'a>(script: &Script, addr: Addr, hints: &'a [Hint]) -> Option<&'a str> {
+    let item = script.items().get(addr.item)?;
+    let pipeline = match addr.link.checked_sub(1) {
+        None => item.first(),
+        Some(k) => item.rest().get(k)?.rhs(),
+    };
+    let simple = pipeline.cmds().get(addr.cmd)?;
+    let mut words: Vec<Vec<u8>> = Vec::new();
+    for w in simple.words() {
+        let mut bytes = Vec::new();
+        for part in w.parts() {
+            match part {
+                Part::Lit(b) => bytes.extend_from_slice(b),
+                Part::Opaque(_) => return longest(&words, hints),
+            }
+        }
+        words.push(bytes);
+    }
+    longest(&words, hints)
+}
+
+fn longest<'a>(words: &[Vec<u8>], hints: &'a [Hint]) -> Option<&'a str> {
+    hints
+        .iter()
+        .filter(|h| words.starts_with(&h.key))
+        .max_by_key(|h| h.key.len())
+        .map(|h| h.text.as_str())
 }
 
 fn addr_text(a: Addr) -> String {
@@ -209,6 +262,74 @@ short = "a"
         }
         let other = br#"{"tool_name":"Read"}"#;
         assert_eq!(decision(&d(&deny, other)), None);
+    }
+
+    fn reason(v: &Value) -> &str {
+        v["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn rule_reasons_and_hints_change_only_the_text() {
+        let embedded = [Source {
+            name: "t.toml",
+            text: CATALOG,
+        }];
+        let rules =
+            "[[rule]]\nid = \"ls-a\"\nkey = [\"ls\"]\nopts = [[\"-a\"]]\noutcome = \"ask\"\n";
+        let plain = match settings(&embedded, Some(("c.toml", rules))) {
+            Ok(s) => s,
+            Err(e) => panic!("{e:?}"),
+        };
+        let cfg = format!(
+            "{rules}reason = \"hidden files; list them by name\"\n\
+             [[hint]]\nkey = [\"find\"]\ntext = \"use fd or rg --files\"\n\
+             [[hint]]\nkey = [\"git\"]\ntext = \"git hint\"\n\
+             [[hint]]\nkey = [\"git\", \"checkout\"]\ntext = \"use git switch\"\n"
+        );
+        let with = match settings(&embedded, Some(("c.toml", &cfg))) {
+            Ok(s) => s,
+            Err(e) => panic!("{e:?}"),
+        };
+        for cmd in [
+            "ls -a",
+            "ls -l",
+            "find . -name x",
+            "git checkout main",
+            "git status",
+            "ls && find .",
+            "\"${X}\" checkout",
+        ] {
+            let a = respond(&bash(cmd), Ok(&plain));
+            let b = respond(&bash(cmd), Ok(&with));
+            assert_eq!(decision(&a), decision(&b), "{cmd}");
+        }
+        // The guidance each command gets, read without the wording around it.
+        let g = |cmd: &str| -> Option<String> {
+            let script = parse(cmd.as_bytes()).ok()?;
+            let l = &with.loaded;
+            match decide(&l.catalog, &l.rules, script) {
+                Verdict::Allow(_) => None,
+                Verdict::Ask(sc, r) | Verdict::Block(sc, r) => {
+                    guidance(&r, &sc, l).map(str::to_owned)
+                }
+            }
+        };
+        let some = |t: &str| Some(t.to_owned());
+        assert_eq!(g("ls -a"), some("hidden files; list them by name"));
+        assert_eq!(g("find . -name x"), some("use fd or rg --files"));
+        assert_eq!(g("ls && find ."), some("use fd or rg --files"));
+        // The longest key wins.
+        assert_eq!(g("git checkout main"), some("use git switch"));
+        assert_eq!(g("git status"), some("git hint"));
+        assert_eq!(g("uname"), None);
+        // An opaque word ends the key comparison.
+        assert_eq!(g("\"${X}\" checkout"), None);
+        assert_eq!(g("ls -l"), None);
+        // The hook reason carries the text.
+        let r = |cmd: &str| reason(&respond(&bash(cmd), Ok(&with))).to_owned();
+        assert!(r("find . -name x").contains("use fd or rg --files"));
     }
 
     #[test]

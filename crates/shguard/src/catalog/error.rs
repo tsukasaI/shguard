@@ -189,6 +189,23 @@ pub enum LoadError {
         pat: String,
         normal: String,
     },
+    /// A rule `reason` or a hint `text` is empty, longer than 300 bytes
+    /// (`TEXT_CAP`), or holds a control, line separator, zero-width or
+    /// bidirectional-format character. `item` is "rule `id`" or
+    /// "hint `key`".
+    #[error("{file}: {item}: {why}")]
+    BadText {
+        file: String,
+        item: String,
+        why: &'static str,
+    },
+    /// A hint key is empty, has an empty segment, or a segment that starts
+    /// with `-` or `+`.
+    #[error("{file}: hint `{hint}`: empty key segment, or one that starts with `-` or `+`")]
+    BadHintKey { file: String, hint: String },
+    /// Two hints share a key.
+    #[error("{file}: hint `{hint}`: duplicate key")]
+    DuplicateHint { file: String, hint: String },
     /// More rules than a rule id can number.
     #[error("{file}: rule `{rule}`: too many rules")]
     TooManyRules { file: String, rule: String },

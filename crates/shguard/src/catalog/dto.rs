@@ -11,6 +11,8 @@ pub(super) struct FileDto {
     pub(super) row: Vec<RowDto>,
     #[serde(default)]
     pub(super) rule: Vec<RuleDto>,
+    #[serde(default)]
+    pub(super) hint: Vec<HintDto>,
 }
 
 /// The user config: `ask_outcome`, `decision_log`, plus rows and rules in
@@ -25,6 +27,8 @@ pub(super) struct ConfigDto {
     pub(super) row: Vec<RowDto>,
     #[serde(default)]
     pub(super) rule: Vec<RuleDto>,
+    #[serde(default)]
+    pub(super) hint: Vec<HintDto>,
 }
 
 /// What an Ask becomes when the hook answers.
@@ -154,4 +158,14 @@ pub(super) struct RuleDto {
     #[serde(default)]
     pub(super) targets: Vec<TargetDto>,
     pub(super) outcome: OutcomeDto,
+    pub(super) reason: Option<String>,
+}
+
+/// Text added to the reason of an Unknown command under `key`. It changes
+/// no decision.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct HintDto {
+    pub(super) key: Vec<String>,
+    pub(super) text: String,
 }
