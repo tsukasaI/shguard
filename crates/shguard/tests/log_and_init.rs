@@ -145,9 +145,24 @@ fn a_fifo_at_the_log_path_does_not_hold_the_answer() {
     let out = hook(dir.path(), &config, &text, &bash("rm -rf /"));
     assert_eq!(decision(&out).as_deref(), Some("deny"));
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(5),
+        start.elapsed() < std::time::Duration::from_secs(2),
         "the hook waited"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hard_linked_log_is_not_written_through() {
+    let dir = ok(tempfile::tempdir());
+    let config = dir.path().join("config.toml");
+    let target = dir.path().join("target.txt");
+    ok(std::fs::write(&target, "keep\n"));
+    let log = dir.path().join("log.jsonl");
+    ok(std::fs::hard_link(&target, &log));
+    let text = format!("decision_log = {:?}\n", log.display().to_string());
+    let out = hook(dir.path(), &config, &text, &bash("echo hi"));
+    assert_eq!(decision(&out).as_deref(), Some("allow"));
+    assert_eq!(ok(std::fs::read_to_string(&target)), "keep\n");
 }
 
 #[test]
