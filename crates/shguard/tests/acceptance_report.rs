@@ -8,8 +8,9 @@
 //!   corpora). A row that is new since the baseline is a decision someone
 //!   should look at.
 //! - `denials_input` coverage: how many commands the parser accepts, the
-//!   rejected ones grouped by the first unsupported construct, and the
-//!   accepted ones by decision and first reason.
+//!   rejected ones grouped by the first unsupported construct (first in the
+//!   lexer's order: a lexer construct anywhere wins over a parser one such
+//!   as `ReservedWord`), and the accepted ones by decision and first reason.
 //! - #1038: across every corpus, how many parsed commands are Unknown first
 //!   because of a tilde-leading word or an opaque inline value in option
 //!   position.
@@ -98,11 +99,11 @@ fn flips(l: &Loaded) -> BTreeSet<Flip> {
     out
 }
 
-fn baseline() -> BTreeSet<Flip> {
-    let Ok(text) = std::fs::read_to_string(path(BASELINE)) else {
-        panic!("cannot read {BASELINE}; bless it with SHGUARD_BLESS_BASELINE=1");
-    };
-    text.lines()
+/// The committed baseline, or `None` when the file is missing.
+fn baseline() -> Option<BTreeSet<Flip>> {
+    let text = std::fs::read_to_string(path(BASELINE)).ok()?;
+    let rows = text
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
             let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else {
@@ -117,7 +118,8 @@ fn baseline() -> BTreeSet<Flip> {
                 _ => panic!("{BASELINE}: a row without corpus, old or command: {l}"),
             }
         })
-        .collect()
+        .collect();
+    Some(rows)
 }
 
 fn pct(n: usize, d: usize) -> String {
@@ -128,14 +130,30 @@ fn pct(n: usize, d: usize) -> String {
     format!("{}.{}%", tenths / 10, tenths % 10)
 }
 
-/// The #1038 shape of an `OpaqueOption` word: tilde-leading, or a literal
-/// `--name=` (or `-x`) followed by an opaque value.
+/// The #1038 shape of an `OpaqueOption` word, read after dropping empty
+/// literal parts (`''` is a word part): tilde-leading; an option name
+/// (`-x`, `--name=`) followed by an opaque value; a bare `-` or nothing
+/// before an opaque part, which might expand to an option.
 fn opaque_option_shape(addr_word: Option<&[Part]>) -> &'static str {
-    match addr_word {
-        Some([Part::Opaque(Opaque::Tilde), ..]) => "tilde-leading word",
-        Some([Part::Lit(b), Part::Opaque(_), ..]) if b.starts_with(b"-") => "opaque inline value",
-        Some(_) | None => "other",
+    let parts: Vec<&Part> = addr_word
+        .unwrap_or(&[])
+        .iter()
+        .filter(|p| !matches!(p, Part::Lit(b) if b.is_empty()))
+        .collect();
+    match parts.as_slice() {
+        [Part::Opaque(Opaque::Tilde), ..] => "tilde-leading word",
+        [Part::Lit(b), Part::Opaque(_), ..] if b.len() >= 2 && b.starts_with(b"-") => {
+            "opaque inline value"
+        }
+        [Part::Lit(b), Part::Opaque(_), ..] if b.as_slice() == b"-" => "dash then opaque",
+        [Part::Opaque(Opaque::Var(_)), ..] => "opaque word",
+        [..] => "other",
     }
+}
+
+/// The word holds a leading `~` (`~` or `~/x`), whatever position it is in.
+fn tilde_leading(parts: &[Part]) -> bool {
+    matches!(parts.first(), Some(Part::Opaque(Opaque::Tilde)))
 }
 
 fn reason_label(l: &Loaded, v: &Verdict) -> String {
@@ -173,18 +191,11 @@ fn soft_report() {
 
     // Old non-Allow → new Allow.
     let now = flips(&l);
-    if std::env::var_os("SHGUARD_BLESS_BASELINE").is_some() {
-        let mut text = String::new();
-        for f in &now {
-            text.push_str(&f.to_line());
-            text.push('\n');
-        }
-        if let Err(e) = std::fs::write(path(BASELINE), text) {
-            panic!("cannot write {BASELINE}: {e}");
-        }
-    }
-    let base = baseline();
-    println!("== old non-Allow -> new Allow (baseline: acceptance/{BASELINE})");
+    println!("== old Ask or Block -> new Allow (baseline: acceptance/{BASELINE})");
+    let base = baseline().unwrap_or_else(|| {
+        println!("  (no {BASELINE}; compared with an empty baseline)");
+        BTreeSet::new()
+    });
     let mut by_old: BTreeMap<(&str, &str), usize> = BTreeMap::new();
     for f in &now {
         *by_old
@@ -200,6 +211,18 @@ fn soft_report() {
     }
     for f in base.difference(&now) {
         println!("  gone since baseline: {}", f.to_line());
+    }
+    // Only the exact value 1 blesses, and only after the diff above is shown.
+    if std::env::var("SHGUARD_BLESS_BASELINE").as_deref() == Ok("1") {
+        let mut text = String::new();
+        for f in &now {
+            text.push_str(&f.to_line());
+            text.push('\n');
+        }
+        if let Err(e) = std::fs::write(path(BASELINE), text) {
+            panic!("cannot write {BASELINE}: {e}");
+        }
+        println!("  blessed {} rows into {BASELINE}", now.len());
     }
 
     // denials_input coverage.
@@ -245,8 +268,11 @@ fn soft_report() {
         println!("  first reason {r}: {n} ({})", pct(*n, total));
     }
 
-    // #1038 shapes in every corpus.
-    println!("== #1038: first reason OpaqueOption, by word shape, all corpora");
+    // #1038 shapes in every corpus. A first reason hides later ones, so the
+    // second line per corpus counts tilde-leading words wherever they are:
+    // `raw` greps the text (rejected commands included), `parsed` reads the
+    // words of accepted commands after the command name.
+    println!("== #1038: first reason OpaqueOption by word shape; tilde-leading words anywhere");
     let all = [
         "benign_corpus.jsonl",
         "denials_input.jsonl",
@@ -257,18 +283,41 @@ fn soft_report() {
     for corpus in all {
         let mut parsed = 0;
         let mut shapes: BTreeMap<String, usize> = BTreeMap::new();
+        let mut raw_tilde = 0;
+        let mut parsed_tilde: BTreeMap<String, usize> = BTreeMap::new();
         for row in rows(corpus) {
             let Some(cmd) = field(&row, "command") else {
                 panic!("{corpus}: a row without `command`");
             };
-            if let Some(v) = verdict(&l, cmd) {
-                parsed += 1;
-                let label = reason_label(&l, &v);
-                if label.starts_with("OpaqueOption") {
-                    *shapes.entry(label).or_default() += 1;
-                }
+            if cmd
+                .split(|c: char| c.is_whitespace() || ";|&(".contains(c))
+                .any(|w| w.starts_with('~'))
+            {
+                raw_tilde += 1;
+            }
+            let Ok(script) = shguard_syntax::parse(cmd.as_bytes()) else {
+                continue;
+            };
+            parsed += 1;
+            let has_tilde = script.items().iter().any(|ao| {
+                std::iter::once(ao.first())
+                    .chain(ao.rest().iter().map(|link| link.rhs()))
+                    .flat_map(|p| p.cmds())
+                    .any(|c| c.words().iter().skip(1).any(|w| tilde_leading(w.parts())))
+            });
+            let v = decide(&l.catalog, &l.rules, script);
+            let label = reason_label(&l, &v);
+            if has_tilde {
+                *parsed_tilde.entry(label.clone()).or_default() += 1;
+            }
+            if label.starts_with("OpaqueOption") {
+                *shapes.entry(label).or_default() += 1;
             }
         }
-        println!("  {corpus}: parsed {parsed}, {shapes:?}");
+        println!("  {corpus}: parsed {parsed}, first reason {shapes:?}");
+        println!(
+            "    tilde-leading words: raw {raw_tilde}, parsed {} by first reason {parsed_tilde:?}",
+            parsed_tilde.values().sum::<usize>()
+        );
     }
 }
