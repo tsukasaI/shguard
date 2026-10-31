@@ -76,6 +76,11 @@ pub enum UnknownKind {
     /// A literal path word, or an inline option value (`-t/x`, `--dir=/x`),
     /// with a `..` segment.
     PathDotDot,
+    /// A literal path word, or an inline option value, with a byte that is
+    /// not ASCII. Target matching folds only ASCII case, and a filesystem
+    /// may fold more (APFS folds Unicode case), so such a path could name a
+    /// target under another spelling.
+    PathNonAscii,
     /// A relative literal path word, or inline option value, after an earlier
     /// command that changes the working directory (`cd / && rm -rf usr`).
     PathAfterCd,

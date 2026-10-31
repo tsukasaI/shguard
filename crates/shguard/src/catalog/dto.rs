@@ -126,6 +126,7 @@ pub(super) enum OutcomeDto {
 pub(super) enum PatKindDto {
     Exact,
     Prefix,
+    Under,
 }
 
 #[derive(Debug, Deserialize)]

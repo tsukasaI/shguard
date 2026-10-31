@@ -610,7 +610,9 @@ value = { takes = "inert" }
 # /home, /var, /opt, /private, /Library, /Applications) match only themselves,
 # so `rm -r /var/tmp/x` is an Ask (absolute path), not a Block. A `~` word
 # matches `~` and `~/` only here; anything deeper is the absolute/home Ask.
-# `.` and `./` are the working directory itself.
+# `.` is the working directory itself; the kernel normalizes `./`, `././` and
+# `.//` to it. The system roots are `under`: `/etc` and `/etc/x` hit, `/etcfoo`
+# does not (it is still the absolute-path Ask).
 [[rule]]
 id = "rm-recursive-dangerous-target"
 key = ["rm"]
@@ -620,8 +622,6 @@ targets = [
   { pat = "/", kind = "exact" },
   { pat = "~", kind = "exact" },
   { pat = ".", kind = "exact" },
-  { pat = "./", kind = "exact" },
-  { pat = "./.", kind = "exact" },
   { pat = "/Users", kind = "exact" },
   { pat = "/home", kind = "exact" },
   { pat = "/var", kind = "exact" },
@@ -629,60 +629,42 @@ targets = [
   { pat = "/private", kind = "exact" },
   { pat = "/Library", kind = "exact" },
   { pat = "/Applications", kind = "exact" },
-  { pat = "/etc", kind = "prefix" },
-  { pat = "/usr", kind = "prefix" },
-  { pat = "/bin", kind = "prefix" },
-  { pat = "/sbin", kind = "prefix" },
-  { pat = "/lib", kind = "prefix" },
-  { pat = "/System", kind = "prefix" },
+  { pat = "/etc", kind = "under" },
+  { pat = "/usr", kind = "under" },
+  { pat = "/bin", kind = "under" },
+  { pat = "/sbin", kind = "under" },
+  { pat = "/lib", kind = "under" },
+  { pat = "/lib32", kind = "under" },
+  { pat = "/lib64", kind = "under" },
+  { pat = "/libx32", kind = "under" },
+  { pat = "/libexec", kind = "under" },
+  { pat = "/System", kind = "under" },
 ]
 
 # Block: device files, shell init and tool config, secrets and the project's
-# own hook and config directories. `/dev` is a byte prefix, so `/devops` is
-# blocked too. Relative leads are not normalized by the kernel (#1087), so
-# `././.git` and `.//.git` are not matched here; the Ask rule below catches the
-# `./.` and `.//` spellings instead. A path that reaches `.git` below another
-# directory is not matched either.
-# macOS volumes are case-insensitive; `.GIT` evades these exact-case targets
-# until the kernel case-folds target matching (#1087, M7f).
+# own hook and config directories. The directories are `under`: `.git` and
+# `.git/hooks/x` hit, `.github` and `.gitignore` do not, and `/dev` does not
+# cover `/devops`. The kernel normalizes relative paths before it compares
+# them (`././.git` and `.//.git` are `.git`) and folds ASCII case (`.GIT` is
+# `.git`, as on a case-insensitive macOS volume). A path that reaches `.git`
+# below another directory is not matched.
 [[rule]]
 id = "cp-block-sensitive-target"
 key = ["cp"]
 outcome = "block"
 targets = [
-  { pat = "/dev", kind = "prefix" },
-  { pat = ".claude", kind = "exact" },
-  { pat = ".claude/", kind = "prefix" },
-  { pat = "./.claude", kind = "exact" },
-  { pat = "./.claude/", kind = "prefix" },
-  { pat = ".git", kind = "exact" },
-  { pat = ".git/", kind = "prefix" },
-  { pat = "./.git", kind = "exact" },
-  { pat = "./.git/", kind = "prefix" },
-  { pat = ".cargo", kind = "exact" },
-  { pat = ".cargo/", kind = "prefix" },
-  { pat = "./.cargo", kind = "exact" },
-  { pat = "./.cargo/", kind = "prefix" },
-  { pat = ".husky", kind = "exact" },
-  { pat = ".husky/", kind = "prefix" },
-  { pat = "./.husky", kind = "exact" },
-  { pat = "./.husky/", kind = "prefix" },
-  { pat = ".githooks", kind = "exact" },
-  { pat = ".githooks/", kind = "prefix" },
-  { pat = "./.githooks", kind = "exact" },
-  { pat = "./.githooks/", kind = "prefix" },
+  { pat = "/dev", kind = "under" },
+  { pat = ".claude", kind = "under" },
+  { pat = ".git", kind = "under" },
+  { pat = ".cargo", kind = "under" },
+  { pat = ".husky", kind = "under" },
+  { pat = ".githooks", kind = "under" },
   { pat = ".mcp.json", kind = "exact" },
-  { pat = "./.mcp.json", kind = "exact" },
   { pat = ".envrc", kind = "exact" },
-  { pat = "./.envrc", kind = "exact" },
   { pat = "lefthook.yml", kind = "exact" },
-  { pat = "./lefthook.yml", kind = "exact" },
   { pat = "lefthook.yaml", kind = "exact" },
-  { pat = "./lefthook.yaml", kind = "exact" },
   { pat = ".lefthook.yml", kind = "exact" },
-  { pat = "./.lefthook.yml", kind = "exact" },
   { pat = ".lefthook.yaml", kind = "exact" },
-  { pat = "./.lefthook.yaml", kind = "exact" },
   { pat = "~/.bashrc", kind = "prefix" },
   { pat = "~/.bash_profile", kind = "prefix" },
   { pat = "~/.bash_login", kind = "prefix" },
@@ -709,39 +691,18 @@ id = "rm-block-sensitive-target"
 key = ["rm"]
 outcome = "block"
 targets = [
-  { pat = "/dev", kind = "prefix" },
-  { pat = ".claude", kind = "exact" },
-  { pat = ".claude/", kind = "prefix" },
-  { pat = "./.claude", kind = "exact" },
-  { pat = "./.claude/", kind = "prefix" },
-  { pat = ".git", kind = "exact" },
-  { pat = ".git/", kind = "prefix" },
-  { pat = "./.git", kind = "exact" },
-  { pat = "./.git/", kind = "prefix" },
-  { pat = ".cargo", kind = "exact" },
-  { pat = ".cargo/", kind = "prefix" },
-  { pat = "./.cargo", kind = "exact" },
-  { pat = "./.cargo/", kind = "prefix" },
-  { pat = ".husky", kind = "exact" },
-  { pat = ".husky/", kind = "prefix" },
-  { pat = "./.husky", kind = "exact" },
-  { pat = "./.husky/", kind = "prefix" },
-  { pat = ".githooks", kind = "exact" },
-  { pat = ".githooks/", kind = "prefix" },
-  { pat = "./.githooks", kind = "exact" },
-  { pat = "./.githooks/", kind = "prefix" },
+  { pat = "/dev", kind = "under" },
+  { pat = ".claude", kind = "under" },
+  { pat = ".git", kind = "under" },
+  { pat = ".cargo", kind = "under" },
+  { pat = ".husky", kind = "under" },
+  { pat = ".githooks", kind = "under" },
   { pat = ".mcp.json", kind = "exact" },
-  { pat = "./.mcp.json", kind = "exact" },
   { pat = ".envrc", kind = "exact" },
-  { pat = "./.envrc", kind = "exact" },
   { pat = "lefthook.yml", kind = "exact" },
-  { pat = "./lefthook.yml", kind = "exact" },
   { pat = "lefthook.yaml", kind = "exact" },
-  { pat = "./lefthook.yaml", kind = "exact" },
   { pat = ".lefthook.yml", kind = "exact" },
-  { pat = "./.lefthook.yml", kind = "exact" },
   { pat = ".lefthook.yaml", kind = "exact" },
-  { pat = "./.lefthook.yaml", kind = "exact" },
   { pat = "~/.bashrc", kind = "prefix" },
   { pat = "~/.bash_profile", kind = "prefix" },
   { pat = "~/.bash_login", kind = "prefix" },
@@ -768,39 +729,18 @@ id = "mkdir-block-sensitive-target"
 key = ["mkdir"]
 outcome = "block"
 targets = [
-  { pat = "/dev", kind = "prefix" },
-  { pat = ".claude", kind = "exact" },
-  { pat = ".claude/", kind = "prefix" },
-  { pat = "./.claude", kind = "exact" },
-  { pat = "./.claude/", kind = "prefix" },
-  { pat = ".git", kind = "exact" },
-  { pat = ".git/", kind = "prefix" },
-  { pat = "./.git", kind = "exact" },
-  { pat = "./.git/", kind = "prefix" },
-  { pat = ".cargo", kind = "exact" },
-  { pat = ".cargo/", kind = "prefix" },
-  { pat = "./.cargo", kind = "exact" },
-  { pat = "./.cargo/", kind = "prefix" },
-  { pat = ".husky", kind = "exact" },
-  { pat = ".husky/", kind = "prefix" },
-  { pat = "./.husky", kind = "exact" },
-  { pat = "./.husky/", kind = "prefix" },
-  { pat = ".githooks", kind = "exact" },
-  { pat = ".githooks/", kind = "prefix" },
-  { pat = "./.githooks", kind = "exact" },
-  { pat = "./.githooks/", kind = "prefix" },
+  { pat = "/dev", kind = "under" },
+  { pat = ".claude", kind = "under" },
+  { pat = ".git", kind = "under" },
+  { pat = ".cargo", kind = "under" },
+  { pat = ".husky", kind = "under" },
+  { pat = ".githooks", kind = "under" },
   { pat = ".mcp.json", kind = "exact" },
-  { pat = "./.mcp.json", kind = "exact" },
   { pat = ".envrc", kind = "exact" },
-  { pat = "./.envrc", kind = "exact" },
   { pat = "lefthook.yml", kind = "exact" },
-  { pat = "./lefthook.yml", kind = "exact" },
   { pat = "lefthook.yaml", kind = "exact" },
-  { pat = "./lefthook.yaml", kind = "exact" },
   { pat = ".lefthook.yml", kind = "exact" },
-  { pat = "./.lefthook.yml", kind = "exact" },
   { pat = ".lefthook.yaml", kind = "exact" },
-  { pat = "./.lefthook.yaml", kind = "exact" },
   { pat = "~/.bashrc", kind = "prefix" },
   { pat = "~/.bash_profile", kind = "prefix" },
   { pat = "~/.bash_login", kind = "prefix" },
@@ -827,39 +767,18 @@ id = "uniq-block-sensitive-target"
 key = ["uniq"]
 outcome = "block"
 targets = [
-  { pat = "/dev", kind = "prefix" },
-  { pat = ".claude", kind = "exact" },
-  { pat = ".claude/", kind = "prefix" },
-  { pat = "./.claude", kind = "exact" },
-  { pat = "./.claude/", kind = "prefix" },
-  { pat = ".git", kind = "exact" },
-  { pat = ".git/", kind = "prefix" },
-  { pat = "./.git", kind = "exact" },
-  { pat = "./.git/", kind = "prefix" },
-  { pat = ".cargo", kind = "exact" },
-  { pat = ".cargo/", kind = "prefix" },
-  { pat = "./.cargo", kind = "exact" },
-  { pat = "./.cargo/", kind = "prefix" },
-  { pat = ".husky", kind = "exact" },
-  { pat = ".husky/", kind = "prefix" },
-  { pat = "./.husky", kind = "exact" },
-  { pat = "./.husky/", kind = "prefix" },
-  { pat = ".githooks", kind = "exact" },
-  { pat = ".githooks/", kind = "prefix" },
-  { pat = "./.githooks", kind = "exact" },
-  { pat = "./.githooks/", kind = "prefix" },
+  { pat = "/dev", kind = "under" },
+  { pat = ".claude", kind = "under" },
+  { pat = ".git", kind = "under" },
+  { pat = ".cargo", kind = "under" },
+  { pat = ".husky", kind = "under" },
+  { pat = ".githooks", kind = "under" },
   { pat = ".mcp.json", kind = "exact" },
-  { pat = "./.mcp.json", kind = "exact" },
   { pat = ".envrc", kind = "exact" },
-  { pat = "./.envrc", kind = "exact" },
   { pat = "lefthook.yml", kind = "exact" },
-  { pat = "./lefthook.yml", kind = "exact" },
   { pat = "lefthook.yaml", kind = "exact" },
-  { pat = "./lefthook.yaml", kind = "exact" },
   { pat = ".lefthook.yml", kind = "exact" },
-  { pat = "./.lefthook.yml", kind = "exact" },
   { pat = ".lefthook.yaml", kind = "exact" },
-  { pat = "./.lefthook.yaml", kind = "exact" },
   { pat = "~/.bashrc", kind = "prefix" },
   { pat = "~/.bash_profile", kind = "prefix" },
   { pat = "~/.bash_login", kind = "prefix" },
@@ -893,8 +812,6 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
 ]
 
 [[rule]]
@@ -905,8 +822,6 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
 ]
 
 [[rule]]
@@ -917,8 +832,6 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
 ]
 
 [[rule]]
@@ -929,8 +842,6 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
 ]
 
 # Ask: credential directories under `~`. Reading other absolute paths is
@@ -957,9 +868,7 @@ targets = [
   { pat = "~/.zsh_history", kind = "prefix" },
   { pat = "~/.bash_history", kind = "prefix" },
   { pat = ".env", kind = "exact" },
-  { pat = "./.env", kind = "exact" },
   { pat = ".env.", kind = "prefix" },
-  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -983,9 +892,7 @@ targets = [
   { pat = "~/.zsh_history", kind = "prefix" },
   { pat = "~/.bash_history", kind = "prefix" },
   { pat = ".env", kind = "exact" },
-  { pat = "./.env", kind = "exact" },
   { pat = ".env.", kind = "prefix" },
-  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -1009,9 +916,7 @@ targets = [
   { pat = "~/.zsh_history", kind = "prefix" },
   { pat = "~/.bash_history", kind = "prefix" },
   { pat = ".env", kind = "exact" },
-  { pat = "./.env", kind = "exact" },
   { pat = ".env.", kind = "prefix" },
-  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -1035,9 +940,7 @@ targets = [
   { pat = "~/.zsh_history", kind = "prefix" },
   { pat = "~/.bash_history", kind = "prefix" },
   { pat = ".env", kind = "exact" },
-  { pat = "./.env", kind = "exact" },
   { pat = ".env.", kind = "prefix" },
-  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -1061,9 +964,7 @@ targets = [
   { pat = "~/.zsh_history", kind = "prefix" },
   { pat = "~/.bash_history", kind = "prefix" },
   { pat = ".env", kind = "exact" },
-  { pat = "./.env", kind = "exact" },
   { pat = ".env.", kind = "prefix" },
-  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -1087,9 +988,7 @@ targets = [
   { pat = "~/.zsh_history", kind = "prefix" },
   { pat = "~/.bash_history", kind = "prefix" },
   { pat = ".env", kind = "exact" },
-  { pat = "./.env", kind = "exact" },
   { pat = ".env.", kind = "prefix" },
-  { pat = "./.env.", kind = "prefix" },
 ]
 
 [[rule]]
@@ -1113,9 +1012,7 @@ targets = [
   { pat = "~/.zsh_history", kind = "prefix" },
   { pat = "~/.bash_history", kind = "prefix" },
   { pat = ".env", kind = "exact" },
-  { pat = "./.env", kind = "exact" },
   { pat = ".env.", kind = "prefix" },
-  { pat = "./.env.", kind = "prefix" },
 ]
 
 # Ask: a recursive search from the filesystem root or a home directory reads
