@@ -11,6 +11,17 @@
 #   - `+toolchain`: the parent row has no options and rejects `+words`, so
 #     `cargo +nightly build` is Unknown, and so is `cargo -Z x build`.
 # `cargo fmt` without `--check` rewrites source files in place.
+# A build also downloads from the registry the repo's `.cargo/config.toml`
+# names and runs the dependencies' build.rs and proc macros; no allowed
+# option names a host. Aliases in that config can replace `fmt` and
+# `clippy`. All of that is the repo's own config, P3.
+#
+# `-p/--package`, `--bin`, `--example`, `--test` and `--bench` take an
+# optional value in clap, but the rows give them `takes`, so the kernel
+# reads the next word as their value even when it starts with `-`. That
+# hides the word from the rules; cargo itself stops with a list of targets
+# before building when such a value is missing. `optional` would make the
+# common spaced form (`-p shguard`) an operand, and so Unknown.
 #
 # `--` ends cargo's options (`dashdash = "ends"`); what follows goes to the
 # child program, so a `--config` after `--` is not cargo's. test, clippy and
@@ -316,6 +327,13 @@ targets = [
   { pat = "--remap-path-prefix", kind = "prefix" },
   { pat = "--pretty", kind = "prefix" },
   { pat = "@", kind = "prefix" },
+  # rustc reads short-option clusters (getopts): after a flag that takes no
+  # value, the rest of the word is the next option, so `-go/tmp/x` is
+  # `-g -o /tmp/x`. Ask every word that starts with such a flag (the ASCII
+  # fold covers `-G`, `-V`, `-H`; `-O` is caught by `-o`).
+  { pat = "-g", kind = "prefix" },
+  { pat = "-v", kind = "prefix" },
+  { pat = "-h", kind = "prefix" },
 ]
 
 [[rule]]
