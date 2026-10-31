@@ -89,6 +89,9 @@ pub enum LoadError {
         file: String,
         source: std::io::Error,
     },
+    /// A rule `id` is empty or only whitespace.
+    #[error("{file}: a rule has an empty `id`")]
+    EmptyRuleId { file: String },
     /// Two rules share an id.
     #[error("{file}: rule `{rule}`: duplicate id")]
     DuplicateRuleId { file: String, rule: String },
@@ -121,6 +124,19 @@ pub enum LoadError {
     /// A rule target contains `$`.
     #[error("{file}: rule `{rule}`: target contains `$`")]
     TargetHasDollar { file: String, rule: String },
+    /// A target starts with `~` followed by something other than `/`
+    /// (`~user`), which no command word can match.
+    #[error("{file}: rule `{rule}`: target `{pat}`: `~` must be followed by `/` or nothing")]
+    TildeUserTarget {
+        file: String,
+        rule: String,
+        pat: String,
+    },
+    /// The target `.` has kind `prefix` or `under`.
+    #[error(
+        "{file}: rule `{rule}`: target `.` must be `exact`; relative words are compared in normal form (`./x` is `x`), so name the paths instead (`.git` as `under`)"
+    )]
+    DotTarget { file: String, rule: String },
     /// A `prefix` target ends in `/` and is not `/` itself.
     #[error(
         "{file}: rule `{rule}`: prefix target `{pat}` ends in `/`; use `under` without the `/`"

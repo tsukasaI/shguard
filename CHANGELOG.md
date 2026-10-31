@@ -31,4 +31,6 @@ A rebuild. The 0.9 engine is preserved at the tag `legacy-v0.9.5`.
   and cargo.
 - `shguard init`, which prints the hook entry with `"onFailure": "block"`.
 - `shguard check <catalog.toml>...`.
+- The loader rejects an empty rule `id`, a `~user` target, and `.` as a
+  `prefix` or `under` target, none of which could locate or match anything.
 - `cwd_sensitive` rows: git, gh and cargo after a `cd` are Ask.
