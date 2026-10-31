@@ -51,6 +51,12 @@ pub enum LoadError {
     /// segment.
     #[error("{file}: row `{row}`: no parent row")]
     OrphanRow { file: String, row: String },
+    /// A row sets both `changes_cwd` and `cwd_sensitive`.
+    #[error("{file}: row `{row}`: sets both `changes_cwd` and `cwd_sensitive`")]
+    ConflictingCwd { file: String, row: String },
+    /// A row under a `cwd_sensitive` parent row does not set `cwd_sensitive`.
+    #[error("{file}: row `{row}`: the parent row is `cwd_sensitive`, so this row must be too")]
+    CwdSensitiveParent { file: String, row: String },
     /// A row whose head the grammar cannot express (#1039) does not run code.
     #[error("{file}: row `{row}`: head is not expressible, so the row must set `runs_code`")]
     DenylistedHead { file: String, row: String },
@@ -104,6 +110,24 @@ pub enum LoadError {
     /// A rule target contains `$`.
     #[error("{file}: rule `{rule}`: target contains `$`")]
     TargetHasDollar { file: String, rule: String },
+    /// A `prefix` target ends in `/` and is not `/` itself.
+    #[error(
+        "{file}: rule `{rule}`: prefix target `{pat}` ends in `/`; use `under` without the `/`"
+    )]
+    PrefixEndsInSlash {
+        file: String,
+        rule: String,
+        pat: String,
+    },
+    /// A target's bytes after a leading `~` are not in the normal form
+    /// `normalize_path` gives (`./x`, `a//b`, `x/`).
+    #[error("{file}: rule `{rule}`: target `{pat}` is not in normal form; write `{normal}`")]
+    TargetNotNormal {
+        file: String,
+        rule: String,
+        pat: String,
+        normal: String,
+    },
     /// More rules than a rule id can number.
     #[error("{file}: rule `{rule}`: too many rules")]
     TooManyRules { file: String, rule: String },

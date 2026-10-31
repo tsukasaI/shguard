@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use shguard_kernel::ast::{Opaque, Part};
+use shguard_kernel::bytes::normalize_path;
 use shguard_kernel::catalog::{
     Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role, Row,
     RunsCode, ShortName, key_ok,
@@ -376,6 +377,12 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             row: label.clone(),
         });
     }
+    if dto.changes_cwd && dto.cwd_sensitive {
+        errs.push(LoadError::ConflictingCwd {
+            file: file.to_owned(),
+            row: label.clone(),
+        });
+    }
     let mut opts = Vec::new();
     let mut shorts: Vec<u8> = Vec::new();
     let mut longs: Vec<Vec<u8>> = Vec::new();
@@ -434,6 +441,8 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             },
             if dto.changes_cwd {
                 Cwd::Changes
+            } else if dto.cwd_sensitive {
+                Cwd::Sensitive
             } else {
                 Cwd::Keeps
             },
@@ -491,6 +500,7 @@ fn check_rows(entries: &[Entry], errs: &mut Vec<LoadError>) {
         } else {
             first.insert(e.key.as_slice(), e.file.as_str());
             check_code_child(e, entries, errs);
+            check_cwd_child(e, entries, errs);
         }
         if let Some((_, parent)) = e.key.split_last()
             && !parent.is_empty()
@@ -541,6 +551,32 @@ fn check_code_child(child: &Entry, entries: &[Entry], errs: &mut Vec<LoadError>)
     }
 }
 
+/// The kernel reads `cwd_sensitive` from the selected row only, and the
+/// longest key wins, so a child of a `cwd_sensitive` row (`git status` under
+/// `git`) must say it again; otherwise `cd /x && git status` would not be
+/// asked.
+fn check_cwd_child(child: &Entry, entries: &[Entry], errs: &mut Vec<LoadError>) {
+    let Some(row) = &child.row else { return };
+    if row.cwd() == Cwd::Sensitive {
+        return;
+    }
+    let Some((_, parent_key)) = child.key.split_last() else {
+        return;
+    };
+    if parent_key.is_empty() {
+        return;
+    }
+    let parent_sensitive = entries
+        .iter()
+        .any(|p| p.key == parent_key && p.row.as_ref().is_some_and(|r| r.cwd() == Cwd::Sensitive));
+    if parent_sensitive {
+        errs.push(LoadError::CwdSensitiveParent {
+            file: child.file.clone(),
+            row: child.label.clone(),
+        });
+    }
+}
+
 fn target_parts(s: &str) -> Vec<Part> {
     if let Some(rest) = s.strip_prefix('~') {
         let mut parts = vec![Part::Opaque(Opaque::Tilde)];
@@ -566,7 +602,42 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
     let kind = match t.kind {
         PatKindDto::Exact => PatKind::Exact,
         PatKindDto::Prefix => PatKind::Prefix,
+        PatKindDto::Under => PatKind::Under,
     };
+    let (head, body) = match t.pat.strip_prefix('~') {
+        Some(rest) => ("~", rest),
+        None => ("", t.pat.as_str()),
+    };
+    let normal = normalize_path(body.as_bytes());
+    let full = format!("{head}{}", String::from_utf8_lossy(&normal));
+    // A `prefix` that ends in `/` is a component match spelled as a byte
+    // prefix, and the kernel's normalized key drops that `/` (`.git/` would
+    // cover `.github`); `under` says it without the `/`. A target whose
+    // normal form ends in `/` (`~/.` is `~/`) gets this error directly, not
+    // a "write `~/`" that this check would then reject.
+    if matches!(kind, PatKind::Prefix)
+        && full != "/"
+        && (t.pat.ends_with('/') || full.ends_with('/'))
+    {
+        errs.push(LoadError::PrefixEndsInSlash {
+            file: file.to_owned(),
+            rule: rule.to_owned(),
+            pat: t.pat.clone(),
+        });
+        return None;
+    }
+    // The kernel compares normalized words with normalized targets, so a
+    // target out of normal form (`./x`, `a//b`, `x/`) means at best the same
+    // as its normal form; require that form. This check has no proof.
+    if normal != body.as_bytes() {
+        errs.push(LoadError::TargetNotNormal {
+            file: file.to_owned(),
+            rule: rule.to_owned(),
+            pat: t.pat.clone(),
+            normal: full,
+        });
+        return None;
+    }
     let pat = Pat::new(target_parts(&t.pat), kind);
     if pat.is_none() {
         errs.push(LoadError::EmptyTarget {

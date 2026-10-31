@@ -103,6 +103,8 @@ pub(super) struct RowDto {
     #[serde(default)]
     pub(super) changes_cwd: bool,
     #[serde(default)]
+    pub(super) cwd_sensitive: bool,
+    #[serde(default)]
     pub(super) opt: Vec<OptDto>,
 }
 
@@ -126,6 +128,7 @@ pub(super) enum OutcomeDto {
 pub(super) enum PatKindDto {
     Exact,
     Prefix,
+    Under,
 }
 
 #[derive(Debug, Deserialize)]

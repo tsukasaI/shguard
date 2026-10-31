@@ -1,0 +1,999 @@
+# The embedded git catalog: read-only subcommands and `push`.
+#
+# git has one implementation, parses options with parse-options (options
+# may follow operands, `--opt=value`, `--` ends options), and the rows cite
+# its own documentation. A long option matches by its full name only: git
+# accepts abbreviations (`--out` for `--output`), which are Unknown here.
+# An option a row lacks makes the command Unknown, hence asked.
+#
+# Allow means the parser and catalog read the whole command, nothing more.
+# git also reads repo-local config and hooks (`core.pager`, `core.fsmonitor`,
+# `diff.external`, `diff.<driver>.textconv`): that is the environment
+# assumption P3, not something a row can check.
+
+
+# The parent row. It lists no option on purpose: a global option (`-C`,
+# `-c`, `--git-dir`, `--work-tree`, `--no-pager`, `--exec-path`) changes the
+# directory, the config or the program run, so `git -C /x status` is Unknown
+# and asked. `cwd_sensitive` asks `cd /x && git status` the same way: git
+# reads `/x`'s `.git/config`. Every row below sets it too, as the loader
+# requires. The row takes no operand either, so any subcommand without a
+# row below (`reset`, `clean`, `checkout`, `commit`, `rebase`, ...) is
+# Unknown and asked; they have no rows, hence no rules.
+[[row]]
+key = ["git"]
+source = "https://git-scm.com/docs/git"
+cwd_sensitive = true
+order = "strict"
+dashdash = "ends"
+positionals = []
+
+# Left out: --output (writes a file), --ext-diff and --textconv (run
+# configured programs), --show-signature (runs gpg; the `%G?`-style format
+# placeholders of --pretty/--format still do, which is P3), -O<orderfile>, -L, -c,
+# -C, --no-pager (a global option), -<number> and the abbreviated long
+# options (git accepts `--max-c=5`; here only the full name matches).
+# Revisions and paths share one operand slot, so both take the `path` role:
+# a range (`a..b`) is fine, but a `..` path segment is asked.
+[[row]]
+key = ["git", "log"]
+source = "https://git-scm.com/docs/git-log https://git-scm.com/docs/git-rev-list https://git-scm.com/docs/diff-options"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "p"
+long = "patch"
+[[row.opt]]
+short = "u"
+[[row.opt]]
+short = "s"
+long = "no-patch"
+[[row.opt]]
+long = "raw"
+[[row.opt]]
+long = "stat"
+value = { optional = "inert" }
+[[row.opt]]
+long = "numstat"
+[[row.opt]]
+long = "shortstat"
+[[row.opt]]
+long = "summary"
+[[row.opt]]
+long = "dirstat"
+value = { optional = "inert" }
+[[row.opt]]
+long = "name-only"
+[[row.opt]]
+long = "name-status"
+[[row.opt]]
+long = "patch-with-stat"
+[[row.opt]]
+long = "patch-with-raw"
+[[row.opt]]
+long = "compact-summary"
+[[row.opt]]
+long = "check"
+[[row.opt]]
+short = "z"
+[[row.opt]]
+long = "color"
+value = { optional = "inert" }
+[[row.opt]]
+long = "no-color"
+[[row.opt]]
+long = "color-words"
+value = { optional = "inert" }
+[[row.opt]]
+long = "word-diff"
+value = { optional = "inert" }
+[[row.opt]]
+long = "word-diff-regex"
+value = { takes = "inert" }
+[[row.opt]]
+long = "abbrev"
+value = { optional = "inert" }
+[[row.opt]]
+long = "full-index"
+[[row.opt]]
+long = "binary"
+[[row.opt]]
+long = "minimal"
+[[row.opt]]
+long = "patience"
+[[row.opt]]
+long = "histogram"
+[[row.opt]]
+long = "diff-algorithm"
+value = { takes = "inert" }
+[[row.opt]]
+short = "w"
+long = "ignore-all-space"
+[[row.opt]]
+short = "b"
+long = "ignore-space-change"
+[[row.opt]]
+long = "ignore-space-at-eol"
+[[row.opt]]
+long = "ignore-cr-at-eol"
+[[row.opt]]
+long = "ignore-blank-lines"
+[[row.opt]]
+short = "U"
+long = "unified"
+value = { optional = "inert" }
+[[row.opt]]
+long = "src-prefix"
+value = { takes = "inert" }
+[[row.opt]]
+long = "dst-prefix"
+value = { takes = "inert" }
+[[row.opt]]
+long = "no-prefix"
+[[row.opt]]
+short = "a"
+long = "text"
+[[row.opt]]
+short = "R"
+[[row.opt]]
+short = "M"
+long = "find-renames"
+value = { optional = "inert" }
+[[row.opt]]
+long = "find-copies"
+value = { optional = "inert" }
+[[row.opt]]
+long = "no-renames"
+[[row.opt]]
+long = "diff-filter"
+value = { takes = "inert" }
+[[row.opt]]
+short = "G"
+value = { takes = "inert" }
+[[row.opt]]
+short = "S"
+value = { takes = "inert" }
+[[row.opt]]
+long = "pickaxe-all"
+[[row.opt]]
+long = "pickaxe-regex"
+[[row.opt]]
+short = "W"
+long = "function-context"
+[[row.opt]]
+long = "inter-hunk-context"
+value = { takes = "inert" }
+[[row.opt]]
+long = "no-ext-diff"
+[[row.opt]]
+long = "no-textconv"
+[[row.opt]]
+long = "ignore-submodules"
+value = { optional = "inert" }
+[[row.opt]]
+long = "submodule"
+value = { optional = "inert" }
+[[row.opt]]
+long = "ita-invisible-in-index"
+[[row.opt]]
+long = "oneline"
+[[row.opt]]
+long = "abbrev-commit"
+[[row.opt]]
+long = "no-abbrev-commit"
+[[row.opt]]
+long = "pretty"
+value = { optional = "inert" }
+[[row.opt]]
+long = "format"
+value = { optional = "inert" }
+[[row.opt]]
+long = "date"
+value = { optional = "inert" }
+[[row.opt]]
+long = "relative-date"
+[[row.opt]]
+short = "n"
+long = "max-count"
+value = { takes = "inert" }
+[[row.opt]]
+long = "skip"
+value = { takes = "inert" }
+[[row.opt]]
+long = "since"
+value = { takes = "inert" }
+[[row.opt]]
+long = "after"
+value = { takes = "inert" }
+[[row.opt]]
+long = "until"
+value = { takes = "inert" }
+[[row.opt]]
+long = "before"
+value = { takes = "inert" }
+[[row.opt]]
+long = "author"
+value = { takes = "inert" }
+[[row.opt]]
+long = "committer"
+value = { takes = "inert" }
+[[row.opt]]
+long = "grep"
+value = { takes = "inert" }
+[[row.opt]]
+long = "all-match"
+[[row.opt]]
+short = "i"
+long = "regexp-ignore-case"
+[[row.opt]]
+short = "E"
+long = "extended-regexp"
+[[row.opt]]
+short = "F"
+long = "fixed-strings"
+[[row.opt]]
+long = "invert-grep"
+[[row.opt]]
+long = "all"
+[[row.opt]]
+long = "branches"
+value = { optional = "inert" }
+[[row.opt]]
+long = "tags"
+value = { optional = "inert" }
+[[row.opt]]
+long = "remotes"
+value = { optional = "inert" }
+[[row.opt]]
+long = "first-parent"
+[[row.opt]]
+long = "merges"
+[[row.opt]]
+long = "no-merges"
+[[row.opt]]
+long = "reverse"
+[[row.opt]]
+long = "topo-order"
+[[row.opt]]
+long = "date-order"
+[[row.opt]]
+long = "author-date-order"
+[[row.opt]]
+long = "follow"
+[[row.opt]]
+long = "full-history"
+[[row.opt]]
+long = "simplify-by-decoration"
+[[row.opt]]
+long = "source"
+[[row.opt]]
+long = "left-right"
+[[row.opt]]
+long = "boundary"
+[[row.opt]]
+long = "parents"
+[[row.opt]]
+long = "children"
+[[row.opt]]
+long = "graph"
+[[row.opt]]
+long = "decorate"
+value = { optional = "inert" }
+[[row.opt]]
+long = "no-decorate"
+
+# Left out: --no-index (diffs two arbitrary files), --output (writes a file),
+# --ext-diff and --textconv (run configured programs), -O<orderfile>,
+# --relative, -C (copy detection; clashes with the global -C in a reader's
+# eye), the abbreviated long options and `--end-of-options`.
+[[row]]
+key = ["git", "diff"]
+source = "https://git-scm.com/docs/git-diff https://git-scm.com/docs/diff-options"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "p"
+long = "patch"
+[[row.opt]]
+short = "u"
+[[row.opt]]
+short = "s"
+long = "no-patch"
+[[row.opt]]
+long = "raw"
+[[row.opt]]
+long = "stat"
+value = { optional = "inert" }
+[[row.opt]]
+long = "numstat"
+[[row.opt]]
+long = "shortstat"
+[[row.opt]]
+long = "summary"
+[[row.opt]]
+long = "dirstat"
+value = { optional = "inert" }
+[[row.opt]]
+long = "name-only"
+[[row.opt]]
+long = "name-status"
+[[row.opt]]
+long = "patch-with-stat"
+[[row.opt]]
+long = "patch-with-raw"
+[[row.opt]]
+long = "compact-summary"
+[[row.opt]]
+long = "check"
+[[row.opt]]
+short = "z"
+[[row.opt]]
+long = "color"
+value = { optional = "inert" }
+[[row.opt]]
+long = "no-color"
+[[row.opt]]
+long = "color-words"
+value = { optional = "inert" }
+[[row.opt]]
+long = "word-diff"
+value = { optional = "inert" }
+[[row.opt]]
+long = "word-diff-regex"
+value = { takes = "inert" }
+[[row.opt]]
+long = "abbrev"
+value = { optional = "inert" }
+[[row.opt]]
+long = "full-index"
+[[row.opt]]
+long = "binary"
+[[row.opt]]
+long = "minimal"
+[[row.opt]]
+long = "patience"
+[[row.opt]]
+long = "histogram"
+[[row.opt]]
+long = "diff-algorithm"
+value = { takes = "inert" }
+[[row.opt]]
+short = "w"
+long = "ignore-all-space"
+[[row.opt]]
+short = "b"
+long = "ignore-space-change"
+[[row.opt]]
+long = "ignore-space-at-eol"
+[[row.opt]]
+long = "ignore-cr-at-eol"
+[[row.opt]]
+long = "ignore-blank-lines"
+[[row.opt]]
+short = "U"
+long = "unified"
+value = { optional = "inert" }
+[[row.opt]]
+long = "src-prefix"
+value = { takes = "inert" }
+[[row.opt]]
+long = "dst-prefix"
+value = { takes = "inert" }
+[[row.opt]]
+long = "no-prefix"
+[[row.opt]]
+short = "a"
+long = "text"
+[[row.opt]]
+short = "R"
+[[row.opt]]
+short = "M"
+long = "find-renames"
+value = { optional = "inert" }
+[[row.opt]]
+long = "find-copies"
+value = { optional = "inert" }
+[[row.opt]]
+long = "no-renames"
+[[row.opt]]
+long = "diff-filter"
+value = { takes = "inert" }
+[[row.opt]]
+short = "G"
+value = { takes = "inert" }
+[[row.opt]]
+short = "S"
+value = { takes = "inert" }
+[[row.opt]]
+long = "pickaxe-all"
+[[row.opt]]
+long = "pickaxe-regex"
+[[row.opt]]
+short = "W"
+long = "function-context"
+[[row.opt]]
+long = "inter-hunk-context"
+value = { takes = "inert" }
+[[row.opt]]
+long = "no-ext-diff"
+[[row.opt]]
+long = "no-textconv"
+[[row.opt]]
+long = "ignore-submodules"
+value = { optional = "inert" }
+[[row.opt]]
+long = "submodule"
+value = { optional = "inert" }
+[[row.opt]]
+long = "ita-invisible-in-index"
+[[row.opt]]
+long = "cached"
+[[row.opt]]
+long = "staged"
+[[row.opt]]
+long = "merge-base"
+[[row.opt]]
+long = "exit-code"
+[[row.opt]]
+long = "quiet"
+
+# Left out: --output, --ext-diff, --textconv, --show-signature, -O<orderfile>.
+[[row]]
+key = ["git", "show"]
+source = "https://git-scm.com/docs/git-show https://git-scm.com/docs/diff-options"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "p"
+long = "patch"
+[[row.opt]]
+short = "u"
+[[row.opt]]
+short = "s"
+long = "no-patch"
+[[row.opt]]
+long = "raw"
+[[row.opt]]
+long = "stat"
+value = { optional = "inert" }
+[[row.opt]]
+long = "numstat"
+[[row.opt]]
+long = "shortstat"
+[[row.opt]]
+long = "summary"
+[[row.opt]]
+long = "dirstat"
+value = { optional = "inert" }
+[[row.opt]]
+long = "name-only"
+[[row.opt]]
+long = "name-status"
+[[row.opt]]
+long = "patch-with-stat"
+[[row.opt]]
+long = "patch-with-raw"
+[[row.opt]]
+long = "compact-summary"
+[[row.opt]]
+long = "check"
+[[row.opt]]
+short = "z"
+[[row.opt]]
+long = "color"
+value = { optional = "inert" }
+[[row.opt]]
+long = "no-color"
+[[row.opt]]
+long = "color-words"
+value = { optional = "inert" }
+[[row.opt]]
+long = "word-diff"
+value = { optional = "inert" }
+[[row.opt]]
+long = "word-diff-regex"
+value = { takes = "inert" }
+[[row.opt]]
+long = "abbrev"
+value = { optional = "inert" }
+[[row.opt]]
+long = "full-index"
+[[row.opt]]
+long = "binary"
+[[row.opt]]
+long = "minimal"
+[[row.opt]]
+long = "patience"
+[[row.opt]]
+long = "histogram"
+[[row.opt]]
+long = "diff-algorithm"
+value = { takes = "inert" }
+[[row.opt]]
+short = "w"
+long = "ignore-all-space"
+[[row.opt]]
+short = "b"
+long = "ignore-space-change"
+[[row.opt]]
+long = "ignore-space-at-eol"
+[[row.opt]]
+long = "ignore-cr-at-eol"
+[[row.opt]]
+long = "ignore-blank-lines"
+[[row.opt]]
+short = "U"
+long = "unified"
+value = { optional = "inert" }
+[[row.opt]]
+long = "src-prefix"
+value = { takes = "inert" }
+[[row.opt]]
+long = "dst-prefix"
+value = { takes = "inert" }
+[[row.opt]]
+long = "no-prefix"
+[[row.opt]]
+short = "a"
+long = "text"
+[[row.opt]]
+short = "R"
+[[row.opt]]
+short = "M"
+long = "find-renames"
+value = { optional = "inert" }
+[[row.opt]]
+long = "find-copies"
+value = { optional = "inert" }
+[[row.opt]]
+long = "no-renames"
+[[row.opt]]
+long = "diff-filter"
+value = { takes = "inert" }
+[[row.opt]]
+short = "G"
+value = { takes = "inert" }
+[[row.opt]]
+short = "S"
+value = { takes = "inert" }
+[[row.opt]]
+long = "pickaxe-all"
+[[row.opt]]
+long = "pickaxe-regex"
+[[row.opt]]
+short = "W"
+long = "function-context"
+[[row.opt]]
+long = "inter-hunk-context"
+value = { takes = "inert" }
+[[row.opt]]
+long = "no-ext-diff"
+[[row.opt]]
+long = "no-textconv"
+[[row.opt]]
+long = "ignore-submodules"
+value = { optional = "inert" }
+[[row.opt]]
+long = "submodule"
+value = { optional = "inert" }
+[[row.opt]]
+long = "ita-invisible-in-index"
+[[row.opt]]
+long = "oneline"
+[[row.opt]]
+long = "abbrev-commit"
+[[row.opt]]
+long = "no-abbrev-commit"
+[[row.opt]]
+long = "pretty"
+value = { optional = "inert" }
+[[row.opt]]
+long = "format"
+value = { optional = "inert" }
+[[row.opt]]
+long = "date"
+value = { optional = "inert" }
+[[row.opt]]
+long = "relative-date"
+
+# `git status` may refresh the index; that is its normal behaviour.
+[[row]]
+key = ["git", "status"]
+source = "https://git-scm.com/docs/git-status"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "s"
+long = "short"
+[[row.opt]]
+short = "b"
+long = "branch"
+[[row.opt]]
+long = "porcelain"
+value = { optional = "inert" }
+[[row.opt]]
+long = "long"
+[[row.opt]]
+short = "v"
+long = "verbose"
+[[row.opt]]
+short = "u"
+long = "untracked-files"
+value = { optional = "inert" }
+[[row.opt]]
+long = "ignored"
+value = { optional = "inert" }
+[[row.opt]]
+long = "ignore-submodules"
+value = { optional = "inert" }
+[[row.opt]]
+long = "show-stash"
+[[row.opt]]
+long = "ahead-behind"
+[[row.opt]]
+long = "no-ahead-behind"
+[[row.opt]]
+long = "renames"
+[[row.opt]]
+long = "no-renames"
+[[row.opt]]
+short = "z"
+
+# Left out: --parseopt and --sq-quote (read stdin, rewrite argv),
+# --resolve-git-dir, --git-path, --local-env-vars, --default.
+[[row]]
+key = ["git", "rev-parse"]
+source = "https://git-scm.com/docs/git-rev-parse"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+long = "verify"
+[[row.opt]]
+short = "q"
+long = "quiet"
+[[row.opt]]
+long = "short"
+value = { optional = "inert" }
+[[row.opt]]
+long = "abbrev-ref"
+value = { optional = "inert" }
+[[row.opt]]
+long = "symbolic"
+[[row.opt]]
+long = "symbolic-full-name"
+[[row.opt]]
+long = "show-toplevel"
+[[row.opt]]
+long = "show-cdup"
+[[row.opt]]
+long = "show-prefix"
+[[row.opt]]
+long = "git-dir"
+[[row.opt]]
+long = "git-common-dir"
+[[row.opt]]
+long = "absolute-git-dir"
+[[row.opt]]
+long = "is-inside-work-tree"
+[[row.opt]]
+long = "is-bare-repository"
+[[row.opt]]
+long = "is-inside-git-dir"
+[[row.opt]]
+long = "all"
+[[row.opt]]
+long = "branches"
+value = { optional = "inert" }
+[[row.opt]]
+long = "tags"
+value = { optional = "inert" }
+[[row.opt]]
+long = "remotes"
+value = { optional = "inert" }
+
+# Left out: --format and --exclude-per-directory. `-X` and `--exclude-from`
+# read a file, so their value takes the `path` role.
+[[row]]
+key = ["git", "ls-files"]
+source = "https://git-scm.com/docs/git-ls-files"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "c"
+long = "cached"
+[[row.opt]]
+short = "d"
+long = "deleted"
+[[row.opt]]
+short = "m"
+long = "modified"
+[[row.opt]]
+short = "o"
+long = "others"
+[[row.opt]]
+short = "i"
+long = "ignored"
+[[row.opt]]
+short = "s"
+long = "stage"
+[[row.opt]]
+short = "u"
+long = "unmerged"
+[[row.opt]]
+short = "k"
+long = "killed"
+[[row.opt]]
+short = "z"
+[[row.opt]]
+short = "t"
+[[row.opt]]
+short = "v"
+[[row.opt]]
+short = "f"
+[[row.opt]]
+long = "directory"
+[[row.opt]]
+long = "no-empty-directory"
+[[row.opt]]
+long = "eol"
+[[row.opt]]
+long = "full-name"
+[[row.opt]]
+long = "deduplicate"
+[[row.opt]]
+long = "error-unmatch"
+[[row.opt]]
+long = "exclude-standard"
+[[row.opt]]
+short = "x"
+long = "exclude"
+value = { takes = "inert" }
+[[row.opt]]
+short = "X"
+long = "exclude-from"
+value = { takes = "path" }
+[[row.opt]]
+long = "abbrev"
+value = { optional = "inert" }
+[[row.opt]]
+long = "recurse-submodules"
+[[row.opt]]
+long = "sparse"
+[[row.opt]]
+long = "with-tree"
+value = { takes = "inert" }
+
+# Left out: -S, --contents, --ignore-revs-file (they read a file) and --date.
+[[row]]
+key = ["git", "blame"]
+source = "https://git-scm.com/docs/git-blame"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "L"
+value = { takes = "inert" }
+[[row.opt]]
+short = "l"
+[[row.opt]]
+short = "t"
+[[row.opt]]
+short = "s"
+[[row.opt]]
+short = "e"
+long = "show-email"
+[[row.opt]]
+short = "p"
+long = "porcelain"
+[[row.opt]]
+long = "line-porcelain"
+[[row.opt]]
+long = "incremental"
+[[row.opt]]
+short = "w"
+[[row.opt]]
+short = "b"
+[[row.opt]]
+short = "f"
+long = "show-name"
+[[row.opt]]
+short = "n"
+long = "show-number"
+[[row.opt]]
+long = "root"
+[[row.opt]]
+long = "abbrev"
+value = { optional = "inert" }
+[[row.opt]]
+long = "progress"
+[[row.opt]]
+long = "color-lines"
+[[row.opt]]
+long = "color-by-age"
+[[row.opt]]
+long = "reverse"
+[[row.opt]]
+short = "M"
+value = { optional = "inert" }
+[[row.opt]]
+short = "C"
+value = { optional = "inert" }
+
+# Listing only. `git branch NAME` creates a branch, so the row takes no
+# operand (a list pattern is Unknown and asked). The create, delete, move,
+# copy, force and upstream options (-d -D -m -M -c -C -f -u --edit-description
+# --set-upstream-to --unset-upstream) are not listed.
+[[row]]
+key = ["git", "branch"]
+source = "https://git-scm.com/docs/git-branch"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = []
+[[row.opt]]
+short = "l"
+long = "list"
+[[row.opt]]
+short = "a"
+long = "all"
+[[row.opt]]
+short = "r"
+long = "remotes"
+[[row.opt]]
+short = "v"
+long = "verbose"
+[[row.opt]]
+long = "show-current"
+[[row.opt]]
+short = "i"
+long = "ignore-case"
+[[row.opt]]
+long = "color"
+value = { optional = "inert" }
+[[row.opt]]
+long = "no-color"
+[[row.opt]]
+long = "sort"
+value = { takes = "inert" }
+[[row.opt]]
+long = "format"
+value = { takes = "inert" }
+[[row.opt]]
+long = "contains"
+value = { takes = "inert" }
+[[row.opt]]
+long = "no-contains"
+value = { takes = "inert" }
+[[row.opt]]
+long = "merged"
+value = { takes = "inert" }
+[[row.opt]]
+long = "no-merged"
+value = { takes = "inert" }
+[[row.opt]]
+long = "points-at"
+value = { takes = "inert" }
+[[row.opt]]
+long = "omit-empty"
+[[row.opt]]
+long = "no-abbrev"
+
+# The remote and the refspecs are `path` words so rules can target them.
+# `+` words are operands here (a `+` refspec forces the update) and a rule
+# blocks them. Left out: --delete/-d, --mirror, --all, --prune, --tags,
+# --recurse-submodules, --signed (runs gpg), --exec, --receive-pack,
+# --repo, --push-option/-o, --no-verify.
+[[row]]
+key = ["git", "push"]
+source = "https://git-scm.com/docs/git-push"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+plus_words = "operand"
+[[row.opt]]
+short = "u"
+long = "set-upstream"
+[[row.opt]]
+short = "n"
+long = "dry-run"
+[[row.opt]]
+short = "v"
+long = "verbose"
+[[row.opt]]
+short = "q"
+long = "quiet"
+[[row.opt]]
+long = "follow-tags"
+[[row.opt]]
+long = "porcelain"
+[[row.opt]]
+long = "progress"
+[[row.opt]]
+short = "f"
+long = "force"
+[[row.opt]]
+long = "force-with-lease"
+value = { optional = "inert" }
+[[row.opt]]
+long = "force-if-includes"
+
+# Rules. A rule only raises a decision.
+
+# A forced push can overwrite remote history.
+[[rule]]
+id = "git-push-force"
+key = ["git", "push"]
+opts = [["-f", "--force"]]
+outcome = "block"
+
+# `+refspec` forces that one update, like --force.
+[[rule]]
+id = "git-push-plus-refspec"
+key = ["git", "push"]
+targets = [{ pat = "+", kind = "prefix" }]
+outcome = "block"
+
+# A lease check is weaker than a plain push but still rewrites history.
+[[rule]]
+id = "git-push-force-with-lease"
+key = ["git", "push"]
+opts = [["--force-with-lease", "--force-if-includes"]]
+outcome = "ask"
+
+# `:ref` deletes the remote ref.
+[[rule]]
+id = "git-push-delete-refspec"
+key = ["git", "push"]
+targets = [{ pat = ":", kind = "prefix" }]
+outcome = "ask"
+
+# A URL remote sends the commits to a host or path the repository's remotes
+# may not name. The kernel compares normalized words, so `https://h/r` is
+# matched as `https:/h/r` and the targets are written as `https:`.
+# `file://` reaches any local path, like the absolute-path rule below.
+# Not covered: the scp form `user@host:path` and other `<scheme>://`
+# remotes run through a `git-remote-<scheme>` helper; no prefix names them.
+[[rule]]
+id = "git-push-url-remote"
+key = ["git", "push"]
+targets = [
+  { pat = "https:", kind = "prefix" },
+  { pat = "http:", kind = "prefix" },
+  { pat = "ssh:", kind = "prefix" },
+  { pat = "git:", kind = "prefix" },
+  { pat = "git+ssh:", kind = "prefix" },
+  { pat = "ssh+git:", kind = "prefix" },
+  { pat = "file:", kind = "prefix" },
+]
+outcome = "ask"
+
+# `ext::cmd` is a remote helper that runs a command.
+[[rule]]
+id = "git-push-ext-remote"
+key = ["git", "push"]
+targets = [{ pat = "ext::", kind = "prefix" }]
+outcome = "ask"
+
+# An absolute or `~` path (a local remote, a file outside the repository,
+# an `-X` exclude file) is asked: `git diff ~/.ssh/k /dev/null` outside a
+# repository prints the file. A relative local remote (`git push sub/repo
+# main`, `git push . main:x`) is not: a target cannot tell it from a refspec.
+[[rule]]
+id = "git-absolute-path"
+key = ["git"]
+targets = [{ pat = "/", kind = "prefix" }, { pat = "~", kind = "prefix" }]
+outcome = "ask"

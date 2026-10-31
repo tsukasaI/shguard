@@ -40,16 +40,29 @@ pub enum Scope {
 pub enum PatKind {
     /// The whole word equals the pattern.
     Exact,
-    /// The word starts with the pattern.
+    /// The word starts with the pattern, byte for byte (`/etc` also covers
+    /// `/etcfoo`).
     Prefix,
+    /// The word is the pattern or a path below it: the pattern is a byte
+    /// prefix that ends at a `/` of the word or at its end (`/etc` covers
+    /// `/etc` and `/etc/x`, not `/etcfoo`). A pattern that ends in `/`
+    /// (such as `/`) covers every word it is a byte prefix of.
+    Under,
 }
 
 /// A target pattern. It reuses [`Part`], so `~/.bashrc` is
 /// `[Opaque(Tilde), Lit("/.bashrc")]`.
 ///
 /// A `/`-led pattern never covers a word that starts with `~`: to cover the
-/// home directory, add a `~` `Prefix` target as well (see
+/// home directory, add a `~` `Prefix` or `Under` target as well (see
 /// [`crate::decide`] for how patterns match).
+///
+/// A pattern with a non-ASCII byte, or an `Exact` or `Under` pattern with a
+/// `..` segment, is matched like any other, but every word it matches
+/// already fails a path check (`PathNonAscii`, `PathDotDot`), so the
+/// command is Ask anyway: on an Ask rule such a target never changes the
+/// decision, and only a Block rule can raise it. (A `Prefix` `..` also
+/// matches `..x`, which passes the checks.)
 #[derive(Clone, Debug)]
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub struct Pat {

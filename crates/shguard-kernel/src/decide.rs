@@ -38,28 +38,40 @@
 //! (does it start with `~`), the lead (the literal bytes after the head, up
 //! to the next opaque part) and whether more opaque parts follow.
 //!
+//! Targets compare the lead ASCII case-folded (`match_lead`: `A`-`Z` to
+//! `a`-`z`), on words, patterns and inline values alike, because macOS
+//! volumes are case-insensitive (`.GIT` is `.git` there). On a
+//! case-sensitive filesystem this over-matches (`/ETC` hits `/etc`), which
+//! only raises decisions. Non-ASCII case is not folded; a path with a
+//! non-ASCII byte is Ask instead (`PathNonAscii`, below).
+//!
 //! Words and patterns alike get a key (`path_key`) when no opaque part
 //! follows the lead: a bare `~` has the key `/`, so `~`, `~/`, `~/.` and
-//! `~//` share one key; a lead that starts with `/` is normalized with
-//! `normalize_path` (`/etc/` and `/etc` share one key); any other lead is
-//! its own key. With an opaque part after the lead, the key is the lead.
-//! The heads must agree, and then a pattern matches when either reading
-//! holds:
+//! `~//` share one key; any other folded lead is normalized with
+//! `normalize_path`, relative ones included (`/etc/` and `/etc` share one
+//! key, and so do `././.git`, `.//.git` and `.git`). With an opaque part
+//! after the lead, the key is the folded lead. The heads must agree, and
+//! then a pattern matches when either reading holds:
 //! - on keys: `Exact` when the word has no further opaque part and the keys
 //!   are equal; `Prefix` when the pattern's key is a byte prefix of the
-//!   word's;
-//! - on the pattern's raw lead against the word's normalized lead (without
-//!   the `~` rule): the same two comparisons. This reading is the previous
-//!   one, kept so the key reading only adds hits.
+//!   word's; `Under` when it is a byte prefix that ends at the end of the
+//!   word's key, right before a `/` of it, or with a `/` of its own
+//!   (`under_l`);
+//! - on the pattern's folded lead against the word's normalized lead
+//!   (without the `~` rule): the same three comparisons. The loader admits
+//!   only targets in normal form, so for them this reading adds nothing;
+//!   it is kept so the key reading only adds hits.
 //!
-//! A byte prefix over-matches (`/etc` matches `/etcfoo`), which is
-//! acceptable for raise-only rules. A pattern whose canonical view is empty
-//! (only empty `Lit`s) matches every word as `Prefix`, and as `Exact`
-//! matches only a word that is itself empty.
+//! A byte prefix over-matches (`/etc` as `Prefix` matches `/etcfoo`), which
+//! is acceptable for raise-only rules; `Under` does not (`/etc` as `Under`
+//! matches `/etc` and `/etc/x` only). A pattern whose canonical view is
+//! empty (only empty `Lit`s) matches every word as `Prefix`, every word
+//! with an empty or `/`-led key as `Under`, and as `Exact` only a word that
+//! is itself empty.
 //!
 //! A `/`-led pattern never covers a `~` word, since the heads differ: to
-//! cover the home directory, add a `~` `Prefix` target (`[Tilde]` as
-//! `Prefix` matches every `~` word, `~` and `~/x` included).
+//! cover the home directory, add a `~` `Prefix` or `Under` target (`[Tilde]`
+//! as either matches every `~` word, `~` and `~/x` included).
 //!
 //! This equals the canonical-sequence comparison for every pattern without
 //! an opaque part beyond a leading `~`, up to path normalization.
@@ -74,11 +86,21 @@
 //! - `PathDotDot`: a `..` segment in the literal bytes of a path word. This
 //!   also covers the bytes after a leading `~` (`~/../x`), a deliberate
 //!   extension;
+//! - `PathNonAscii`: a byte that is not ASCII in the literal bytes of a path
+//!   word. APFS folds Unicode case (`~/.ſſh` may name `~/.ssh`), which the
+//!   ASCII fold above cannot see;
 //! - `PathAfterCd`: a relative path word (no leading `/`, no `~`) after an
 //!   earlier covered command, in address order, whose selected row has
-//!   `changes_cwd`.
+//!   `changes_cwd`;
+//! - `SensitiveAfterCd`: the command itself, path words or not, when its
+//!   selected row is `cwd_sensitive` and such an earlier command exists
+//!   (`cd /x && git status` reads `/x`'s `.git/config`).
 //!
-//! The same three checks apply to an inline path value
+//! The checks on words read the raw lead: not folded, not normalized.
+//! `SensitiveAfterCd` reads no word; it sits with them because it is
+//! decided by the same `cwd` state (`path_fail_row`).
+//!
+//! The same four checks apply to an inline path value
 //! (`inline_path_fails`). An empty value (`--file=`) is relative, so it fails
 //! `PathAfterCd` after a `cd`. An unreadable value fails as `PathOpaque`.
 //!
@@ -99,9 +121,9 @@ use crate::argv::{
 };
 use crate::argv::{ArgvResult, Parse, Slot, long_is, parse_argv, parts_view, short_is, word_view};
 use crate::ast::{Opaque, Part, Script, Simple, Word};
-use crate::bytes::{DOT, SLASH, bytes_eq, normalize_path, starts_with};
+use crate::bytes::{DOT, NON_ASCII, SLASH, bytes_eq, fold_ascii, normalize_path, starts_with};
 #[cfg(creusot)]
-use crate::bytes::{lemma_sub_snoc, norm_l};
+use crate::bytes::{fold_l, lemma_sub_snoc, norm_l};
 #[cfg(creusot)]
 use crate::catalog::Row;
 use crate::catalog::{Catalog, Opt, OptName, Role};
@@ -212,15 +234,22 @@ pub fn starts_slash(b: Seq<u8>) -> bool {
     pearlite! { b.len() > 0 && b[0] == SLASH }
 }
 
-/// The lead, normalized when nothing opaque follows it and it starts with
-/// `/`.
+/// The lead as targets compare it: ASCII case-folded. Path checks read the
+/// raw `path_lead` instead.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn match_lead(parts: Seq<Part>) -> Seq<u8> {
+    fold_l(path_lead(parts))
+}
+
+/// The folded lead, normalized when nothing opaque follows it.
 #[cfg(creusot)]
 #[logic(open)]
 pub fn path_norm(parts: Seq<Part>) -> Seq<u8> {
-    if !path_more(parts) && starts_slash(path_lead(parts)) {
-        norm_l(path_lead(parts))
+    if !path_more(parts) {
+        norm_l(match_lead(parts))
     } else {
-        path_lead(parts)
+        match_lead(parts)
     }
 }
 
@@ -243,6 +272,31 @@ pub fn is_prefix(q: Seq<u8>, s: Seq<u8>) -> bool {
     pearlite! { q.len() <= s.len() && s.subsequence(0, q.len()) == q }
 }
 
+/// `q` is `s` or a path above it: a byte prefix of `s` that ends at the end
+/// of `s`, right before a `/` of `s`, or with a `/` of its own.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn under_l(q: Seq<u8>, s: Seq<u8>) -> bool {
+    pearlite! {
+        is_prefix(q, s)
+            && (q.len() == s.len()
+                || s[q.len()] == SLASH
+                || (q.len() > 0 && q[q.len() - 1] == SLASH))
+    }
+}
+
+/// `Under` stops at a component boundary: a pattern key that does not end
+/// in `/` covers a longer word only when the word continues with `/`. This
+/// is what tells `Under` apart from `Prefix` (`/etc` does not cover
+/// `/etcfoo`).
+#[cfg(creusot)]
+#[logic]
+#[requires(under_l(q, s))]
+#[requires(q.len() < s.len())]
+#[requires(q.len() == 0 || q[q.len() - 1] != SLASH)]
+#[ensures(s[q.len()] == SLASH)]
+pub fn lemma_under_boundary(q: Seq<u8>, s: Seq<u8>) {}
+
 /// `pat` matches a word whose view is head `wt`, normalized lead `wnorm`,
 /// key `wkey` and trailing-opaque flag `wmore`.
 #[cfg(creusot)]
@@ -252,14 +306,20 @@ pub fn pat_match_view(pat: Pat, wt: bool, wnorm: Seq<u8>, wkey: Seq<u8>, wmore: 
         if path_more(pat.parts@) {
             true
         } else if path_tilde(pat.parts@) != wt {
-            !path_tilde(pat.parts@) && path_lead(pat.parts@).len() == 0
-                && pat.kind == PatKind::Prefix
+            !path_tilde(pat.parts@) && match_lead(pat.parts@).len() == 0
+                && match pat.kind {
+                    PatKind::Prefix => true,
+                    PatKind::Exact => false,
+                    PatKind::Under => false,
+                }
         } else {
             match pat.kind {
                 PatKind::Exact => !wmore
-                    && (wnorm == path_lead(pat.parts@) || wkey == path_key(pat.parts@)),
-                PatKind::Prefix => is_prefix(path_lead(pat.parts@), wnorm)
+                    && (wnorm == match_lead(pat.parts@) || wkey == path_key(pat.parts@)),
+                PatKind::Prefix => is_prefix(match_lead(pat.parts@), wnorm)
                     || is_prefix(path_key(pat.parts@), wkey),
+                PatKind::Under => under_l(match_lead(pat.parts@), wnorm)
+                    || under_l(path_key(pat.parts@), wkey),
             }
         }
     }
@@ -307,12 +367,12 @@ pub fn inline_value(parts: Seq<Part>, off: Int) -> Seq<u8> {
     pearlite! { lit_prefix(parts, 0).subsequence(off, lit_prefix(parts, 0).len()) }
 }
 
-/// The key an inline value is compared on: normalized when it starts with
-/// `/`, like a literal path word (`path_norm` with no `~` and nothing opaque).
+/// The key an inline value is compared on: folded and normalized, like a
+/// literal path word (`path_norm` with no `~` and nothing opaque).
 #[cfg(creusot)]
 #[logic(open)]
 pub fn inline_norm(v: Seq<u8>) -> Seq<u8> {
-    if starts_slash(v) { norm_l(v) } else { v }
+    norm_l(fold_l(v))
 }
 
 /// The inline value cannot be read: the option word is opaque or `off` is
@@ -347,6 +407,7 @@ pub fn inline_path_fails(parts: Seq<Part>, off: Int, cwd: bool) -> bool {
     pearlite! {
         inline_bad(parts, off)
             || has_dotdot_l(inline_value(parts, off))
+            || has_nonascii_l(inline_value(parts, off))
             || (cwd && !starts_slash(inline_value(parts, off)))
     }
 }
@@ -485,6 +546,20 @@ pub fn has_dotdot_l(b: Seq<u8>) -> bool {
     pearlite! { exists<i> dotdot_at(b, i) }
 }
 
+/// Byte `i` of `b` is not ASCII.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn nonascii_at(b: Seq<u8>, i: Int) -> bool {
+    pearlite! { 0 <= i && i < b.len() && b[i] >= NON_ASCII }
+}
+
+/// `b` has a byte that is not ASCII.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn has_nonascii_l(b: Seq<u8>) -> bool {
+    pearlite! { exists<i> nonascii_at(b, i) }
+}
+
 /// The path word with parts `parts` fails a path check; `cwd`: an earlier
 /// command changed the working directory.
 #[cfg(creusot)]
@@ -492,6 +567,7 @@ pub fn has_dotdot_l(b: Seq<u8>) -> bool {
 pub fn word_path_fails(parts: Seq<Part>, cwd: bool) -> bool {
     path_more(parts)
         || has_dotdot_l(path_lead(parts))
+        || has_nonascii_l(path_lead(parts))
         || (cwd && !path_tilde(parts) && !starts_slash(path_lead(parts)))
 }
 
@@ -521,13 +597,14 @@ pub fn path_fail_parsed(ws: Seq<Word>, start: Int, slots: Seq<SlotL>, cwd: bool)
 }
 
 /// The command with words `ws` fails a path check through the parse of
-/// `row`.
+/// `row`. A `cwd_sensitive` row fails it after a `cd` whatever its words.
 #[cfg(creusot)]
 #[logic(open(crate))]
 pub fn path_fail_row(row: Row, ws: Seq<Word>, cwd: bool) -> bool {
     pearlite! {
         match argv_spec(row.grammar, ws, row.key@.len()) {
-            ArgvL::Parsed(slots, _) => path_fail_parsed(ws, row.key@.len(), slots, cwd),
+            ArgvL::Parsed(slots, _) => (cwd && row.cwd_sensitive)
+                || path_fail_parsed(ws, row.key@.len(), slots, cwd),
             ArgvL::Unknown(_, _) => false,
         }
     }
@@ -968,16 +1045,32 @@ fn path_shape(parts: &[Part]) -> (bool, Vec<u8>, bool) {
     (tilde, lead, more)
 }
 
-/// The normalized lead (see `path_norm`).
+/// The folded copy of a lead (see `match_lead`).
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result@ == fold_l(lead@)))]
+fn folded(mut lead: Vec<u8>) -> Vec<u8> {
+    fold_ascii(&mut lead);
+    lead
+}
+
+/// The folded and normalized lead (see `path_norm`): fold first, then
+/// normalize when nothing opaque follows.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result@
-    == if !more && starts_slash(lead@) { norm_l(lead@) } else { lead@ }))]
+    == if !more { norm_l(fold_l(lead@)) } else { fold_l(lead@) }))]
 fn path_norm_of(lead: Vec<u8>, more: bool) -> Vec<u8> {
-    if !more && !<[u8]>::is_empty(&lead) && lead[0] == SLASH {
-        normalize_path(&lead)
-    } else {
-        lead
+    let lead = folded(lead);
+    if more { lead } else { normalize_path(&lead) }
+}
+
+/// `q` is `s` or a path above it (see `under_l`).
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result == under_l(q@, s@)))]
+fn under(s: &[u8], q: &[u8]) -> bool {
+    if !starts_with(s, q) {
+        return false;
     }
+    q.len() == s.len() || s[q.len()] == SLASH || (!<[u8]>::is_empty(q) && q[q.len() - 1] == SLASH)
 }
 
 /// The one-byte path `/`.
@@ -1005,11 +1098,11 @@ struct PathView {
     more: bool,
 }
 
-/// The view of `parts`: head, lead, normalized lead, key and whether an
-/// opaque part follows the lead.
+/// The view of `parts`: head, folded lead, normalized lead, key and whether
+/// an opaque part follows the lead.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result.tilde == path_tilde(parts@)))]
-#[cfg_attr(creusot, ensures(result.lead@ == path_lead(parts@)))]
+#[cfg_attr(creusot, ensures(result.lead@ == match_lead(parts@)))]
 #[cfg_attr(creusot, ensures(result.norm@ == path_norm(parts@)))]
 #[cfg_attr(creusot, ensures(result.key@ == path_key(parts@)))]
 #[cfg_attr(creusot, ensures(result.more == path_more(parts@)))]
@@ -1019,9 +1112,9 @@ fn path_view(parts: &[Part]) -> PathView {
     let (tilde, lead, more) = path_shape(parts);
     let (_, lead2, _) = path_shape(parts);
     let (_, lead3, _) = path_shape(parts);
-    let norm = path_norm_of(lead2, more);
     // A bare `~` has the key `/`, like `~/`.
     let bare = tilde && !more && <[u8]>::is_empty(&lead);
+    let norm = path_norm_of(lead2, more);
     let key = if bare {
         slash()
     } else {
@@ -1029,7 +1122,7 @@ fn path_view(parts: &[Part]) -> PathView {
     };
     PathView {
         tilde,
-        lead,
+        lead: folded(lead),
         norm,
         key,
         more,
@@ -1044,17 +1137,18 @@ fn pat_match(pat: &Pat, w: &PathView) -> bool {
     if p.more {
         return true;
     }
-    let prefix = match pat.kind {
-        PatKind::Exact => false,
-        PatKind::Prefix => true,
-    };
     if p.tilde != w.tilde {
-        return !p.tilde && <[u8]>::is_empty(&p.lead) && prefix;
+        return !p.tilde
+            && <[u8]>::is_empty(&p.lead)
+            && match pat.kind {
+                PatKind::Prefix => true,
+                PatKind::Exact | PatKind::Under => false,
+            };
     }
-    if prefix {
-        starts_with(&w.norm, &p.lead) || starts_with(&w.key, &p.key)
-    } else {
-        !w.more && (bytes_eq(&w.norm, &p.lead) || bytes_eq(&w.key, &p.key))
+    match pat.kind {
+        PatKind::Exact => !w.more && (bytes_eq(&w.norm, &p.lead) || bytes_eq(&w.key, &p.key)),
+        PatKind::Prefix => starts_with(&w.norm, &p.lead) || starts_with(&w.key, &p.key),
+        PatKind::Under => under(&w.norm, &p.lead) || under(&w.key, &p.key),
     }
 }
 
@@ -1099,11 +1193,12 @@ fn suffix_from(b: &[u8], off: usize) -> Vec<u8> {
 }
 
 /// The view of the inline value `b[off..]` of an option word: no `~`, nothing
-/// opaque, and the key is the normalized lead like a literal path word's.
+/// opaque, and the key is the folded, normalized lead like a literal path
+/// word's.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, requires(off@ <= b@.len()))]
 #[cfg_attr(creusot, ensures(!result.tilde && !result.more))]
-#[cfg_attr(creusot, ensures(result.lead@ == b@.subsequence(off@, b@.len())))]
+#[cfg_attr(creusot, ensures(result.lead@ == fold_l(b@.subsequence(off@, b@.len()))))]
 #[cfg_attr(creusot, ensures(result.norm@ == inline_norm(b@.subsequence(off@, b@.len()))))]
 #[cfg_attr(creusot, ensures(result.key@ == inline_norm(b@.subsequence(off@, b@.len()))))]
 fn inline_view(b: &[u8], off: usize) -> PathView {
@@ -1115,7 +1210,7 @@ fn inline_view(b: &[u8], off: usize) -> PathView {
     let key = path_norm_of(lead3, false);
     PathView {
         tilde: false,
-        lead,
+        lead: folded(lead),
         norm,
         key,
         more: false,
@@ -1302,6 +1397,23 @@ fn has_dotdot(b: &[u8]) -> bool {
     false
 }
 
+/// `b` has a byte that is not ASCII.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result == has_nonascii_l(b@)))]
+fn has_nonascii(b: &[u8]) -> bool {
+    let mut i: usize = 0;
+    #[cfg_attr(creusot, variant(b@.len() - i@))]
+    #[cfg_attr(creusot, invariant(i@ <= b@.len()))]
+    #[cfg_attr(creusot, invariant(forall<t> 0 <= t && t < i@ ==> !nonascii_at(b@, t)))]
+    while i < b.len() {
+        if b[i] >= NON_ASCII {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// The path check of one path word, or `None` when it passes.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures((result != None) == word_path_fails(w.parts@, cwd)))]
@@ -1312,6 +1424,9 @@ fn word_path_check(w: &Word, cwd: bool) -> Option<UnknownKind> {
     }
     if has_dotdot(&lead) {
         return Some(UnknownKind::PathDotDot);
+    }
+    if has_nonascii(&lead) {
+        return Some(UnknownKind::PathNonAscii);
     }
     if cwd && !tilde && (<[u8]>::is_empty(&lead) || lead[0] != SLASH) {
         return Some(UnknownKind::PathAfterCd);
@@ -1332,6 +1447,9 @@ fn inline_path_check(w: &Word, off: usize, cwd: bool) -> Option<UnknownKind> {
     let v = &b[off..b.len()];
     if has_dotdot(v) {
         return Some(UnknownKind::PathDotDot);
+    }
+    if has_nonascii(v) {
+        return Some(UnknownKind::PathNonAscii);
     }
     if cwd && (<[u8]>::is_empty(v) || v[0] != SLASH) {
         return Some(UnknownKind::PathAfterCd);
@@ -1453,6 +1571,8 @@ fn scan_simple(
                     let mut ask: Option<Reason> = None;
                     if let Some((u, w)) = path_check(ws, start, &p.slots, cwd) {
                         ask = Some(Reason::Unknown(u, word_at(at, w)));
+                    } else if cwd && r.cwd_sensitive {
+                        ask = Some(Reason::Unknown(UnknownKind::SensitiveAfterCd, at));
                     }
                     let mut block: Option<Reason> = None;
                     let mut j: usize = 0;
@@ -1600,7 +1720,7 @@ pub fn decide(cat: &Catalog, rules: &[Rule], sc: Script) -> Verdict {
 
 #[cfg(test)]
 mod tests {
-    use super::{OptAlts, Verdict, decide, inline_hit, inline_path_check};
+    use super::{OptAlts, Verdict, decide, inline_hit, inline_path_check, word_path_check};
     use crate::ast::{AndOr, Connector, Link, Opaque, Part, Pipeline, Script, Simple, Word};
     use crate::catalog::{
         Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role,
@@ -1685,6 +1805,7 @@ mod tests {
                 ),
                 row(&["echo"], gnu(Vec::new(), Role::Inert), Cwd::Keeps),
                 row(&["cat"], gnu(Vec::new(), Role::Path), Cwd::Keeps),
+                row(&["git"], gnu(Vec::new(), Role::Inert), Cwd::Sensitive),
                 row(
                     &["sh"],
                     Grammar::new(
@@ -1863,6 +1984,49 @@ mod tests {
         check(sc, Decision::Ask);
         // Without the cd, the same rm is Allow.
         check(seq(vec![cmd(&["rm", "-rf", "usr"])]), Decision::Allow);
+    }
+
+    #[test]
+    fn cwd_sensitive_after_cd_is_ask() {
+        let after = |conn: Connector, first: &[&str], then: &[&str]| {
+            Script::new(vec![AndOr::new(
+                pipe(vec![cmd(first)]),
+                vec![Link::new(conn, pipe(vec![cmd(then)]))],
+            )])
+        };
+        // `git` alone, and with an inert operand, is Allow.
+        check(seq(vec![cmd(&["git"])]), Decision::Allow);
+        check(seq(vec![cmd(&["git", "status"])]), Decision::Allow);
+        // After a cd, absolute or relative, it is Ask with or without words.
+        check(
+            after(Connector::And, &["cd", "/x"], &["git"]),
+            Decision::Ask,
+        );
+        check(
+            after(Connector::Or, &["cd", "sub"], &["git", "status"]),
+            Decision::Ask,
+        );
+        check(seq(vec![cmd(&["cd", "/x"]), cmd(&["git"])]), Decision::Ask);
+        // A cd later in the script does not reach back.
+        check(
+            seq(vec![cmd(&["git"]), cmd(&["cd", "/x"])]),
+            Decision::Allow,
+        );
+        // A row that keeps the cwd and has no path word stays Allow.
+        check(
+            after(Connector::And, &["cd", "/x"], &["echo", "hi"]),
+            Decision::Allow,
+        );
+        check(
+            after(Connector::And, &["cd", "/x"], &["ls"]),
+            Decision::Allow,
+        );
+        // In a pipeline after a cd it is Ask too.
+        let piped = Script::new(vec![AndOr::new(
+            pipe(vec![cmd(&["cd", "/x"]), cmd(&["git"])]),
+            Vec::new(),
+        )]);
+        check(piped, Decision::Ask);
     }
 
     #[test]
@@ -2084,6 +2248,137 @@ mod tests {
         // The offset follows the `-r` flag: the value is `/etc/x`, not `rt/etc/x`.
         cp("-rt/etc/x", Decision::Block);
         cp("-rt/tmp/x", Decision::Allow);
+    }
+    fn pat(s: &str, kind: PatKind) -> Pat {
+        let parts = match s.strip_prefix('~') {
+            Some("") => vec![Part::Opaque(Opaque::Tilde)],
+            Some(rest) => vec![Part::Opaque(Opaque::Tilde), lit(rest)],
+            None => vec![lit(s)],
+        };
+        Pat::new(parts, kind).expect("non-empty")
+    }
+
+    /// `rm <path>` (or `rm -- ~<rest>` for a `~` path) under one Block rule
+    /// with the single target `p`.
+    fn rm_hits(p: &Pat, path: &str) -> bool {
+        let r = [block_rule("rm", Vec::new(), vec![p.clone()])];
+        let sc = match path.strip_prefix('~') {
+            Some(rest) => seq(vec![simple(vec![
+                word(vec![lit("rm")]),
+                word(vec![lit("--")]),
+                tilde_word(rest),
+            ])]),
+            None => seq(vec![cmd(&["rm", path])]),
+        };
+        let d = decide(&catalog(), &r, sc).decision();
+        assert_ne!(d, Decision::Ask, "`rm {path}` must pass the path checks");
+        d == Decision::Block
+    }
+
+    #[test]
+    fn relative_leads_are_normalized() {
+        let git = pat(".git", PatKind::Under);
+        for w in [
+            ".git",
+            ".git/x",
+            "./.git/x",
+            "././.git/x",
+            ".//.git/x",
+            ".git/",
+        ] {
+            assert!(rm_hits(&git, w), "{w}");
+        }
+        for w in [".github", ".gitignore", "x/.git", "."] {
+            assert!(!rm_hits(&git, w), "{w}");
+        }
+        // `.`, `./`, `././` and `.//` share the key `.`.
+        let dot = pat(".", PatKind::Exact);
+        for w in [".", "./", "././", ".//"] {
+            assert!(rm_hits(&dot, w), "{w}");
+        }
+        assert!(!rm_hits(&dot, "./x"));
+    }
+
+    #[test]
+    fn under_stops_at_a_component_boundary() {
+        let etc = pat("/etc", PatKind::Under);
+        for w in ["/etc", "/etc/", "/etc/x", "//etc//x"] {
+            assert!(rm_hits(&etc, w), "{w}");
+        }
+        assert!(!rm_hits(&etc, "/etcfoo"));
+        assert!(!rm_hits(&etc, "/et"));
+        // `Prefix` stays a byte prefix.
+        assert!(rm_hits(&pat("/etc", PatKind::Prefix), "/etcfoo"));
+        assert!(rm_hits(&pat(".git", PatKind::Prefix), ".github"));
+        assert!(rm_hits(&pat("^", PatKind::Prefix), "^foo"));
+        assert!(rm_hits(&pat(".env.", PatKind::Prefix), ".env.local"));
+        assert!(rm_hits(&pat(".env.", PatKind::Prefix), "./.env.local"));
+        assert!(!rm_hits(&pat(".env.", PatKind::Prefix), ".envrc"));
+    }
+
+    #[test]
+    fn root_and_home_keys_cover_everything_under_them() {
+        let root = pat("/", PatKind::Under);
+        for w in ["/", "/x", "/etc/passwd", "//"] {
+            assert!(rm_hits(&root, w), "{w}");
+        }
+        assert!(!rm_hits(&root, "x"));
+        assert!(!rm_hits(&root, "~/x"), "a `/` pattern never covers `~`");
+        let home = pat("~", PatKind::Under);
+        for w in ["~", "~/", "~/x", "~/.ssh/id_rsa"] {
+            assert!(rm_hits(&home, w), "{w}");
+        }
+        assert!(!rm_hits(&home, "/x"));
+    }
+
+    #[test]
+    fn targets_fold_ascii_case() {
+        let etc = pat("/etc", PatKind::Prefix);
+        assert!(rm_hits(&etc, "/ETC/x"));
+        assert!(rm_hits(&pat("/etc", PatKind::Under), "/Etc"));
+        assert!(rm_hits(&pat("/etc", PatKind::Exact), "/ETC/"));
+        assert!(rm_hits(&pat("~/.ssh", PatKind::Prefix), "~/.SSH"));
+        assert!(rm_hits(&pat(".git", PatKind::Under), "./.GIT/hooks"));
+        // The pattern side is folded too.
+        assert!(rm_hits(&pat("/ETC", PatKind::Under), "/etc/x"));
+        assert!(!rm_hits(&pat("/etc", PatKind::Under), "/ETCFOO"));
+    }
+
+    #[test]
+    fn non_ascii_paths_are_ask() {
+        let r = [block_rule(
+            "rm",
+            Vec::new(),
+            vec![pat("~/.ssh", PatKind::Prefix)],
+        )];
+        // `rm -- ~/.ſſh/id_rsa`: the long s is 0xC5 0xBF.
+        let sc = rm_r_dashdash(tilde_word("/.\u{17F}\u{17F}h/id_rsa"));
+        check_with(&r, sc, Decision::Ask);
+        check_with(&[], seq(vec![cmd(&["cat", "\u{65E5}.txt"])]), Decision::Ask);
+        check_with(&[], seq(vec![cmd(&["cat", "plain.txt"])]), Decision::Allow);
+        let w = word(vec![lit("caf\u{E9}")]);
+        assert_eq!(word_path_check(&w, false), Some(UnknownKind::PathNonAscii));
+        let w = word(vec![lit("-t/x/\u{E9}")]);
+        assert_eq!(
+            inline_path_check(&w, 2, false),
+            Some(UnknownKind::PathNonAscii)
+        );
+    }
+
+    #[test]
+    fn inline_values_are_folded_and_normalized() {
+        let cat = catalog_with_cp();
+        let r = [block_rule(
+            "cp",
+            Vec::new(),
+            vec![pat(".git", PatKind::Under), pat("/etc", PatKind::Under)],
+        )];
+        let cp = |w: &str, want| check_in(&cat, &r, seq(vec![cmd(&["cp", w, "a"])]), want);
+        cp("-t././.git", Decision::Block);
+        cp("-t.//.GIT/hooks", Decision::Block);
+        cp("--target-directory=/ETC/x", Decision::Block);
+        cp("-t.github", Decision::Allow);
+        cp("-t/etcfoo", Decision::Allow);
     }
 
     #[test]

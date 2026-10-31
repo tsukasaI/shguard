@@ -135,7 +135,11 @@ fn unknown(kind: UnknownKind) -> &'static str {
         UnknownKind::UnknownSubcommand => "a subcommand the catalog does not list",
         UnknownKind::PathOpaque => "a path word that cannot be compared with rule targets",
         UnknownKind::PathDotDot => "a path with a `..` segment",
+        UnknownKind::PathNonAscii => "a path with a non-ASCII byte",
         UnknownKind::PathAfterCd => "a relative path after a command that changes directory",
+        UnknownKind::SensitiveAfterCd => {
+            "a command that reads its directory's configuration, after a command that changes directory"
+        }
     }
 }
 
