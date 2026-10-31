@@ -61,7 +61,9 @@ fn log_lines(path: &Path) -> Vec<Value> {
 #[test]
 fn decision_log_gets_one_line_per_bash_decision() {
     let dir = ok(tempfile::tempdir());
-    let log = dir.path().join("state").join("decisions.jsonl");
+    let state = dir.path().join("state");
+    ok(std::fs::create_dir(&state));
+    let log = state.join("decisions.jsonl");
     let config = dir.path().join("config.toml");
     let text = format!("decision_log = {:?}\n", log.display().to_string());
     let cases = [
@@ -128,6 +130,68 @@ fn a_symlinked_log_is_not_written_through() {
     let out = hook(dir.path(), &config, &text, &bash("ls -la"));
     assert_eq!(decision(&out).as_deref(), Some("allow"));
     assert_eq!(ok(std::fs::read_to_string(&target)), "keep\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_the_log_path_does_not_hold_the_answer() {
+    let dir = ok(tempfile::tempdir());
+    let config = dir.path().join("config.toml");
+    let log = dir.path().join("log.jsonl");
+    let made = Command::new("mkfifo").arg(&log).status();
+    assert!(matches!(made, Ok(s) if s.success()), "mkfifo: {made:?}");
+    let text = format!("decision_log = {:?}\n", log.display().to_string());
+    let start = std::time::Instant::now();
+    let out = hook(dir.path(), &config, &text, &bash("rm -rf /"));
+    assert_eq!(decision(&out).as_deref(), Some("deny"));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "the hook waited"
+    );
+}
+
+#[test]
+fn a_missing_log_directory_is_not_created() {
+    let dir = ok(tempfile::tempdir());
+    let config = dir.path().join("config.toml");
+    let log = dir.path().join("absent").join("log.jsonl");
+    let text = format!("decision_log = {:?}\n", log.display().to_string());
+    let out = hook(dir.path(), &config, &text, &bash("ls -la"));
+    assert_eq!(decision(&out).as_deref(), Some("allow"));
+    assert!(!dir.path().join("absent").exists());
+}
+
+#[test]
+fn a_load_error_writes_no_log_line() {
+    let dir = ok(tempfile::tempdir());
+    let config = dir.path().join("config.toml");
+    let log = dir.path().join("log.jsonl");
+    let text = format!(
+        "decision_log = {:?}\nbogus = 1\n",
+        log.display().to_string()
+    );
+    let out = hook(dir.path(), &config, &text, &bash("ls -la"));
+    assert_eq!(decision(&out).as_deref(), Some("deny"));
+    assert!(!log.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_existing_log_is_made_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = ok(tempfile::tempdir());
+    let config = dir.path().join("config.toml");
+    let log = dir.path().join("log.jsonl");
+    ok(std::fs::write(&log, ""));
+    ok(std::fs::set_permissions(
+        &log,
+        std::fs::Permissions::from_mode(0o644),
+    ));
+    let text = format!("decision_log = {:?}\n", log.display().to_string());
+    let out = hook(dir.path(), &config, &text, &bash("ls -la"));
+    assert_eq!(decision(&out).as_deref(), Some("allow"));
+    assert_eq!(ok(std::fs::metadata(&log)).permissions().mode() & 0o077, 0);
+    assert_eq!(log_lines(&log).len(), 1);
 }
 
 #[test]

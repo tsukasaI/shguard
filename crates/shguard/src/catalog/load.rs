@@ -246,13 +246,13 @@ pub fn parse_config(name: &str, text: &str) -> Result<(ConfigHead, ParsedFile), 
 }
 
 /// The text is TOML whose top level has a 0.9-only key, or an
-/// `ask_outcome` that is not a string (0.9 also took a table there).
+/// `ask_outcome` table (0.9 also took a table there).
 fn is_legacy(text: &str) -> bool {
     let Ok(table) = toml::from_str::<toml::Table>(text) else {
         return false;
     };
     LEGACY_KEYS.iter().any(|k| table.contains_key(*k))
-        || table.get("ask_outcome").is_some_and(|v| !v.is_str())
+        || table.get("ask_outcome").is_some_and(toml::Value::is_table)
 }
 
 /// Merges and checks parsed files. `errs` are the errors found while

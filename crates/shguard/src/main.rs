@@ -6,7 +6,8 @@ use std::ffi::OsString;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shguard::catalog::{EMBEDDED, LoadError, Source, load};
 use shguard::config::{Location, Settings, locate, settings};
@@ -96,7 +97,7 @@ fn hook() -> ExitCode {
                 decision_log: Some(path),
                 ..
             }) = &loaded
-                && let Err(e) = append_log(path, command.as_deref(), &response)
+                && let Err(e) = log_bounded(path, command, response)
             {
                 drop(writeln!(
                     std::io::stderr().lock(),
@@ -116,8 +117,32 @@ fn hook() -> ExitCode {
     }
 }
 
-/// Appends one line to the decision log. A symlink at the path is refused,
-/// so a planted link cannot turn the log into a write to another file.
+/// How long the hook waits for the decision log before it exits anyway.
+const LOG_WAIT: Duration = Duration::from_millis(500);
+
+/// Writes the log line on a helper thread and waits at most [`LOG_WAIT`].
+/// An open that blocks (a FIFO with no reader, a hung network mount) would
+/// otherwise keep the hook from exiting until Claude Code's timeout, which
+/// discards the answer already written. Returning from `main` ends the
+/// helper thread.
+fn log_bounded(path: &Path, command: Option<String>, response: Response) -> std::io::Result<()> {
+    let (tx, rx) = mpsc::channel();
+    let owned = path.to_path_buf();
+    std::thread::Builder::new()
+        .name("decision-log".to_owned())
+        .spawn(move || drop(tx.send(append_log(&owned, command.as_deref(), &response))))?;
+    match rx.recv_timeout(LOG_WAIT) {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the log did not open or write in time",
+        )),
+    }
+}
+
+/// Appends one line to the decision log. Only a regular file that is the
+/// path itself (not reached through a symlink) is written; the directory
+/// must already exist.
 fn append_log(path: &Path, command: Option<&str>, response: &Response) -> std::io::Result<()> {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -128,20 +153,44 @@ fn append_log(path: &Path, command: Option<&str>, response: &Response) -> std::i
     else {
         return Ok(());
     };
+    let refuse = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, why.to_owned());
     if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "the path is a symlink",
-        ));
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        return Err(refuse("the path is a symlink"));
     }
     let mut options = std::fs::OpenOptions::new();
     options.append(true).create(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(path)?.write_all(&line)
+    let mut file = options.open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() {
+        return Err(refuse("the path is not a regular file"));
+    }
+    // A symlink swapped in between the check above and the open would have
+    // been followed: the path must still name the file that was opened.
+    let at_path = std::fs::symlink_metadata(path)?;
+    if at_path.file_type().is_symlink() || !same_file(&opened, &at_path) {
+        return Err(refuse("the path changed while the log was opened"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if opened.permissions().mode() & 0o077 != 0 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+    }
+    file.write_all(&line)
+}
+
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    a.is_file() && b.is_file() && a.len() == b.len()
 }
 
 /// `shguard init`: writes the config to where the hook will look for it,

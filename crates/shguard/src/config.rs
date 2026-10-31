@@ -18,8 +18,10 @@
 //! that. Under `ask_outcome = "ask"` an embedded Block holds only for
 //! commands the catalog covers: an unknown option makes the command
 //! uncovered, so it is an Ask. `SHGUARD_CONFIG` must be an absolute path.
-//! `decision_log` must be absolute; each line holds the command text, so the
-//! file can hold secrets that were typed on a command line. A 0.9 config
+//! `decision_log` must be absolute and its directory must exist; each line
+//! holds the command text, so the file can hold secrets that were typed on
+//! a command line. Keep the directory out of the agent's reach: a symlink
+//! at the file itself is refused, one higher up is followed. A 0.9 config
 //! (`[[deny]]`, `[[ask]]`, ...) is a load error that says to migrate.
 //! To distrust a row, add a `[[rule]]` instead. A
 //! rule with a key and no `opts` or `targets` hits every command under that
