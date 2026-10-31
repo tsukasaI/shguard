@@ -465,6 +465,52 @@ fn all_errors_are_collected() {
 }
 
 #[test]
+fn changes_cwd_and_cwd_sensitive_conflict() {
+    let t = row("\"git\"", "changes_cwd = true\ncwd_sensitive = true");
+    assert!(matches!(errors(&t)[0], LoadError::ConflictingCwd { .. }));
+}
+
+#[test]
+fn cwd_sensitive_row_is_asked_after_cd() {
+    let text = format!(
+        "{}{}",
+        "[[row]]\nkey = [\"cd\"]\nsource = \"https://example.com/cd\"\norder = \"strict\"\ndashdash = \"literal\"\nplus_words = \"operand\"\npositionals = [\"path\"]\nchanges_cwd = true\n",
+        row("\"git\"", "cwd_sensitive = true\npositionals = []"),
+    );
+    let l = loaded(&text);
+    assert_eq!(decision(&l, "git"), Decision::Allow);
+    assert_eq!(decision(&l, "cd /x && git"), Decision::Ask);
+    assert_eq!(decision(&l, "cd /x; git"), Decision::Ask);
+}
+
+#[test]
+fn child_of_cwd_sensitive_row_must_be_cwd_sensitive() {
+    let parent = row("\"git\"", "cwd_sensitive = true\npositionals = []");
+    let t = format!("{parent}{}", row("\"git\", \"status\"", ""));
+    assert!(matches!(
+        errors(&t)[0],
+        LoadError::CwdSensitiveParent { .. }
+    ));
+    let cd = "[[row]]\nkey = [\"cd\"]\nsource = \"https://example.com/cd\"\norder = \"strict\"\ndashdash = \"literal\"\nplus_words = \"operand\"\npositionals = [\"path\"]\nchanges_cwd = true\n";
+    let ok = format!(
+        "{cd}{parent}{}",
+        row("\"git\", \"status\"", "cwd_sensitive = true")
+    );
+    let l = loaded(&ok);
+    assert_eq!(decision(&l, "git status"), Decision::Allow);
+    assert_eq!(decision(&l, "cd /x && git status"), Decision::Ask);
+    assert_eq!(decision(&l, "cd /x | git status"), Decision::Ask);
+
+    // Every level is checked against its own parent.
+    let mid = row("\"git\", \"remote\"", "cwd_sensitive = true");
+    let t = format!("{parent}{mid}{}", row("\"git\", \"remote\", \"show\"", ""));
+    assert!(matches!(
+        errors(&t)[0],
+        LoadError::CwdSensitiveParent { .. }
+    ));
+}
+
+#[test]
 fn valid_catalog_equals_hand_built() {
     let text = format!(
         "{}{}{}{}{}{}",
