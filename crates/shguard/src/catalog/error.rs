@@ -134,7 +134,7 @@ pub enum LoadError {
     },
     /// The target `.` has kind `prefix` or `under`.
     #[error(
-        "{file}: rule `{rule}`: target `.` must be `exact`; relative words are compared in normal form (`./x` is `x`), so name the paths instead"
+        "{file}: rule `{rule}`: target `.` must be `exact`; relative words are compared in normal form (`./x` is `x`), so name the paths instead (`.git` as `under`)"
     )]
     DotTarget { file: String, rule: String },
     /// A `prefix` target ends in `/` and is not `/` itself.
