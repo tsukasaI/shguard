@@ -131,6 +131,8 @@ pub(super) enum PatKindDto {
     Exact,
     Prefix,
     Under,
+    Component,
+    ComponentPrefix,
 }
 
 #[derive(Debug, Deserialize)]

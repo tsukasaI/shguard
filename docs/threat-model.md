@@ -69,10 +69,18 @@ recorded, not hidden.
   cargo read *that* directory's config and code. Every git, gh and cargo row
   is `cwd_sensitive`, so `cd /tmp/x && git status` is Ask. Only `cd` is
   tracked; `pushd`, `popd` and `env -C` have no row and are Ask.
-- **Writes to `.env`.** `cp x .env` is Allow while reading `.env` is Ask
-  (accepted by the owner, #1090). Writes to relative credential-shaped
-  directories (`./.ssh`, `./.aws`) are Allow; the home copies are protected
-  (#1092).
+- **Credential files.** `cat`, `head`, `tail`, `grep`, `rg`, `wc`, `sort`,
+  `cp`, `uniq` and every `git` row are Ask on a path with a credential segment anywhere in it
+  (`.ssh`, `.aws`, `.config/gh`, `.netrc`, `.env`, `.env.*`, `id_rsa*`, ...,
+  #1113), whatever the spelling of the home directory. Still Allow: a copy
+  or link under another name, a recursive read of a directory that holds
+  one (`grep -r x dir`) outside the broad home/root rules, and readers with
+  no such rule.
+- **Writes to `.env`.** Since #1113 the credential rule of `cp` covers every
+  operand, so `cp x .env` and `cp .env.example .env` are Ask (they were
+  Allow under #1090). Writes to relative credential-shaped directories
+  (`./.ssh`, `./.aws`) by `mkdir` and `rm` are Allow; the home copies are
+  protected (#1092).
 - **git push remotes.** Pushes to `https:`, `http:`, `ssh:`, `git:`,
   `git+ssh:`, `ssh+git:`, `file:` URLs and to absolute or `~` paths are Ask,
   and force pushes are Block. Still Allow: the scp form

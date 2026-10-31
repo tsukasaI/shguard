@@ -385,5 +385,11 @@ fn destructive_or_code_running_forms_of_the_new_rows_are_not_allowed() {
         "git stash -a",
         "git stash branch x",
         "cd /tmp/x && git commit -m x",
+        "git commit -F .env",
+        "git commit -F sub/.aws/credentials",
+        "git add .env",
+        "git add keys/id_rsa",
+        "git log -p -- app/.env.local",
+        "git diff .envrc",
     ]);
 }

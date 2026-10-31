@@ -1352,6 +1352,47 @@ key = ["git", "fetch"]
 targets = [{ pat = "+", kind = "prefix" }]
 outcome = "ask"
 
+# A path with a credential segment, as for the core readers (#1113):
+# `git commit -F .env` and `git add .env` would put the file where
+# `git log -p` and `git diff --cached` print it. The targets are the same as
+# those of `cat-ask-credential-dirs` in core.toml.
+[[rule]]
+id = "git-ask-credential-dirs"
+key = ["git"]
+outcome = "ask"
+targets = [
+  { pat = ".env", kind = "component" },
+  { pat = ".ssh", kind = "component" },
+  { pat = ".gnupg", kind = "component" },
+  { pat = ".aws", kind = "component" },
+  { pat = ".config/gh", kind = "component" },
+  { pat = "~/.claude", kind = "prefix" },
+  { pat = ".credentials.json", kind = "component" },
+  { pat = ".claude.json", kind = "component_prefix" },
+  { pat = ".netrc", kind = "component" },
+  { pat = ".npmrc", kind = "component" },
+  { pat = ".pypirc", kind = "component" },
+  { pat = ".pgpass", kind = "component" },
+  { pat = ".kube", kind = "component" },
+  { pat = ".docker", kind = "component" },
+  { pat = ".config/gcloud", kind = "component" },
+  { pat = ".zsh_history", kind = "component_prefix" },
+  { pat = ".bash_history", kind = "component_prefix" },
+  { pat = ".git-credentials", kind = "component" },
+  { pat = "id_rsa", kind = "component_prefix" },
+  { pat = "id_ed25519", kind = "component_prefix" },
+  { pat = "id_ecdsa", kind = "component_prefix" },
+  { pat = "id_dsa", kind = "component_prefix" },
+  { pat = ".env.", kind = "component_prefix" },
+  { pat = ".envrc", kind = "component" },
+  { pat = ".azure", kind = "component" },
+  { pat = ".vault-token", kind = "component" },
+  { pat = ".cargo/credentials", kind = "component_prefix" },
+  { pat = ".config/git/credentials", kind = "component_prefix" },
+  { pat = ".env-", kind = "component_prefix" },
+  { pat = ".env_", kind = "component_prefix" },
+]
+
 # An absolute or `~` path (a local remote, a file outside the repository,
 # an `-X` exclude file) is asked: `git diff ~/.ssh/k /dev/null` outside a
 # repository prints the file. A relative local remote (`git push sub/repo

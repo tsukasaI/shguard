@@ -756,7 +756,23 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
         PatKindDto::Exact => PatKind::Exact,
         PatKindDto::Prefix => PatKind::Prefix,
         PatKindDto::Under => PatKind::Under,
+        PatKindDto::Component => PatKind::Component,
+        PatKindDto::ComponentPrefix => PatKind::ComponentPrefix,
     };
+    // A component pattern is matched against the segments of the word's
+    // key, which has no `~` and whose segments never start with `/`, so a
+    // `~` or `/` lead could only ever match at the key's start, which is
+    // what `prefix` and `under` already say.
+    if matches!(kind, PatKind::Component | PatKind::ComponentPrefix)
+        && t.pat.starts_with(['~', '/'])
+    {
+        errs.push(LoadError::AnchoredComponentTarget {
+            file: file.to_owned(),
+            rule: rule.to_owned(),
+            pat: t.pat.clone(),
+        });
+        return None;
+    }
     let (head, body) = match t.pat.strip_prefix('~') {
         Some(rest) => ("~", rest),
         None => ("", t.pat.as_str()),
@@ -793,7 +809,9 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
     }
     // Words are compared in normal form, where `./x` is `x`, so `.` as a
     // `prefix` or `under` target reads as "anything relative" but covers only
-    // `.` (under) or dot names such as `.git` (prefix).
+    // `.` (under) or dot names such as `.git` (prefix). As a component it
+    // would cover only the word `.` (component) or every dot name
+    // (component_prefix).
     if t.pat == "." && !matches!(kind, PatKind::Exact) {
         errs.push(LoadError::DotTarget {
             file: file.to_owned(),

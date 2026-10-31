@@ -148,7 +148,16 @@ pub enum LoadError {
         rule: String,
         pat: String,
     },
-    /// The target `.` has kind `prefix` or `under`.
+    /// A `component` or `component_prefix` target starts with `~` or `/`.
+    #[error(
+        "{file}: rule `{rule}`: component target `{pat}` starts with `~` or `/`; name the segments only (`.ssh`), or use `prefix`/`under`"
+    )]
+    AnchoredComponentTarget {
+        file: String,
+        rule: String,
+        pat: String,
+    },
+    /// The target `.` has a kind other than `exact`.
     #[error(
         "{file}: rule `{rule}`: target `.` must be `exact`; relative words are compared in normal form (`./x` is `x`), so name the paths instead (`.git` as `under`)"
     )]
