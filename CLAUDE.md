@@ -144,7 +144,10 @@ singletons, newtypes and enums instead of flag structs.
 
 - lefthook + gitleaks are the mandated pre-commit stack (`lefthook.yaml`;
   `gitleaks git --staged --redact`). `pre-push` runs fmt, clippy, test,
-  `cargo deny check` and the proof run.
+  `cargo deny check`, and the proof run only where `cargo-creusot` is on
+  `PATH` (inside `nix develop`); elsewhere the proof jobs skip (#1012). The
+  gate is CI: `proofs` is a required check, and the `rust` job's `--locked`
+  steps reject a nix-form lockfile (#1020).
 - Kani harnesses (`crates/shguard-syntax/src/lex/kani.rs`) are not in the flake or
   pre-push. Locally: `cargo install --locked kani-verifier --version 0.68.0 &&
   cargo kani setup`, then `cargo kani -p shguard-syntax`. CI runs them in
