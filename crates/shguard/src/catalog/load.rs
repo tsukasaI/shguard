@@ -279,7 +279,12 @@ pub fn load_files(
     let mut seen: HashSet<String> = HashSet::new();
     for (index, (file_name, dto)) in rule_dtos.into_iter().enumerate() {
         let file = file_name.as_str();
-        if !seen.insert(dto.id.clone()) {
+        // The id is the only locator in rule errors and in the hook reason.
+        if dto.id.trim().is_empty() {
+            errs.push(LoadError::EmptyRuleId {
+                file: file.to_owned(),
+            });
+        } else if !seen.insert(dto.id.clone()) {
             errs.push(LoadError::DuplicateRuleId {
                 file: file.to_owned(),
                 rule: dto.id.clone(),
@@ -650,6 +655,19 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
         });
         return None;
     }
+    // The lexer accepts `~` only before `/` or at the end of a word, so a
+    // `~user` target could never match.
+    if t.pat
+        .strip_prefix('~')
+        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
+    {
+        errs.push(LoadError::TildeUserTarget {
+            file: file.to_owned(),
+            rule: rule.to_owned(),
+            pat: t.pat.clone(),
+        });
+        return None;
+    }
     let kind = match t.kind {
         PatKindDto::Exact => PatKind::Exact,
         PatKindDto::Prefix => PatKind::Prefix,
@@ -686,6 +704,16 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
             rule: rule.to_owned(),
             pat: t.pat.clone(),
             normal: full,
+        });
+        return None;
+    }
+    // Words are compared in normal form, where `./x` is `x`, so `.` as a
+    // `prefix` or `under` target reads as "anything relative" but covers only
+    // `.` (under) or dot names such as `.git` (prefix).
+    if t.pat == "." && !matches!(kind, PatKind::Exact) {
+        errs.push(LoadError::DotTarget {
+            file: file.to_owned(),
+            rule: rule.to_owned(),
         });
         return None;
     }

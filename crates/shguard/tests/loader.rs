@@ -298,6 +298,22 @@ fn duplicate_rule_id() {
 }
 
 #[test]
+fn empty_rule_id() {
+    for id in ["", " ", "\\t"] {
+        let t = format!(
+            "{}[[rule]]\nid = \"{id}\"\nkey = [\"rm\"]\noutcome = \"block\"\n",
+            row("\"rm\"", "")
+        );
+        assert!(
+            errors(&t)
+                .iter()
+                .any(|e| matches!(e, LoadError::EmptyRuleId { .. })),
+            "{id:?}"
+        );
+    }
+}
+
+#[test]
 fn bad_rule_key() {
     let t = format!(
         "{}[[rule]]\nid = \"r\"\nkey = []\noutcome = \"ask\"\n",
@@ -420,12 +436,33 @@ fn targets_must_be_in_normal_form() {
             "{pat}: {errs:?}"
         );
     }
+    for pat in ["~foo", "~root/.ssh", "~+", "~-"] {
+        for kind in ["exact", "prefix", "under"] {
+            let errs = errors(&target(pat, kind));
+            assert!(
+                errs.iter()
+                    .any(|e| matches!(e, LoadError::TildeUserTarget { .. })),
+                "{pat} {kind}: {errs:?}"
+            );
+        }
+    }
+    for kind in ["prefix", "under"] {
+        let errs = errors(&target(".", kind));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, LoadError::DotTarget { .. })),
+            "{kind}: {errs:?}"
+        );
+    }
     // Normal forms load, uppercase included; `under` is a kind.
     for (pat, kind) in [
         ("/", "prefix"),
         ("/", "under"),
         ("~", "under"),
+        ("~", "prefix"),
+        ("~/x", "exact"),
         (".", "exact"),
+        (".git", "prefix"),
         (".git", "under"),
         ("/ETC", "under"),
         ("~/.SSH", "prefix"),
