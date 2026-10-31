@@ -54,6 +54,9 @@ pub enum LoadError {
     /// A row sets both `changes_cwd` and `cwd_sensitive`.
     #[error("{file}: row `{row}`: sets both `changes_cwd` and `cwd_sensitive`")]
     ConflictingCwd { file: String, row: String },
+    /// A row under a `cwd_sensitive` parent row does not set `cwd_sensitive`.
+    #[error("{file}: row `{row}`: the parent row is `cwd_sensitive`, so this row must be too")]
+    CwdSensitiveParent { file: String, row: String },
     /// A row whose head the grammar cannot express (#1039) does not run code.
     #[error("{file}: row `{row}`: head is not expressible, so the row must set `runs_code`")]
     DenylistedHead { file: String, row: String },

@@ -484,6 +484,25 @@ fn cwd_sensitive_row_is_asked_after_cd() {
 }
 
 #[test]
+fn child_of_cwd_sensitive_row_must_be_cwd_sensitive() {
+    let parent = row("\"git\"", "cwd_sensitive = true\npositionals = []");
+    let t = format!("{parent}{}", row("\"git\", \"status\"", ""));
+    assert!(matches!(
+        errors(&t)[0],
+        LoadError::CwdSensitiveParent { .. }
+    ));
+    let cd = "[[row]]\nkey = [\"cd\"]\nsource = \"https://example.com/cd\"\norder = \"strict\"\ndashdash = \"literal\"\nplus_words = \"operand\"\npositionals = [\"path\"]\nchanges_cwd = true\n";
+    let ok = format!(
+        "{cd}{parent}{}",
+        row("\"git\", \"status\"", "cwd_sensitive = true")
+    );
+    let l = loaded(&ok);
+    assert_eq!(decision(&l, "git status"), Decision::Allow);
+    assert_eq!(decision(&l, "cd /x && git status"), Decision::Ask);
+    assert_eq!(decision(&l, "cd /x | git status"), Decision::Ask);
+}
+
+#[test]
 fn valid_catalog_equals_hand_built() {
     let text = format!(
         "{}{}{}{}{}{}",

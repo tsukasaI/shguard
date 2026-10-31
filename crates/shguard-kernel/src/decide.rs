@@ -96,7 +96,9 @@
 //!   selected row is `cwd_sensitive` and such an earlier command exists
 //!   (`cd /x && git status` reads `/x`'s `.git/config`).
 //!
-//! These checks read the raw lead: not folded, not normalized.
+//! The checks on words read the raw lead: not folded, not normalized.
+//! `SensitiveAfterCd` reads no word; it sits with them because it is
+//! decided by the same `cwd` state (`path_fail_row`).
 //!
 //! The same four checks apply to an inline path value
 //! (`inline_path_fails`). An empty value (`--file=`) is relative, so it fails
@@ -2019,6 +2021,12 @@ mod tests {
             after(Connector::And, &["cd", "/x"], &["ls"]),
             Decision::Allow,
         );
+        // In a pipeline after a cd it is Ask too.
+        let piped = Script::new(vec![AndOr::new(
+            pipe(vec![cmd(&["cd", "/x"]), cmd(&["git"])]),
+            Vec::new(),
+        )]);
+        check(piped, Decision::Ask);
     }
 
     #[test]
