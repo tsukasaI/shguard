@@ -1,0 +1,242 @@
+# The embedded gh catalog: read-only `pr`, `issue` and `run` subcommands.
+#
+# Only commands that print what GitHub returns are rows. Left out on purpose:
+# `--web`/`-w` (opens a browser), `gh api`, `gh auth`, `gh extension`,
+# `gh alias` and every subcommand that edits (`merge`, `create`, `close`,
+# `comment`, `rerun`, ...). A parent row has no options, so a global option
+# before the subcommand (`gh -R x pr view`) and an unlisted subcommand are
+# Unknown. `--watch` on `pr checks` only polls the API every `--interval`
+# seconds, so it is allowed; it can run until the tool's own timeout.
+#
+# Blocked (owner decision, #1088): `-R/--repo` and URL operands, because a
+# host in `-R host/o/r` or in `https://host/o/r/pull/1` sends the request,
+# and possibly a token (`GH_ENTERPRISE_TOKEN`), to that host; and every use
+# of `--jq`/`-q`, because a jq filter can print gh's environment (`env`,
+# `$ENV`), tokens included. `--template` stays: gh's template functions have
+# no file or exec access. The operands of `view`, `diff` and `checks` take
+# the `path` role so the URL rule can see them.
+#
+# gh reads the working directory's git remotes to pick the repository, so
+# every row is `cwd_sensitive`: `cd /x && gh pr list` is asked.
+
+[[row]]
+key = ["gh"]
+source = "https://cli.github.com/manual/gh"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+
+[[row]]
+key = ["gh", "pr"]
+source = "https://cli.github.com/manual/gh_pr"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+
+[[row]]
+key = ["gh", "issue"]
+source = "https://cli.github.com/manual/gh_issue"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+
+[[row]]
+key = ["gh", "run"]
+source = "https://cli.github.com/manual/gh_run"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+
+# ---- gh pr ----
+
+[[row]]
+key = ["gh", "pr", "view"]
+source = "https://cli.github.com/manual/gh_pr_view"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["path"]
+opt = [
+  { short = "c", long = "comments" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "pr", "list"]
+source = "https://cli.github.com/manual/gh_pr_list"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "a", long = "assignee", value = { takes = "inert" } },
+  { long = "app", value = { takes = "inert" } },
+  { short = "A", long = "author", value = { takes = "inert" } },
+  { short = "B", long = "base", value = { takes = "inert" } },
+  { short = "d", long = "draft" },
+  { short = "H", long = "head", value = { takes = "inert" } },
+  { short = "l", long = "label", value = { takes = "inert" } },
+  { short = "L", long = "limit", value = { takes = "inert" } },
+  { short = "S", long = "search", value = { takes = "inert" } },
+  { short = "s", long = "state", value = { takes = "inert" } },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "pr", "diff"]
+source = "https://cli.github.com/manual/gh_pr_diff"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["path"]
+opt = [
+  { long = "color", value = { takes = "inert" } },
+  { long = "name-only" },
+  { long = "patch" },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+# `--watch` polls only; `--interval` is its period in seconds.
+[[row]]
+key = ["gh", "pr", "checks"]
+source = "https://cli.github.com/manual/gh_pr_checks"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["path"]
+opt = [
+  { long = "fail-fast" },
+  { short = "i", long = "interval", value = { takes = "inert" } },
+  { long = "required" },
+  { long = "watch" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "pr", "status"]
+source = "https://cli.github.com/manual/gh_pr_status"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "c", long = "conflict-status" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+# ---- gh issue ----
+
+[[row]]
+key = ["gh", "issue", "view"]
+source = "https://cli.github.com/manual/gh_issue_view"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["path"]
+opt = [
+  { short = "c", long = "comments" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "issue", "list"]
+source = "https://cli.github.com/manual/gh_issue_list"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "a", long = "assignee", value = { takes = "inert" } },
+  { long = "app", value = { takes = "inert" } },
+  { short = "A", long = "author", value = { takes = "inert" } },
+  { short = "l", long = "label", value = { takes = "inert" } },
+  { short = "L", long = "limit", value = { takes = "inert" } },
+  { long = "mention", value = { takes = "inert" } },
+  { short = "m", long = "milestone", value = { takes = "inert" } },
+  { short = "S", long = "search", value = { takes = "inert" } },
+  { short = "s", long = "state", value = { takes = "inert" } },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+# ---- gh run ----
+
+# `--log` and `--log-failed` print the job logs.
+[[row]]
+key = ["gh", "run", "view"]
+source = "https://cli.github.com/manual/gh_run_view"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["path"]
+opt = [
+  { short = "a", long = "attempt", value = { takes = "inert" } },
+  { long = "exit-status" },
+  { short = "j", long = "job", value = { takes = "inert" } },
+  { long = "log" },
+  { long = "log-failed" },
+  { short = "v", long = "verbose" },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+[[row]]
+key = ["gh", "run", "list"]
+source = "https://cli.github.com/manual/gh_run_list"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+opt = [
+  { short = "a", long = "all" },
+  { short = "b", long = "branch", value = { takes = "inert" } },
+  { short = "c", long = "commit", value = { takes = "inert" } },
+  { long = "created", value = { takes = "inert" } },
+  { short = "e", long = "event", value = { takes = "inert" } },
+  { short = "L", long = "limit", value = { takes = "inert" } },
+  { short = "s", long = "status", value = { takes = "inert" } },
+  { short = "u", long = "user", value = { takes = "inert" } },
+  { short = "w", long = "workflow", value = { takes = "inert" } },
+  { long = "json", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+# Rules. A rule only raises a decision.
+
+# `-R/--repo` can name another host.
+[[rule]]
+id = "gh-repo-option"
+key = ["gh"]
+opts = [["-R", "--repo"]]
+outcome = "block"
+
+# A URL operand can name another host.
+[[rule]]
+id = "gh-url-operand"
+key = ["gh"]
+targets = [{ pat = "https:", kind = "prefix" }, { pat = "http:", kind = "prefix" }]
+outcome = "block"
+
+# A jq filter can print gh's environment, tokens included.
+[[rule]]
+id = "gh-jq"
+key = ["gh"]
+opts = [["-q", "--jq"]]
+outcome = "block"
