@@ -1,6 +1,7 @@
 //! Turns catalog TOML into kernel values and checks the whole set.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use shguard_kernel::ast::{Opaque, Part};
 use shguard_kernel::bytes::normalize_path;
@@ -179,29 +180,79 @@ pub fn parse_file(name: &str, text: &str) -> Result<ParsedFile, LoadError> {
         })
 }
 
-/// Parses the user config: `ask_outcome` plus rows and rules in the catalog
-/// schema. The rows and rules come back as a catalog file to be merged with
-/// the others.
+/// The settings of the user config other than its rows and rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigHead {
+    /// What an Ask becomes.
+    pub ask_outcome: AskOutcome,
+    /// Where to append one JSON line per decision, if anywhere.
+    pub decision_log: Option<PathBuf>,
+}
+
+/// Top-level keys of the shguard 0.9 user config that this schema lacks.
+const LEGACY_KEYS: &[&str] = &[
+    "deny",
+    "ask",
+    "allow",
+    "redirect",
+    "pipeline",
+    "escalation_floor",
+    "decision_log_path",
+];
+
+/// Parses the user config: `ask_outcome` and `decision_log` plus rows and
+/// rules in the catalog schema. The rows and rules come back as a catalog
+/// file to be merged with the others.
 ///
 /// # Errors
 ///
-/// [`LoadError::Toml`] if the text is not valid TOML or does not match the
-/// schema.
-pub fn parse_config(name: &str, text: &str) -> Result<(AskOutcome, ParsedFile), LoadError> {
-    toml::from_str::<ConfigDto>(text)
-        .map(|c| {
-            (
-                c.ask_outcome,
-                ParsedFile(FileDto {
-                    row: c.row,
-                    rule: c.rule,
-                }),
-            )
-        })
-        .map_err(|source| LoadError::Toml {
-            file: name.to_owned(),
-            source,
-        })
+/// [`LoadError::LegacyConfig`] if the text is a shguard 0.9 config,
+/// [`LoadError::Toml`] if it is otherwise not valid TOML or does not match
+/// the schema, and [`LoadError::DecisionLogNotAbsolute`].
+pub fn parse_config(name: &str, text: &str) -> Result<(ConfigHead, ParsedFile), LoadError> {
+    let c = match toml::from_str::<ConfigDto>(text) {
+        Ok(c) => c,
+        Err(source) if is_legacy(text) => {
+            drop(source);
+            return Err(LoadError::LegacyConfig {
+                file: name.to_owned(),
+            });
+        }
+        Err(source) => {
+            return Err(LoadError::Toml {
+                file: name.to_owned(),
+                source,
+            });
+        }
+    };
+    let decision_log = match c.decision_log.map(PathBuf::from) {
+        Some(p) if !p.is_absolute() => {
+            return Err(LoadError::DecisionLogNotAbsolute {
+                file: name.to_owned(),
+            });
+        }
+        other => other,
+    };
+    Ok((
+        ConfigHead {
+            ask_outcome: c.ask_outcome,
+            decision_log,
+        },
+        ParsedFile(FileDto {
+            row: c.row,
+            rule: c.rule,
+        }),
+    ))
+}
+
+/// The text is TOML whose top level has a 0.9-only key, or an
+/// `ask_outcome` table (0.9 also took a table there).
+fn is_legacy(text: &str) -> bool {
+    let Ok(table) = toml::from_str::<toml::Table>(text) else {
+        return false;
+    };
+    LEGACY_KEYS.iter().any(|k| table.contains_key(*k))
+        || table.get("ask_outcome").is_some_and(toml::Value::is_table)
 }
 
 /// Merges and checks parsed files. `errs` are the errors found while

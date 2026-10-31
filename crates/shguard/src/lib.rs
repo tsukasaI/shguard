@@ -3,5 +3,7 @@
 
 pub mod catalog;
 pub mod config;
+pub mod decision_log;
 pub mod hook;
+pub mod init;
 pub mod respond;

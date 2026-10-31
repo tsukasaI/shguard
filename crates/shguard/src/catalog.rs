@@ -15,4 +15,6 @@ mod load;
 pub use dto::AskOutcome;
 pub use embedded::EMBEDDED;
 pub use error::LoadError;
-pub use load::{Loaded, ParsedFile, Source, load, load_files, parse_config, parse_file};
+pub use load::{
+    ConfigHead, Loaded, ParsedFile, Source, load, load_files, parse_config, parse_file,
+};
