@@ -182,12 +182,15 @@ fn append_log(path: &Path, command: Option<&str>, response: &Response) -> std::i
     file.write_all(&line)
 }
 
+/// The opened file is the file at the path and has no other name: a hard
+/// link (`ln ~/.bashrc log.jsonl`) would pass every symlink check.
 #[cfg(unix)]
 fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
+    a.dev() == b.dev() && a.ino() == b.ino() && a.nlink() == 1
 }
 
+/// Best effort off unix: no file identity is compared.
 #[cfg(not(unix))]
 fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
     a.is_file() && b.is_file() && a.len() == b.len()
