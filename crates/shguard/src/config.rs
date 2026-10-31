@@ -5,6 +5,7 @@
 //!
 //! ```toml
 //! ask_outcome = "deny"   # or "ask"; default "deny"
+//! decision_log = "/abs/path/decisions.jsonl"   # optional; off by default
 //!
 //! [[row]]    # exactly the catalog row schema; `source` is required
 //! [[rule]]   # exactly the catalog rule schema; outcome "block" or "ask"
@@ -17,6 +18,9 @@
 //! that. Under `ask_outcome = "ask"` an embedded Block holds only for
 //! commands the catalog covers: an unknown option makes the command
 //! uncovered, so it is an Ask. `SHGUARD_CONFIG` must be an absolute path.
+//! `decision_log` must be absolute; each line holds the command text, so the
+//! file can hold secrets that were typed on a command line. A 0.9 config
+//! (`[[deny]]`, `[[ask]]`, ...) is a load error that says to migrate.
 //! To distrust a row, add a `[[rule]]` instead. A
 //! rule with a key and no `opts` or `targets` hits every command under that
 //! key, so `[[rule]] key = ["rm"] outcome = "ask"` makes every `rm` an Ask.
@@ -32,6 +36,8 @@ use crate::catalog::{LoadError, Loaded, Source, load_files, parse_config, parse_
 pub struct Settings {
     /// What an Ask becomes.
     pub ask_outcome: AskOutcome,
+    /// Where to append one JSON line per decision, if anywhere.
+    pub decision_log: Option<PathBuf>,
     /// The merged catalog and rules.
     pub loaded: Loaded,
 }
@@ -93,10 +99,12 @@ pub fn settings(
         }
     }
     let mut ask_outcome = AskOutcome::default();
+    let mut decision_log = None;
     if let Some((name, text)) = config {
         match parse_config(name, text) {
-            Ok((ask, f)) => {
-                ask_outcome = ask;
+            Ok((head, f)) => {
+                ask_outcome = head.ask_outcome;
+                decision_log = head.decision_log;
                 files.push((name.to_owned(), f));
             }
             Err(e) => errs.push(e),
@@ -105,6 +113,7 @@ pub fn settings(
     let loaded = load_files(files, errs)?;
     Ok(Settings {
         ask_outcome,
+        decision_log,
         loaded,
     })
 }
@@ -147,5 +156,52 @@ mod tests {
         assert!(matches!(default, Ok(s) if s.ask_outcome == AskOutcome::Deny));
         assert!(settings(&[], Some(("c", "bogus = 1\n"))).is_err());
         assert!(settings(&[], Some(("c", "ask_outcome = \"allow\"\n"))).is_err());
+    }
+
+    fn first_error(text: &str) -> LoadError {
+        match settings(&[], Some(("c", text))) {
+            Ok(_) => panic!("`{text}` loads"),
+            Err(mut e) => e.remove(0),
+        }
+    }
+
+    #[test]
+    fn decision_log_must_be_absolute() {
+        let ok = settings(&[], Some(("c", "decision_log = \"/var/log/d.jsonl\"\n")));
+        assert!(matches!(ok, Ok(s) if s.decision_log == Some(PathBuf::from("/var/log/d.jsonl"))));
+        assert!(matches!(
+            first_error("decision_log = \"d.jsonl\"\n"),
+            LoadError::DecisionLogNotAbsolute { .. }
+        ));
+    }
+
+    #[test]
+    fn a_09_config_is_reported_as_one() {
+        for text in [
+            "[[deny]]\nid = \"d\"\nreason = \"r\"\ncommand = \"x\"\n",
+            "[[ask]]\nid = \"a\"\nreason = \"r\"\ncommand = \"gh\"\n",
+            "[[allow]]\nid = \"a\"\nreason = \"r\"\ncommand = \"rm\"\n",
+            "[[redirect]]\nid = \"r\"\n",
+            "[[pipeline]]\nid = \"p\"\n",
+            "escalation_floor = \"deny\"\n",
+            "decision_log_path = \"/x\"\n",
+            "ask_outcome = { default = \"ask\" }\n",
+            "ask_outcome = \"ask\"\n[[deny]]\nid = \"d\"\nreason = \"r\"\ncommand = \"x\"\n",
+        ] {
+            assert!(
+                matches!(first_error(text), LoadError::LegacyConfig { .. }),
+                "{text}"
+            );
+        }
+        // Not TOML, or an unknown key that 0.9 did not have either: a
+        // plain TOML error.
+        for text in ["this is = not toml [", "bogus = 1\n"] {
+            assert!(
+                matches!(first_error(text), LoadError::Toml { .. }),
+                "{text}"
+            );
+        }
+        // A 0.9 config of comments only (what 0.9's init wrote) loads.
+        assert!(settings(&[], Some(("c", "# [[deny]]\n# id = \"x\"\n"))).is_ok());
     }
 }

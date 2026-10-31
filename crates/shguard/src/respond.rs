@@ -33,15 +33,28 @@ enum Judged {
 /// The hook output for one stdin.
 #[must_use]
 pub fn respond(stdin: &[u8], settings: Result<&Settings, &[LoadError]>) -> Value {
-    render(&response(stdin, settings))
+    render(&answer(stdin, settings).1)
 }
 
-fn response(stdin: &[u8], settings: Result<&Settings, &[LoadError]>) -> Response {
+/// The Bash command of one stdin, if it had one, and the answer to it.
+#[must_use]
+pub fn answer(
+    stdin: &[u8],
+    settings: Result<&Settings, &[LoadError]>,
+) -> (Option<String>, Response) {
     let request = if stdin.len() > INPUT_CAP {
         Request::Malformed("hook input is larger than 1 MiB")
     } else {
         parse_request(stdin)
     };
+    let command = match &request {
+        Request::Command(c) => Some(c.clone()),
+        Request::NotBash | Request::Malformed(_) => None,
+    };
+    (command, response(request, settings))
+}
+
+fn response(request: Request, settings: Result<&Settings, &[LoadError]>) -> Response {
     if request == Request::NotBash {
         return Response::NoDecision;
     }

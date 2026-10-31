@@ -13,12 +13,14 @@ pub(super) struct FileDto {
     pub(super) rule: Vec<RuleDto>,
 }
 
-/// The user config: `ask_outcome` plus rows and rules in the catalog schema.
+/// The user config: `ask_outcome`, `decision_log`, plus rows and rules in
+/// the catalog schema.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ConfigDto {
     #[serde(default)]
     pub(super) ask_outcome: AskOutcome,
+    pub(super) decision_log: Option<String>,
     #[serde(default)]
     pub(super) row: Vec<RowDto>,
     #[serde(default)]

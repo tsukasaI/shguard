@@ -72,6 +72,17 @@ pub enum LoadError {
     /// that of a `runs_code` row. `item` is "row `key`" or "rule `id`".
     #[error("{file}: {item}: key segment starts with `-` or `+`")]
     OptionLikeKey { file: String, item: String },
+    /// The config is in the shguard 0.9 format (`[[deny]]`, `[[ask]]`,
+    /// `[[allow]]`, `decision_log_path`, ...), which this version cannot
+    /// read. The text names no config content.
+    #[error(
+        "{file}: this is a shguard 0.9 config, which this version cannot read; \
+         move it aside, run `shguard init`, and re-add your rules as [[rule]] entries (see the README)"
+    )]
+    LegacyConfig { file: String },
+    /// `decision_log` is not an absolute path.
+    #[error("{file}: `decision_log` must be an absolute path")]
+    DecisionLogNotAbsolute { file: String },
     /// A file could not be read.
     #[error("{file}: {source}")]
     Read {

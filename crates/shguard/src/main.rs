@@ -4,17 +4,20 @@
 
 use std::ffi::OsString;
 use std::io::{IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use shguard::catalog::{EMBEDDED, LoadError, Source, load};
 use shguard::config::{Location, Settings, locate, settings};
-use shguard::hook::{panic_output, to_bytes};
-use shguard::respond::{INPUT_CAP, respond};
+use shguard::hook::{Response, panic_output, render, to_bytes};
+use shguard::respond::{INPUT_CAP, answer};
+use shguard::{decision_log, init};
 
 const USAGE: &str = "\
 usage: shguard                          run as a Claude Code PreToolUse hook (JSON on stdin)
        shguard check <catalog.toml>...  check catalog files
+       shguard init                     write a config and print the settings.json hook entry
        shguard --help | --version
 ";
 
@@ -30,6 +33,7 @@ fn main() -> ExitCode {
             let paths: Vec<PathBuf> = rest.iter().map(PathBuf::from).collect();
             check(&paths, &mut std::io::stderr().lock())
         }
+        Some((cmd, [])) if cmd == "init" => init_config(),
         Some((flag, [])) if flag == "--help" || flag == "-h" => {
             drop(std::io::stdout().lock().write_all(USAGE.as_bytes()));
             ExitCode::SUCCESS
@@ -79,10 +83,29 @@ fn hook() -> ExitCode {
         input.clear();
     }
     let loaded = load_settings();
-    let answer = respond(&input, loaded.as_ref().map_err(Vec::as_slice));
+    let (command, response) = answer(&input, loaded.as_ref().map_err(Vec::as_slice));
     let mut out = std::io::stdout().lock();
-    match out.write_all(&to_bytes(&answer)).and_then(|()| out.flush()) {
-        Ok(()) => ExitCode::SUCCESS,
+    match out
+        .write_all(&to_bytes(&render(&response)))
+        .and_then(|()| out.flush())
+    {
+        Ok(()) => {
+            // The answer is out; the log can no longer change it, and a log
+            // failure is only reported.
+            if let Ok(Settings {
+                decision_log: Some(path),
+                ..
+            }) = &loaded
+                && let Err(e) = append_log(path, command.as_deref(), &response)
+            {
+                drop(writeln!(
+                    std::io::stderr().lock(),
+                    "shguard: cannot write the decision log {}: {e}",
+                    path.display()
+                ));
+            }
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             drop(writeln!(
                 std::io::stderr().lock(),
@@ -91,6 +114,98 @@ fn hook() -> ExitCode {
             ExitCode::from(EXIT_BLOCK)
         }
     }
+}
+
+/// Appends one line to the decision log. A symlink at the path is refused,
+/// so a planted link cannot turn the log into a write to another file.
+fn append_log(path: &Path, command: Option<&str>, response: &Response) -> std::io::Result<()> {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let Some(line) = decision_log::entry(secs, command, response)
+        .as_ref()
+        .and_then(decision_log::line)
+    else {
+        return Ok(());
+    };
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the path is a symlink",
+        ));
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(&line)
+}
+
+/// `shguard init`: writes the config to where the hook will look for it,
+/// never over an existing file, and prints the settings.json hook entry.
+fn init_config() -> ExitCode {
+    let mut err = std::io::stderr().lock();
+    let path = match locate(std::env::var_os("SHGUARD_CONFIG"), std::env::var_os("HOME")) {
+        Location::Default(p) | Location::Explicit(p) => p,
+        Location::Relative(p) => {
+            drop(writeln!(
+                err,
+                "shguard init: SHGUARD_CONFIG must be an absolute path: {}",
+                p.display()
+            ));
+            return ExitCode::FAILURE;
+        }
+        Location::Nowhere => {
+            drop(writeln!(
+                err,
+                "shguard init: set HOME or SHGUARD_CONFIG to say where the config goes"
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
+    if std::fs::symlink_metadata(&path).is_ok() {
+        drop(writeln!(
+            err,
+            "shguard init: {} exists; move it aside first (a shguard 0.9 config cannot be read by this version)",
+            path.display()
+        ));
+        return ExitCode::FAILURE;
+    }
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+        })
+        .and_then(|mut f| f.write_all(init::CONFIG_TEXT.as_bytes()));
+    if let Err(e) = written {
+        drop(writeln!(
+            err,
+            "shguard init: cannot write {}: {e}",
+            path.display()
+        ));
+        return ExitCode::FAILURE;
+    }
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_else(|| "shguard".to_owned());
+    let snippet = serde_json::to_string_pretty(&init::settings_snippet(&exe)).unwrap_or_default();
+    drop(writeln!(
+        std::io::stdout().lock(),
+        "shguard init: wrote {}\n\n\
+         Add this hook to ~/.claude/settings.json (merge it into an existing \"hooks\" key).\n\
+         \"onFailure\": \"block\" makes a crash or timeout refuse the call; it needs Claude Code 2.1.295 or later.\n\n\
+         {snippet}",
+        path.display()
+    ));
+    ExitCode::SUCCESS
 }
 
 /// Reads the config named by the environment and merges it with the embedded
