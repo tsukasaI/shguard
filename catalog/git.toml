@@ -15,8 +15,10 @@
 # The parent row. It lists no option on purpose: a global option (`-C`,
 # `-c`, `--git-dir`, `--work-tree`, `--no-pager`, `--exec-path`) changes the
 # directory, the config or the program run, so `git -C /x status` is Unknown
-# and asked. It takes no operand either, so any subcommand without a row
-# below (`reset`, `clean`, `checkout`, `commit`, `rebase`, ...) is Unknown and
+# and asked. `cd /x && git status` is not: after a `cd` the kernel asks only
+# relative path words, and `git status` has none (a needs-decision issue).
+# The row takes no operand either, so any subcommand without a row below
+# (`reset`, `clean`, `checkout`, `commit`, `rebase`, ...) is Unknown and
 # asked; they have no rows, hence no rules.
 [[row]]
 key = ["git"]
@@ -26,7 +28,8 @@ dashdash = "ends"
 positionals = []
 
 # Left out: --output (writes a file), --ext-diff and --textconv (run
-# configured programs), --show-signature (runs gpg), -O<orderfile>, -L, -c,
+# configured programs), --show-signature (runs gpg; the `%G?`-style format
+# placeholders of --pretty/--format still do, which is P3), -O<orderfile>, -L, -c,
 # -C, --no-pager (a global option), -<number> and the abbreviated long
 # options (git accepts `--max-c=5`; here only the full name matches).
 # Revisions and paths share one operand slot, so both take the `path` role:
@@ -977,7 +980,8 @@ outcome = "ask"
 
 # An absolute or `~` path (a local remote, a file outside the repository,
 # an `-X` exclude file) is asked: `git diff ~/.ssh/k /dev/null` outside a
-# repository prints the file.
+# repository prints the file. A relative local remote (`git push sub/repo
+# main`, `git push . main:x`) is not: a target cannot tell it from a refspec.
 [[rule]]
 id = "git-absolute-path"
 key = ["git"]
