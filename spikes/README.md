@@ -45,9 +45,9 @@ is about the same.
     fns.
   - Loop variants are proved even without `terminates`: mutant
     `vc_mutant_spin ✘ (1/2)`.
-  - `vec![x; n]` (→ `std::vec::from_elem`) is **not** terminates;
-    `Vec::new` and `push` are (M3's `normalize_path`). The error is "called program function `std::vec::from_elem`
-    in program (terminates) context".
+  - `vec![x; n]` (→ `std::vec::from_elem`) is **not** terminates; `Vec::new`
+    and `push` are (see M3's `normalize_path`). The error is "called program
+    function `std::vec::from_elem` in program (terminates) context".
 - Ghost: `#[check(ghost)]` (used on `join`).
 - Loop invariants: `#[invariant(..)]` placed directly on `while`.
 - Quantifiers: `forall<i> 0 <= i && i < s.len() ==> ..`, or with types:
