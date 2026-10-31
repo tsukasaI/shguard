@@ -205,7 +205,9 @@ pub enum Cwd {
     /// The command leaves the working directory alone, but what it does
     /// depends on configuration found there (`git` reads `.git/config`,
     /// which can name programs to run), so it is asked after an earlier
-    /// command that changes the working directory.
+    /// command that changes the working directory. Only the selected row is
+    /// read, so every row under a `Sensitive` row must be `Sensitive` too;
+    /// the catalog loader enforces that, the kernel does not.
     Sensitive,
     /// The command leaves the working directory alone.
     Keeps,

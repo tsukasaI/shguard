@@ -500,6 +500,14 @@ fn child_of_cwd_sensitive_row_must_be_cwd_sensitive() {
     assert_eq!(decision(&l, "git status"), Decision::Allow);
     assert_eq!(decision(&l, "cd /x && git status"), Decision::Ask);
     assert_eq!(decision(&l, "cd /x | git status"), Decision::Ask);
+
+    // Every level is checked against its own parent.
+    let mid = row("\"git\", \"remote\"", "cwd_sensitive = true");
+    let t = format!("{parent}{mid}{}", row("\"git\", \"remote\", \"show\"", ""));
+    assert!(matches!(
+        errors(&t)[0],
+        LoadError::CwdSensitiveParent { .. }
+    ));
 }
 
 #[test]
