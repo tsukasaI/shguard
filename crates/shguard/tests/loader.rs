@@ -412,7 +412,7 @@ fn targets_must_be_in_normal_form() {
             "{pat}: {errs:?}"
         );
     }
-    for pat in [".git/", "~/", "/etc/"] {
+    for pat in [".git/", "~/", "/etc/", "~/.", "~//"] {
         let errs = errors(&target(pat, "prefix"));
         assert!(
             errs.iter()

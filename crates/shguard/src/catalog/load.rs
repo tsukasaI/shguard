@@ -569,10 +569,21 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
         PatKindDto::Prefix => PatKind::Prefix,
         PatKindDto::Under => PatKind::Under,
     };
+    let (head, body) = match t.pat.strip_prefix('~') {
+        Some(rest) => ("~", rest),
+        None => ("", t.pat.as_str()),
+    };
+    let normal = normalize_path(body.as_bytes());
+    let full = format!("{head}{}", String::from_utf8_lossy(&normal));
     // A `prefix` that ends in `/` is a component match spelled as a byte
     // prefix, and the kernel's normalized key drops that `/` (`.git/` would
-    // cover `.github`); `under` says it without the `/`.
-    if matches!(kind, PatKind::Prefix) && t.pat.len() > 1 && t.pat.ends_with('/') {
+    // cover `.github`); `under` says it without the `/`. A target whose
+    // normal form ends in `/` (`~/.` is `~/`) gets this error directly, not
+    // a "write `~/`" that this check would then reject.
+    if matches!(kind, PatKind::Prefix)
+        && full != "/"
+        && (t.pat.ends_with('/') || full.ends_with('/'))
+    {
         errs.push(LoadError::PrefixEndsInSlash {
             file: file.to_owned(),
             rule: rule.to_owned(),
@@ -583,17 +594,12 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
     // The kernel compares normalized words with normalized targets, so a
     // target out of normal form (`./x`, `a//b`, `x/`) means at best the same
     // as its normal form; require that form. This check has no proof.
-    let (head, body) = match t.pat.strip_prefix('~') {
-        Some(rest) => ("~", rest),
-        None => ("", t.pat.as_str()),
-    };
-    let normal = normalize_path(body.as_bytes());
     if normal != body.as_bytes() {
         errs.push(LoadError::TargetNotNormal {
             file: file.to_owned(),
             rule: rule.to_owned(),
             pat: t.pat.clone(),
-            normal: format!("{head}{}", String::from_utf8_lossy(&normal)),
+            normal: full,
         });
         return None;
     }

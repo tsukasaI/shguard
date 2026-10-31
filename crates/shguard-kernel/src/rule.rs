@@ -56,6 +56,13 @@ pub enum PatKind {
 /// A `/`-led pattern never covers a word that starts with `~`: to cover the
 /// home directory, add a `~` `Prefix` or `Under` target as well (see
 /// [`crate::decide`] for how patterns match).
+///
+/// A pattern with a non-ASCII byte, or an `Exact` or `Under` pattern with a
+/// `..` segment, is matched like any other, but every word it matches
+/// already fails a path check (`PathNonAscii`, `PathDotDot`), so the
+/// command is Ask anyway: on an Ask rule such a target never changes the
+/// decision, and only a Block rule can raise it. (A `Prefix` `..` also
+/// matches `..x`, which passes the checks.)
 #[derive(Clone, Debug)]
 #[cfg_attr(not(creusot), derive(PartialEq, Eq))]
 pub struct Pat {

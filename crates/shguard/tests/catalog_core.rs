@@ -373,7 +373,14 @@ fn case_variants_of_blocked_paths_are_not_allowed() {
 #[test]
 fn under_targets_stop_at_a_component_boundary() {
     assert_all(
-        &["rm -r /etc", "rm -r /etc/", "rm -r /etc/x", "cp x /dev/sda"],
+        &[
+            "rm -r /etc",
+            "rm -r /etc/",
+            "rm -r /etc/x",
+            "cp x /dev/sda",
+            "rm -r /lib64",
+            "rm -r /lib32/x",
+        ],
         Decision::Block,
     );
     // Not below the target: only the absolute-path Ask.
