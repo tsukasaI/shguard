@@ -272,6 +272,23 @@ fn url_remotes_are_asked() {
 }
 
 #[test]
+fn git_after_a_cd_is_asked() {
+    assert_all(
+        &[
+            "cd /tmp/x && git status",
+            "cd /tmp/x && git ls-files",
+            "cd /tmp/x && git diff",
+            "cd / && git log -p",
+            "cd sub && git status",
+            "cd /tmp/x; git",
+            "cd /tmp/x || git branch",
+        ],
+        Decision::Ask,
+    );
+    assert_all(&["git status; cd /tmp/x"], Decision::Allow);
+}
+
+#[test]
 fn git_cannot_be_chained_into_an_allow() {
     assert_not_allow(&[
         "git log; git reset --hard",

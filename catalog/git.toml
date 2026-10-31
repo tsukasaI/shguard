@@ -15,14 +15,15 @@
 # The parent row. It lists no option on purpose: a global option (`-C`,
 # `-c`, `--git-dir`, `--work-tree`, `--no-pager`, `--exec-path`) changes the
 # directory, the config or the program run, so `git -C /x status` is Unknown
-# and asked. `cd /x && git status` is not: after a `cd` the kernel asks only
-# relative path words, and `git status` has none (a needs-decision issue).
-# The row takes no operand either, so any subcommand without a row below
-# (`reset`, `clean`, `checkout`, `commit`, `rebase`, ...) is Unknown and
-# asked; they have no rows, hence no rules.
+# and asked. `cwd_sensitive` asks `cd /x && git status` the same way: git
+# reads `/x`'s `.git/config`. Every row below sets it too, as the loader
+# requires. The row takes no operand either, so any subcommand without a
+# row below (`reset`, `clean`, `checkout`, `commit`, `rebase`, ...) is
+# Unknown and asked; they have no rows, hence no rules.
 [[row]]
 key = ["git"]
 source = "https://git-scm.com/docs/git"
+cwd_sensitive = true
 order = "strict"
 dashdash = "ends"
 positionals = []
@@ -37,6 +38,7 @@ positionals = []
 [[row]]
 key = ["git", "log"]
 source = "https://git-scm.com/docs/git-log https://git-scm.com/docs/git-rev-list https://git-scm.com/docs/diff-options"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -289,6 +291,7 @@ long = "no-decorate"
 [[row]]
 key = ["git", "diff"]
 source = "https://git-scm.com/docs/git-diff https://git-scm.com/docs/diff-options"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -442,6 +445,7 @@ long = "quiet"
 [[row]]
 key = ["git", "show"]
 source = "https://git-scm.com/docs/git-show https://git-scm.com/docs/diff-options"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -602,6 +606,7 @@ long = "relative-date"
 [[row]]
 key = ["git", "status"]
 source = "https://git-scm.com/docs/git-status"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -647,6 +652,7 @@ short = "z"
 [[row]]
 key = ["git", "rev-parse"]
 source = "https://git-scm.com/docs/git-rev-parse"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -700,6 +706,7 @@ value = { optional = "inert" }
 [[row]]
 key = ["git", "ls-files"]
 source = "https://git-scm.com/docs/git-ls-files"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -772,6 +779,7 @@ value = { takes = "inert" }
 [[row]]
 key = ["git", "blame"]
 source = "https://git-scm.com/docs/git-blame"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -831,6 +839,7 @@ value = { optional = "inert" }
 [[row]]
 key = ["git", "branch"]
 source = "https://git-scm.com/docs/git-branch"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 positionals = []
@@ -890,6 +899,7 @@ long = "no-abbrev"
 [[row]]
 key = ["git", "push"]
 source = "https://git-scm.com/docs/git-push"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
