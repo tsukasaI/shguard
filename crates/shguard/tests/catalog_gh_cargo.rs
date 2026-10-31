@@ -43,8 +43,8 @@ fn every_gh_row_has_an_allowed_command() {
         "gh pr view",
         "gh pr view 1",
         "gh pr view 1 --comments",
-        "gh pr view 1 --json title,body --jq .title",
-        "gh pr view 1 -R owner/repo -t '{{.title}}'",
+        "gh pr view 1 --json title,body",
+        "gh pr view 1 --json title -t '{{.title}}'",
         "gh pr list",
         "gh pr list --state open --label bug --author me --limit 5",
         "gh pr list -S 'is:open' -L 10 --json number",
@@ -56,7 +56,7 @@ fn every_gh_row_has_an_allowed_command() {
         "gh pr status",
         "gh pr status --json currentBranch",
         "gh issue view 5 --comments",
-        "gh issue view 5 --json title -q .title",
+        "gh issue view 5 --json title",
         "gh issue list",
         "gh issue list --state all --search foo --milestone v1",
         "gh run view 123",
@@ -66,6 +66,74 @@ fn every_gh_row_has_an_allowed_command() {
         "gh run list --workflow ci.yaml --branch main -L 5",
         "gh run list --json status,conclusion",
     ]);
+}
+
+#[test]
+fn gh_repo_option_url_operand_and_jq_are_blocked() {
+    let l = embedded();
+    for cmd in [
+        "gh pr view 1 -R o/r",
+        "gh pr view 1 --repo o/r",
+        "gh pr view 1 --repo=evil.example/o/r",
+        "gh pr list -R o/r",
+        "gh pr diff 1 -R o/r",
+        "gh pr checks 1 -R o/r",
+        "gh pr status -R o/r",
+        "gh issue view 1 -R o/r",
+        "gh issue list -R o/r",
+        "gh run view 1 -R o/r",
+        "gh run list -R o/r",
+        "gh pr view https://x/o/r/pull/1",
+        "gh pr view http://x/o/r/pull/1",
+        "gh pr view HTTPS://x/o/r/pull/1",
+        "gh pr diff https://x/o/r/pull/1",
+        "gh pr checks https://x/o/r/pull/1",
+        "gh issue view https://x/o/r/issues/1",
+        "gh run view https://x/o/r/actions/runs/1",
+        "gh pr view -- https://x/o/r/pull/1",
+        "gh pr view 1 --json title --jq .title",
+        "gh pr view 1 --json title --jq=env",
+        "gh pr view 1 --json title -q env",
+        "gh pr list --json number -q '$ENV'",
+        "gh pr checks --json name --jq .",
+        "gh pr status --json state --jq .",
+        "gh issue view 5 --json title -q .title",
+        "gh issue list --json number --jq .",
+        "gh run view 1 --json status --jq .",
+        "gh run list --json status --jq .",
+    ] {
+        assert_eq!(decide(&l, cmd), Decision::Block, "`{cmd}`");
+    }
+    assert_allow(&["gh pr view 1"]);
+}
+
+#[test]
+fn gh_and_cargo_after_a_cd_are_asked() {
+    let l = embedded();
+    for cmd in [
+        "cd /tmp/x && gh",
+        "cd /tmp/x && gh pr list",
+        "cd /tmp/x && gh pr view 1",
+        "cd /tmp/x && gh pr diff 1",
+        "cd /tmp/x && gh pr checks 1",
+        "cd /tmp/x && gh pr status",
+        "cd /tmp/x && gh issue view 1",
+        "cd /tmp/x && gh issue list",
+        "cd /tmp/x && gh run view 1",
+        "cd /tmp/x && gh run list",
+        "cd sub; gh pr status",
+        "cd /tmp/x && cargo",
+        "cd /tmp/x && cargo build",
+        "cd /tmp/x && cargo check",
+        "cd /tmp/x && cargo test",
+        "cd /tmp/x && cargo clippy",
+        "cd /tmp/x && cargo fmt --check",
+        "cd /tmp/x && cargo doc --no-deps",
+        "cd sub || cargo build",
+    ] {
+        assert_eq!(decide(&l, cmd), Decision::Ask, "`{cmd}`");
+    }
+    assert_allow(&["gh pr list; cd /tmp/x", "cargo build && cd /tmp/x"]);
 }
 
 #[test]
@@ -178,6 +246,24 @@ fn every_cargo_row_has_a_non_allowed_command() {
         "cargo doc -- --x",
         "cargo doc --manifest-path /x/Cargo.toml",
     ]);
+}
+
+#[test]
+fn cargo_child_flags_that_write_or_load_are_asked() {
+    let l = embedded();
+    for cmd in [
+        "cargo test -- --logfile /tmp/x",
+        "cargo test -- --logfile x",
+        "cargo test -- --logfile=x",
+        "cargo test --workspace -- --logfile ~/.bashrc",
+        "cargo clippy -- @args",
+        "cargo clippy -- @/tmp/args",
+        "cargo fmt -- --config-path=/x",
+        "cargo fmt -- --config-path /x",
+        "cargo fmt -- --config-path x",
+    ] {
+        assert_eq!(decide(&l, cmd), Decision::Ask, "`{cmd}`");
+    }
 }
 
 #[test]

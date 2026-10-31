@@ -13,21 +13,29 @@
 # `cargo fmt` without `--check` rewrites source files in place.
 #
 # `--` ends cargo's options (`dashdash = "ends"`); what follows goes to the
-# child program, so a `--config` after `--` is not cargo's. test: the test
-# binary's flags are inert. clippy and fmt: the words after `--` are read as
-# paths, so the rules below can Ask for the flags of rustc/rustfmt that load
-# code or write files (`-Z`, `-C`, `--print-config`, ...). build, check and
-# doc have no operands, so a word after `--` is Unknown.
+# child program, so a `--config` after `--` is not cargo's. test, clippy and
+# fmt: the words after `--` are read as paths, so the rules below can Ask
+# for the flags of the test binary, rustc and rustfmt that load code or
+# write files (`--logfile`, `-Z`, `-C`, `@argfile`, `--print-config`, ...).
+# clippy and fmt also take these words before `--` (cargo passes unknown
+# operands on); they are the same `path` words, so the same rules see them.
+# build, check and doc have no operands, so a word after `--` is Unknown.
+#
+# cargo reads `.cargo/config.toml` from the working directory and its
+# parents, and a build runs the package's build.rs, so every row is
+# `cwd_sensitive`: `cd /x && cargo build` is asked.
 
 [[row]]
 key = ["cargo"]
 source = "https://doc.rust-lang.org/cargo/commands/index.html"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 
 [[row]]
 key = ["cargo", "build"]
 source = "https://doc.rust-lang.org/cargo/commands/cargo-build.html"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 opt = [
@@ -65,6 +73,7 @@ opt = [
 [[row]]
 key = ["cargo", "check"]
 source = "https://doc.rust-lang.org/cargo/commands/cargo-check.html"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 opt = [
@@ -100,13 +109,15 @@ opt = [
 ]
 
 # `--no-run` builds the tests without running them; `--doc` runs doctests.
-# The words after `--` are the test binary's flags, such as `--include-ignored`.
+# The words after `--` are the test binary's flags, such as `--include-ignored`;
+# they are paths because `--logfile PATH` writes a file.
 [[row]]
 key = ["cargo", "test"]
 source = "https://doc.rust-lang.org/cargo/commands/cargo-test.html https://doc.rust-lang.org/rustc/tests/index.html"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
-rest = "inert"
+rest = "path"
 opt = [
   { short = "p", long = "package", value = { takes = "inert" } },
   { long = "workspace" },
@@ -147,6 +158,7 @@ opt = [
 [[row]]
 key = ["cargo", "clippy"]
 source = "https://doc.rust-lang.org/cargo/commands/cargo-clippy.html https://doc.rust-lang.org/clippy/usage.html"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -187,6 +199,7 @@ opt = [
 [[row]]
 key = ["cargo", "fmt"]
 source = "https://doc.rust-lang.org/cargo/commands/cargo-fmt.html https://github.com/rust-lang/rustfmt#running-rustfmt"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -204,6 +217,7 @@ opt = [
 [[row]]
 key = ["cargo", "doc"]
 source = "https://doc.rust-lang.org/cargo/commands/cargo-doc.html"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 opt = [
@@ -247,8 +261,6 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
 ]
 
 [[rule]]
@@ -259,8 +271,6 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
 ]
 
 [[rule]]
@@ -271,8 +281,7 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
+  { pat = "--logfile", kind = "prefix" },
 ]
 
 [[rule]]
@@ -283,8 +292,6 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
 ]
 
 [[rule]]
@@ -295,8 +302,6 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
   { pat = "-Z", kind = "prefix" },
   { pat = "-C", kind = "prefix" },
   { pat = "--codegen", kind = "prefix" },
@@ -310,6 +315,7 @@ targets = [
   { pat = "--target", kind = "prefix" },
   { pat = "--remap-path-prefix", kind = "prefix" },
   { pat = "--pretty", kind = "prefix" },
+  { pat = "@", kind = "prefix" },
 ]
 
 [[rule]]
@@ -320,8 +326,7 @@ targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
-  { pat = "./.", kind = "prefix" },
-  { pat = ".//", kind = "prefix" },
   { pat = "--print-config", kind = "prefix" },
   { pat = "--emit", kind = "prefix" },
+  { pat = "--config-path", kind = "prefix" },
 ]
