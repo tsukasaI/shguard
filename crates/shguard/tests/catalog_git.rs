@@ -282,6 +282,10 @@ fn git_after_a_cd_is_asked() {
             "cd sub && git status",
             "cd /tmp/x; git",
             "cd /tmp/x || git branch",
+            "cd /tmp/x && git show",
+            "cd /tmp/x && git rev-parse HEAD",
+            "cd /tmp/x && git blame a.rs",
+            "cd /tmp/x && git push",
         ],
         Decision::Ask,
     );
