@@ -79,9 +79,10 @@ The parser accepts a subset of bash: simple commands, pipelines, `&&`, `||`,
 unquoted `$X`, globs, other redirects such as `> file` or `<`, subshells,
 braces, assignments, `&`) is Ask, whatever the command.
 
-The embedded catalog (`catalog/*.toml`) covers read-mostly shell tools, read
-commands of `git` and `push`, read commands of `gh`, and `cargo` build, check,
-test, clippy, fmt and doc. Every row names its upstream source.
+The embedded catalog (`catalog/*.toml`) covers read-mostly shell tools, `fd`
+(without `-x`, `-X` and `-l`), read commands of `git` and `push`, read
+commands of `gh`, and `cargo` build, check, test, clippy, fmt and doc. Every
+row names its upstream source.
 
 ### After a `cd`
 
@@ -113,6 +114,17 @@ same checks. A user `[[row]]` widens what can be Allowed, and the user owns
 that. A `[[rule]]` only raises a decision: `[[rule]] key = ["rm"]
 outcome = "ask"` makes every `rm` an Ask. Under `ask_outcome = "ask"`, an
 embedded Block still holds for the commands the catalog covers.
+
+Some heads can never get a covering row, from any file: interpreters and
+shells (`bash`, `python3`, `node`, `sed`, `awk`, ...), wrappers that run
+another command (`env`, `xargs`, `sudo`, `timeout`, ...), remote sessions
+(`ssh`, `docker`, ...) and tools whose option syntax the grammar cannot
+express (`find`, `tar`, `ps`). A row for one of them must set
+`runs_code = true`, which keeps every command under it an Ask. `fd`
+(`fdfind`), `split` and `gsplit` run code only through known options
+(`fd -x`/`-X`/`-l`, `split --filter`); a row for them loads only when it
+leaves those options out or declares that they take a `code` value
+(`value = { takes = "code" }`).
 
 A config or catalog that fails to load makes the hook deny every Bash call,
 with the first error as the reason. `shguard check <file.toml>...` checks

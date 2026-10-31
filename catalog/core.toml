@@ -606,6 +606,147 @@ short = "n"
 long = "num-format"
 value = { takes = "inert" }
 
+# fd lists names; it reads no file contents. The first operand is the search
+# pattern (a regex or glob, not a path), the rest are search roots. Left out:
+# -x/--exec, -X/--exec-batch and -l/--list-details (they run a command; the
+# loader refuses them on an fd row unless their value is `code`), --batch-size,
+# -C/--base-directory (re-roots relative operands), --ignore-file (reads a
+# named file, whose lines a glob error can print), --hyperlink,
+# --strip-cwd-prefix, --gen-completions and the hidden negations (--no-hidden,
+# ...). clap does not infer abbreviated long options here, so only the full
+# name matches.
+[[row]]
+key = ["fd"]
+source = "https://github.com/sharkdp/fd#readme https://github.com/sharkdp/fd/blob/master/src/cli.rs"
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]
+rest = "path"
+[[row.opt]]
+short = "H"
+long = "hidden"
+[[row.opt]]
+short = "I"
+long = "no-ignore"
+[[row.opt]]
+long = "no-ignore-vcs"
+[[row.opt]]
+long = "no-require-git"
+[[row.opt]]
+long = "no-ignore-parent"
+[[row.opt]]
+long = "no-global-ignore-file"
+[[row.opt]]
+short = "u"
+long = "unrestricted"
+[[row.opt]]
+short = "s"
+long = "case-sensitive"
+[[row.opt]]
+short = "i"
+long = "ignore-case"
+[[row.opt]]
+short = "g"
+long = "glob"
+[[row.opt]]
+long = "regex"
+[[row.opt]]
+short = "F"
+long = "fixed-strings"
+[[row.opt]]
+short = "a"
+long = "absolute-path"
+[[row.opt]]
+long = "relative-path"
+[[row.opt]]
+short = "L"
+long = "follow"
+[[row.opt]]
+short = "p"
+long = "full-path"
+[[row.opt]]
+short = "0"
+long = "print0"
+[[row.opt]]
+long = "prune"
+[[row.opt]]
+short = "1"
+[[row.opt]]
+short = "q"
+long = "quiet"
+[[row.opt]]
+long = "show-errors"
+[[row.opt]]
+long = "one-file-system"
+[[row.opt]]
+short = "h"
+long = "help"
+[[row.opt]]
+short = "V"
+long = "version"
+[[row.opt]]
+long = "and"
+value = { takes = "inert" }
+[[row.opt]]
+short = "d"
+long = "max-depth"
+value = { takes = "inert" }
+[[row.opt]]
+long = "min-depth"
+value = { takes = "inert" }
+[[row.opt]]
+long = "exact-depth"
+value = { takes = "inert" }
+[[row.opt]]
+short = "E"
+long = "exclude"
+value = { takes = "inert" }
+[[row.opt]]
+short = "t"
+long = "type"
+value = { takes = "inert" }
+[[row.opt]]
+short = "e"
+long = "extension"
+value = { takes = "inert" }
+[[row.opt]]
+short = "S"
+long = "size"
+value = { takes = "inert" }
+[[row.opt]]
+long = "changed-within"
+value = { takes = "inert" }
+[[row.opt]]
+long = "changed-before"
+value = { takes = "inert" }
+[[row.opt]]
+short = "o"
+long = "owner"
+value = { takes = "inert" }
+[[row.opt]]
+long = "format"
+value = { takes = "inert" }
+[[row.opt]]
+short = "c"
+long = "color"
+value = { takes = "inert" }
+[[row.opt]]
+long = "ignore-contain"
+value = { takes = "inert" }
+[[row.opt]]
+short = "j"
+long = "threads"
+value = { takes = "inert" }
+[[row.opt]]
+long = "max-results"
+value = { takes = "inert" }
+[[row.opt]]
+long = "path-separator"
+value = { takes = "inert" }
+[[row.opt]]
+long = "search-path"
+value = { takes = "path" }
+
 # Deleting a top-level directory recursively. The data directories (/Users,
 # /home, /var, /opt, /private, /Library, /Applications) match only themselves,
 # so `rm -r /var/tmp/x` is an Ask (absolute path), not a Block. A `~` word
@@ -1048,6 +1189,19 @@ id = "ls-ask-recursive-broad"
 key = ["ls"]
 outcome = "ask"
 opts = [["-R"]]
+targets = [
+  { pat = "/", kind = "exact" },
+  { pat = "~", kind = "prefix" },
+  { pat = "/Users", kind = "prefix" },
+  { pat = "/home", kind = "prefix" },
+  { pat = "/root", kind = "prefix" },
+]
+
+# fd is recursive: it lists every name under `/` or a home directory.
+[[rule]]
+id = "fd-ask-broad"
+key = ["fd"]
+outcome = "ask"
 targets = [
   { pat = "/", kind = "exact" },
   { pat = "~", kind = "prefix" },

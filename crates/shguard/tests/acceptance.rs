@@ -16,6 +16,10 @@ const GUARDFALL_ALLOWED: &[&str] = &[
     "echo \"f(x)\"",
     "echo \"x(:h)\"",
     "echo hi | cat | wc -l",
+    // `-ex` is `-e x` and `-tx` is `-t x` (file type executable) (#1111).
+    "fd -e rs",
+    "fd -ex foo",
+    "fd -tx foo",
     "git log --format='%(refname)'",
     "git log --oneline",
     "git log | grep x | head",

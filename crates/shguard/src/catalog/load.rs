@@ -61,15 +61,12 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"parallel",
     b"flock",
     b"strace",
-    // `split --filter` runs a command per chunk.
-    b"split",
-    // Remote, container and multiplexer sessions; fd runs `-x`/`-X`.
+    // Remote, container and multiplexer sessions.
     b"ssh",
     b"docker",
     b"kubectl",
     b"socat",
     b"tmux",
-    b"fd",
     // Schedules code to run later.
     b"crontab",
     // Interpreters: their argument is a program.
@@ -102,12 +99,78 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"python3.12",
     b"python3.13",
     b"python3.14",
-    b"gsplit",
     b"gtimeout",
     b"genv",
     b"gnohup",
     b"gnice",
 ];
+
+/// Command heads that run code only through a known set of options (#1111).
+/// A row for one of them, or for a key under it, may cover commands, but
+/// only if it lists none of these options, or lists each with a
+/// `takes = "code"` value: an option the row does not list makes the
+/// command Unknown, and a `code` value it takes makes it an Ask. An
+/// `optional` value is read only inline (`--exec=x`), so `fd --exec rm`
+/// would read `rm` as an operand; it is refused. A flag that runs a program
+/// (`fd -l` runs `ls`) can only be left out, or listed as taking code.
+/// `abbrev`: the tool accepts a unique prefix of a long name (GNU
+/// `getopt_long`), so a listed long name that is a prefix of a code
+/// option's is refused too. Spellings are `-x` or `--name`.
+struct CodeOptions {
+    head: &'static [u8],
+    opts: &'static [&'static str],
+    abbrev: bool,
+}
+
+const FD_CODE: &[&str] = &["-x", "--exec", "-X", "--exec-batch", "-l", "--list-details"];
+
+const CODE_OPTION_HEADS: &[CodeOptions] = &[
+    // fd runs a command per result (`-x`), per batch (`-X`), and `ls` for
+    // `-l`. clap in fd does not infer abbreviated long options. Debian and
+    // Ubuntu install it as `fdfind`.
+    CodeOptions {
+        head: b"fd",
+        opts: FD_CODE,
+        abbrev: false,
+    },
+    CodeOptions {
+        head: b"fdfind",
+        opts: FD_CODE,
+        abbrev: false,
+    },
+    // `split --filter` runs a shell command per chunk.
+    CodeOptions {
+        head: b"split",
+        opts: &["--filter"],
+        abbrev: true,
+    },
+    CodeOptions {
+        head: b"gsplit",
+        opts: &["--filter"],
+        abbrev: true,
+    },
+];
+
+/// The code-running options of the head `head`, if it is in
+/// [`CODE_OPTION_HEADS`].
+fn code_options(head: &[u8]) -> Option<&'static CodeOptions> {
+    CODE_OPTION_HEADS.iter().find(|c| c.head == head)
+}
+
+/// The code option of `c` that the row option `name` can be written as, if
+/// any.
+fn code_option_hit(c: &CodeOptions, name: &OptName) -> Option<&'static str> {
+    let (_, long) = names_of(name);
+    c.opts.iter().copied().find(|s| {
+        let exact = spelling(s.as_bytes()).is_some_and(|code| overlaps(name, &code));
+        let abbrev = c.abbrev
+            && long.is_some_and(|l| {
+                s.strip_prefix("--")
+                    .is_some_and(|code| code.as_bytes().starts_with(l.bytes()))
+            });
+        exact || abbrev
+    })
+}
 
 /// One catalog file's name and text.
 #[derive(Debug, Clone, Copy)]
@@ -439,6 +502,11 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             row: label.clone(),
         });
     }
+    let code_opts = if key_valid && !dto.runs_code {
+        key.first().and_then(|h| code_options(h))
+    } else {
+        None
+    };
     let mut opts = Vec::new();
     let mut shorts: Vec<u8> = Vec::new();
     let mut longs: Vec<Vec<u8>> = Vec::new();
@@ -446,6 +514,16 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
         let Some(name) = opt_name(file, &label, o, errs) else {
             continue;
         };
+        if let Some(c) = code_opts
+            && !matches!(o.value, ValueDto::Takes(RoleDto::Code))
+            && let Some(hit) = code_option_hit(c, &name)
+        {
+            errs.push(LoadError::CodeOptionNotCode {
+                file: file.to_owned(),
+                row: label.clone(),
+                opt: hit.to_owned(),
+            });
+        }
         let (s, l) = names_of(&name);
         if let Some(s) = s {
             if shorts.contains(&s.byte()) {
