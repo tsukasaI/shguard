@@ -118,7 +118,7 @@ long = "ignore-blank-lines"
 [[row.opt]]
 short = "U"
 long = "unified"
-value = { takes = "inert" }
+value = { optional = "inert" }
 [[row.opt]]
 long = "src-prefix"
 value = { takes = "inert" }
@@ -370,7 +370,7 @@ long = "ignore-blank-lines"
 [[row.opt]]
 short = "U"
 long = "unified"
-value = { takes = "inert" }
+value = { optional = "inert" }
 [[row.opt]]
 long = "src-prefix"
 value = { takes = "inert" }
@@ -523,7 +523,7 @@ long = "ignore-blank-lines"
 [[row.opt]]
 short = "U"
 long = "unified"
-value = { takes = "inert" }
+value = { optional = "inert" }
 [[row.opt]]
 long = "src-prefix"
 value = { takes = "inert" }
@@ -814,7 +814,6 @@ long = "color-lines"
 long = "color-by-age"
 [[row.opt]]
 long = "reverse"
-value = { takes = "inert" }
 [[row.opt]]
 short = "M"
 value = { optional = "inert" }
@@ -947,6 +946,26 @@ outcome = "ask"
 id = "git-push-delete-refspec"
 key = ["git", "push"]
 targets = [{ pat = ":", kind = "prefix" }]
+outcome = "ask"
+
+# A URL remote sends the commits to a host or path the repository's remotes
+# may not name. The kernel compares normalized words, so `https://h/r` is
+# matched as `https:/h/r` and the targets are written as `https:`.
+# `file://` reaches any local path, like the absolute-path rule below.
+# Not covered: the scp form `user@host:path` and other `<scheme>://`
+# remotes run through a `git-remote-<scheme>` helper; no prefix names them.
+[[rule]]
+id = "git-push-url-remote"
+key = ["git", "push"]
+targets = [
+  { pat = "https:", kind = "prefix" },
+  { pat = "http:", kind = "prefix" },
+  { pat = "ssh:", kind = "prefix" },
+  { pat = "git:", kind = "prefix" },
+  { pat = "git+ssh:", kind = "prefix" },
+  { pat = "ssh+git:", kind = "prefix" },
+  { pat = "file:", kind = "prefix" },
+]
 outcome = "ask"
 
 # `ext::cmd` is a remote helper that runs a command.
