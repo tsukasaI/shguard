@@ -45,8 +45,8 @@ is about the same.
     fns.
   - Loop variants are proved even without `terminates`: mutant
     `vc_mutant_spin ✘ (1/2)`.
-  - Allocation (`vec![x; n]` → `std::vec::from_elem`, `push`) is **not**
-    terminates. The error is "called program function `std::vec::from_elem`
+  - `vec![x; n]` (→ `std::vec::from_elem`) is **not** terminates;
+    `Vec::new` and `push` are (M3's `normalize_path`). The error is "called program function `std::vec::from_elem`
     in program (terminates) context".
 - Ghost: `#[check(ghost)]` (used on `join`).
 - Loop invariants: `#[invariant(..)]` placed directly on `while`.
@@ -224,6 +224,7 @@ also keeps the parser's output flat:
   `first/len` ranges into later indices.
 - `wf` lives in an `Invariant` on the arena, so consumers get it for free, as
   in (d).
-- Evaluate bottom-up with a `Vec<Decision>` scratch buffer (not terminates).
+- Evaluate bottom-up with a `Vec<Decision>` scratch buffer, built with
+  `push` (terminates) rather than `vec![x; n]` (not terminates).
   Alternatively, take a caller-provided `&mut [Decision]` to keep
   `#[check(terminates)]`.
