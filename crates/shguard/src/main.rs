@@ -297,7 +297,7 @@ fn check(files: &[PathBuf], err: &mut impl Write) -> ExitCode {
         match std::fs::read_to_string(path) {
             Ok(text) => texts.push((name, text)),
             Err(e) => {
-                drop(writeln!(err, "{name}: {e}"));
+                drop(writeln!(err, "{name:?}: {e}"));
                 failed = true;
             }
         }
