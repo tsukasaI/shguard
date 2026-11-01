@@ -18,30 +18,30 @@ pub enum LoadError {
         source: toml::de::Error,
     },
     /// A row has no `source`, or an empty one.
-    #[error("{file}: row `{row}`: missing or empty `source`")]
+    #[error("{file}: row {row:?}: missing or empty `source`")]
     MissingSource { file: String, row: String },
     /// A row key is empty or has an empty segment.
-    #[error("{file}: row `{row}`: empty key or key segment")]
+    #[error("{file}: row {row:?}: empty key or key segment")]
     BadRowKey { file: String, row: String },
     /// An option name is not a valid short or long name.
-    #[error("{file}: row `{row}`: bad option name `{name}`")]
+    #[error("{file}: row {row:?}: bad option name {name:?}")]
     BadOptName {
         file: String,
         row: String,
         name: String,
     },
     /// An option has neither `short` nor `long`.
-    #[error("{file}: row `{row}`: option with neither `short` nor `long`")]
+    #[error("{file}: row {row:?}: option with neither `short` nor `long`")]
     OptWithoutName { file: String, row: String },
     /// Two rows (possibly in different files) have the same key.
-    #[error("{file}: row `{row}`: duplicate key, first defined in {first_file}")]
+    #[error("{file}: row {row:?}: duplicate key, first defined in {first_file}")]
     DuplicateRow {
         file: String,
         row: String,
         first_file: String,
     },
     /// Two options of one grammar share a short or a long name.
-    #[error("{file}: row `{row}`: duplicate option name `{name}`")]
+    #[error("{file}: row {row:?}: duplicate option name {name:?}")]
     DuplicateOpt {
         file: String,
         row: String,
@@ -49,27 +49,27 @@ pub enum LoadError {
     },
     /// A row with a longer key has no row for the key minus its last
     /// segment.
-    #[error("{file}: row `{row}`: no parent row")]
+    #[error("{file}: row {row:?}: no parent row")]
     OrphanRow { file: String, row: String },
     /// A row sets both `changes_cwd` and `cwd_sensitive`.
-    #[error("{file}: row `{row}`: sets both `changes_cwd` and `cwd_sensitive`")]
+    #[error("{file}: row {row:?}: sets both `changes_cwd` and `cwd_sensitive`")]
     ConflictingCwd { file: String, row: String },
     /// A row under a `cwd_sensitive` parent row does not set `cwd_sensitive`.
-    #[error("{file}: row `{row}`: the parent row is `cwd_sensitive`, so this row must be too")]
+    #[error("{file}: row {row:?}: the parent row is `cwd_sensitive`, so this row must be too")]
     CwdSensitiveParent { file: String, row: String },
     /// A row whose head the grammar cannot express (#1039) does not run code.
-    #[error("{file}: row `{row}`: head is not expressible, so the row must set `runs_code`")]
+    #[error("{file}: row {row:?}: head is not expressible, so the row must set `runs_code`")]
     DenylistedHead { file: String, row: String },
     /// A row head holds a `/` (`/bin/bash`, `/opt/homebrew/bin/fd`). The
     /// kernel matches heads byte for byte, so a path head would skip the
     /// head checks that a bare name gets.
-    #[error("{file}: row `{row}`: head is a path; name the command without `/`")]
+    #[error("{file}: row {row:?}: head is a path; name the command without `/`")]
     PathHead { file: String, row: String },
     /// A row for a head that runs code through known options (`fd -x`)
     /// lists one of them, or an abbreviation of one, without a
     /// `takes = "code"` value (#1111).
     #[error(
-        "{file}: row `{row}`: option `{opt}` runs code, so leave it out or give it `value = {{ takes = \"code\" }}`"
+        "{file}: row {row:?}: option {opt:?} runs code, so leave it out or give it `value = {{ takes = \"code\" }}`"
     )]
     CodeOptionNotCode {
         file: String,
@@ -78,14 +78,14 @@ pub enum LoadError {
     },
     /// A parent option spells a `runs_code` child's last key segment but
     /// does not take a `Code` value (#1070).
-    #[error("{file}: row `{row}`: option `{opt}` is the child key but its value is not `code`")]
+    #[error("{file}: row {row:?}: option {opt:?} is the child key but its value is not `code`")]
     ParentOptNotCode {
         file: String,
         row: String,
         opt: String,
     },
     /// A row or rule key segment starts with `-` or `+`, and the key is not
-    /// that of a `runs_code` row. `item` is "row `key`" or "rule `id`".
+    /// that of a `runs_code` row. `item` is the quoted row key or rule id.
     #[error("{file}: {item}: key segment starts with `-` or `+`")]
     OptionLikeKey { file: String, item: String },
     /// The config is in the shguard 0.9 format (`[[deny]]`, `[[ask]]`,
@@ -110,43 +110,43 @@ pub enum LoadError {
     EmptyRuleId { file: String },
     /// A rule `id` has a character outside `A-Z a-z 0-9 . _ -`. The id goes
     /// into the hook reason the agent reads.
-    #[error("{file}: rule `{rule}`: an id may only use `A-Z a-z 0-9 . _ -`")]
+    #[error("{file}: rule {rule:?}: an id may only use `A-Z a-z 0-9 . _ -`")]
     BadRuleId { file: String, rule: String },
     /// Two rules share an id.
-    #[error("{file}: rule `{rule}`: duplicate id")]
+    #[error("{file}: rule {rule:?}: duplicate id")]
     DuplicateRuleId { file: String, rule: String },
     /// A rule key is empty or has an empty segment.
-    #[error("{file}: rule `{rule}`: empty key or key segment")]
+    #[error("{file}: rule {rule:?}: empty key or key segment")]
     BadRuleKey { file: String, rule: String },
     /// No row key is a prefix of the rule key or extends it.
-    #[error("{file}: rule `{rule}`: no row can match its key")]
+    #[error("{file}: rule {rule:?}: no row can match its key")]
     DeadRule { file: String, rule: String },
     /// A rule option is not spelled `-x` or `--name`.
-    #[error("{file}: rule `{rule}`: malformed option `{name}`")]
+    #[error("{file}: rule {rule:?}: malformed option {name:?}")]
     BadRuleOpt {
         file: String,
         rule: String,
         name: String,
     },
     /// A rule option appears in no matching row's grammar.
-    #[error("{file}: rule `{rule}`: option `{name}` is in no matching row's grammar")]
+    #[error("{file}: rule {rule:?}: option {name:?} is in no matching row's grammar")]
     UnknownRuleOpt {
         file: String,
         rule: String,
         name: String,
     },
     /// A rule has an empty option alias set.
-    #[error("{file}: rule `{rule}`: empty option alias set")]
+    #[error("{file}: rule {rule:?}: empty option alias set")]
     EmptyAlts { file: String, rule: String },
     /// A rule target is empty.
-    #[error("{file}: rule `{rule}`: empty target")]
+    #[error("{file}: rule {rule:?}: empty target")]
     EmptyTarget { file: String, rule: String },
     /// A rule target contains `$`.
-    #[error("{file}: rule `{rule}`: target contains `$`")]
+    #[error("{file}: rule {rule:?}: target contains `$`")]
     TargetHasDollar { file: String, rule: String },
     /// A target starts with `~` followed by something other than `/`
     /// (`~user`), which no command word can match.
-    #[error("{file}: rule `{rule}`: target `{pat}`: `~` must be followed by `/` or nothing")]
+    #[error("{file}: rule {rule:?}: target {pat:?}: `~` must be followed by `/` or nothing")]
     TildeUserTarget {
         file: String,
         rule: String,
@@ -154,7 +154,7 @@ pub enum LoadError {
     },
     /// A `component` or `component_prefix` target starts with `~` or `/`.
     #[error(
-        "{file}: rule `{rule}`: component target `{pat}` starts with `~` or `/`; name the segments only (`.ssh`), or use `prefix`/`under`"
+        "{file}: rule {rule:?}: component target {pat:?} starts with `~` or `/`; name the segments only (`.ssh`), or use `prefix`/`under`"
     )]
     AnchoredComponentTarget {
         file: String,
@@ -163,7 +163,7 @@ pub enum LoadError {
     },
     /// A `component` or `component_prefix` target has a `..` segment.
     #[error(
-        "{file}: rule `{rule}`: component target `{pat}` has a `..` segment; words keep `..` unresolved, so no credential name is ever `..`; name the segments only (`.ssh`)"
+        "{file}: rule {rule:?}: component target {pat:?} has a `..` segment; words keep `..` unresolved, so no credential name is ever `..`; name the segments only (`.ssh`)"
     )]
     DotDotTarget {
         file: String,
@@ -172,12 +172,12 @@ pub enum LoadError {
     },
     /// The target `.` has a kind other than `exact`.
     #[error(
-        "{file}: rule `{rule}`: target `.` must be `exact`; relative words are compared in normal form (`./x` is `x`), so name the paths instead (`.git` as `under`)"
+        "{file}: rule {rule:?}: target `.` must be `exact`; relative words are compared in normal form (`./x` is `x`), so name the paths instead (`.git` as `under`)"
     )]
     DotTarget { file: String, rule: String },
     /// A `prefix` target ends in `/` and is not `/` itself.
     #[error(
-        "{file}: rule `{rule}`: prefix target `{pat}` ends in `/`; use `under` without the `/`"
+        "{file}: rule {rule:?}: prefix target {pat:?} ends in `/`; use `under` without the `/`"
     )]
     PrefixEndsInSlash {
         file: String,
@@ -186,7 +186,7 @@ pub enum LoadError {
     },
     /// A target's bytes after a leading `~` are not in the normal form
     /// `normalize_path` gives (`./x`, `a//b`, `x/`).
-    #[error("{file}: rule `{rule}`: target `{pat}` is not in normal form; write `{normal}`")]
+    #[error("{file}: rule {rule:?}: target {pat:?} is not in normal form; write {normal:?}")]
     TargetNotNormal {
         file: String,
         rule: String,
@@ -195,8 +195,8 @@ pub enum LoadError {
     },
     /// A rule `reason` or a hint `text` is empty, longer than 300 bytes
     /// (`TEXT_CAP`), or holds a control, line separator, invisible or format
-    /// character. `item` is "rule `id`" or
-    /// "hint `key`".
+    /// character. `item` is the quoted rule id or
+    /// hint key.
     #[error("{file}: {item}: {why}")]
     BadText {
         file: String,
@@ -206,13 +206,13 @@ pub enum LoadError {
     /// A hint key is empty, has an empty segment, a segment that starts with
     /// `-` or `+`, or a segment with whitespace or an invisible character.
     #[error(
-        "{file}: hint `{hint}`: empty key segment, one that starts with `-` or `+`, or one with whitespace or an invisible character"
+        "{file}: hint {hint:?}: empty key segment, one that starts with `-` or `+`, or one with whitespace or an invisible character"
     )]
     BadHintKey { file: String, hint: String },
     /// Two hints share a key.
-    #[error("{file}: hint `{hint}`: duplicate key")]
+    #[error("{file}: hint {hint:?}: duplicate key")]
     DuplicateHint { file: String, hint: String },
     /// More rules than a rule id can number.
-    #[error("{file}: rule `{rule}`: too many rules")]
+    #[error("{file}: rule {rule:?}: too many rules")]
     TooManyRules { file: String, rule: String },
 }

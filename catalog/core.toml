@@ -1608,7 +1608,7 @@ targets = [
 id = "grep-ask-recursive-broad"
 key = ["grep"]
 outcome = "ask"
-reason = "a recursive search of `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory"
+reason = "a recursive search of `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory; a pattern given without -e is read as a path too: pass it with -e"
 opts = [["-r"]]
 targets = [
   { pat = "/", kind = "exact" },
@@ -1626,7 +1626,7 @@ targets = [
 id = "rg-ask-broad"
 key = ["rg"]
 outcome = "ask"
-reason = "rg is recursive: `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory"
+reason = "rg is recursive: `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory; a pattern given without -e is read as a path too: pass it with -e"
 targets = [
   { pat = "/", kind = "exact" },
   { pat = "~", kind = "prefix" },

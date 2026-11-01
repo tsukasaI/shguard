@@ -495,7 +495,7 @@ pub fn load_files(
             Some(Err(why)) => {
                 errs.push(LoadError::BadText {
                     file: file.to_owned(),
-                    item: format!("rule `{name}`"),
+                    item: format!("rule {name:?}"),
                     why,
                 });
                 None
@@ -556,7 +556,7 @@ fn build_hint(
         Err(why) => {
             errs.push(LoadError::BadText {
                 file: file.to_owned(),
-                item: format!("hint `{label}`"),
+                item: format!("hint {label:?}"),
                 why,
             });
             None
@@ -661,7 +661,7 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
     if option_like(&dto.key) && !(dto.runs_code && is_option_child(&dto.key)) {
         errs.push(LoadError::OptionLikeKey {
             file: file.to_owned(),
-            item: format!("row `{label}`"),
+            item: format!("row {label:?}"),
         });
     }
     if dto.source.as_deref().is_none_or(|s| s.trim().is_empty()) {
@@ -1057,7 +1057,7 @@ fn build_rule(
     if option_like(&dto.key) && !names_code_row {
         errs.push(LoadError::OptionLikeKey {
             file: file.to_owned(),
-            item: format!("rule `{}`", dto.id),
+            item: format!("rule {:?}", dto.id),
         });
     }
     // Rows whose key is a prefix of the rule's, or extends it.
