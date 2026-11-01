@@ -613,8 +613,10 @@ value = { takes = "inert" }
 # -C/--base-directory (re-roots relative operands), --ignore-file (reads a
 # named file, whose lines a glob error can print), --hyperlink,
 # --strip-cwd-prefix, --gen-completions and the hidden negations (--no-hidden,
-# ...). clap does not infer abbreviated long options here, so only the full
-# name matches.
+# ...). Also not listed, so Unknown (Ask): --exact and the aliases
+# --has-results, --mount, --xdev, --newer, --changed-after,
+# --change-newer-than, --older and --change-older-than. clap does not infer
+# abbreviated long options here, so only the full name matches.
 [[row]]
 key = ["fd"]
 source = "https://github.com/sharkdp/fd#readme https://github.com/sharkdp/fd/blob/master/src/cli.rs"
