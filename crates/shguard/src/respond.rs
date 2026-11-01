@@ -212,7 +212,7 @@ fn unknown(kind: UnknownKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::Source;
+    use crate::catalog::{Origin, Source};
     use crate::config::settings;
 
     const CATALOG: &str = r#"
@@ -239,6 +239,7 @@ short = "a"
 
     fn with(ask: &str) -> Settings {
         let embedded = [Source {
+            origin: Origin::Embedded,
             name: "t.toml",
             text: CATALOG,
         }];
@@ -273,6 +274,7 @@ short = "a"
     #[test]
     fn rule_reasons_and_hints_change_only_the_text() {
         let embedded = [Source {
+            origin: Origin::Embedded,
             name: "t.toml",
             text: CATALOG,
         }];

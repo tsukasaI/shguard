@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-use shguard::catalog::{GuidanceText, LoadError, Loaded, Source, load};
+use shguard::catalog::{GuidanceText, LoadError, Loaded, Origin, Source, load};
 use shguard_kernel::ast::{Opaque, Part};
 use shguard_kernel::catalog::{
     Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role, Row,
@@ -14,6 +14,7 @@ use shguard_kernel::rule::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
 
 fn load_one(text: &str) -> Result<Loaded, Vec<LoadError>> {
     load(&[Source {
+        origin: Origin::User,
         name: "t.toml",
         text,
     }])
@@ -64,10 +65,12 @@ fn toml_error_in_one_file_does_not_hide_others() {
     let both = format!("{dup}{dup}");
     let errs = load(&[
         Source {
+            origin: Origin::User,
             name: "a.toml",
             text: "[[row]\n",
         },
         Source {
+            origin: Origin::User,
             name: "b.toml",
             text: &both,
         },
@@ -131,10 +134,12 @@ fn duplicate_row_key_across_files() {
     let t = row("\"ls\"", "");
     let errs = load(&[
         Source {
+            origin: Origin::User,
             name: "a.toml",
             text: &t,
         },
         Source {
+            origin: Origin::User,
             name: "b.toml",
             text: &t,
         },
@@ -871,10 +876,12 @@ fn option_like_key_segment() {
         // Across files, as an embedded row and a user row.
         let errs = load(&[
             Source {
+                origin: Origin::Embedded,
                 name: "embedded.toml",
                 text: &rm,
             },
             Source {
+                origin: Origin::User,
                 name: "user.toml",
                 text: &user,
             },
@@ -1074,6 +1081,7 @@ fn a_user_hint_replaces_an_embedded_one() {
     let user = "[[hint]]\nkey = [\"find\"]\ntext = \"mine\"\n";
     let mut sources = shguard::catalog::EMBEDDED.to_vec();
     sources.push(Source {
+        origin: Origin::User,
         name: "user.toml",
         text: user,
     });
@@ -1084,6 +1092,7 @@ fn a_user_hint_replaces_an_embedded_one() {
     assert_eq!(found[0].text.as_str(), "mine");
     // Two user files with the same key are still a duplicate.
     sources.push(Source {
+        origin: Origin::User,
         name: "user2.toml",
         text: user,
     });
@@ -1116,4 +1125,21 @@ fn rule_ids_use_a_plain_charset() {
     let ok =
         format!("{rm}[[rule]]\nid = \"dotfiles-a.b_C9\"\nkey = [\"rm\"]\noutcome = \"block\"\n");
     assert!(load_one(&ok).is_ok());
+}
+
+/// The origin is typed: a user file named like an embedded one still
+/// replaces the embedded hint, and is not mistaken for embedded.
+#[test]
+fn a_user_source_named_embedded_still_replaces_the_embedded_hint() {
+    let mut sources = shguard::catalog::EMBEDDED.to_vec();
+    sources.push(Source {
+        origin: Origin::User,
+        name: "embedded:x.toml",
+        text: "[[hint]]\nkey = [\"find\"]\ntext = \"mine\"\n",
+    });
+    let l = load(&sources).expect("no DuplicateHint");
+    let key = vec![b"find".to_vec()];
+    let found: Vec<_> = l.hints.iter().filter(|h| h.key == key).collect();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].text.as_str(), "mine");
 }

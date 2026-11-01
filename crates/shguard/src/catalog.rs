@@ -16,6 +16,6 @@ pub use dto::AskOutcome;
 pub use embedded::EMBEDDED;
 pub use error::LoadError;
 pub use load::{
-    ConfigHead, GuidanceText, Hint, Loaded, ParsedFile, Source, TEXT_CAP, load, load_files,
+    ConfigHead, GuidanceText, Hint, Loaded, Origin, ParsedFile, Source, TEXT_CAP, load, load_files,
     parse_config, parse_file,
 };

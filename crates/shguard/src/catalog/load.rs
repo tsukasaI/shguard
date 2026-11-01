@@ -172,11 +172,23 @@ fn code_option_hit(c: &CodeOptions, name: &OptName) -> Option<&'static str> {
     })
 }
 
-/// One catalog file's name and text.
+/// Where a catalog file comes from. A user hint replaces an embedded hint
+/// with the same key; the file name says nothing about the origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Compiled into the binary.
+    Embedded,
+    /// The user's config or a file given to `shguard check`.
+    User,
+}
+
+/// One catalog file's name, origin and text.
 #[derive(Debug, Clone, Copy)]
 pub struct Source<'a> {
-    /// The name used in error messages.
+    /// The name used in error messages; display only.
     pub name: &'a str,
+    /// Where the file comes from.
+    pub origin: Origin,
     /// The TOML text.
     pub text: &'a str,
 }
@@ -310,7 +322,7 @@ pub fn load(sources: &[Source<'_>]) -> Result<Loaded, Vec<LoadError>> {
     let mut files = Vec::new();
     for src in sources {
         match parse_file(src.name, src.text) {
-            Ok(file) => files.push((src.name.to_owned(), file)),
+            Ok(file) => files.push((src.name.to_owned(), src.origin, file)),
             Err(e) => errs.push(e),
         }
     }
@@ -420,35 +432,37 @@ fn is_legacy(text: &str) -> bool {
 ///
 /// Every [`LoadError`] found, if there is at least one.
 pub fn load_files(
-    files: Vec<(String, ParsedFile)>,
+    files: Vec<(String, Origin, ParsedFile)>,
     mut errs: Vec<LoadError>,
 ) -> Result<Loaded, Vec<LoadError>> {
     let mut entries = Vec::new();
     let mut rule_dtos: Vec<(String, RuleDto)> = Vec::new();
     let mut hints: Vec<Hint> = Vec::new();
-    let mut from_embedded: Vec<bool> = Vec::new();
-    for (name, ParsedFile(file)) in files {
+    let mut origins: Vec<Origin> = Vec::new();
+    for (name, origin, ParsedFile(file)) in files {
         for row in file.row {
             entries.push(build_row(&name, row, &mut errs));
         }
         rule_dtos.extend(file.rule.into_iter().map(|r| (name.clone(), r)));
         // A user hint replaces an embedded hint with the same key; two
         // hints of one origin with the same key stay an error.
-        let embedded = name.starts_with("embedded:");
         for h in file.hint {
             let pool: Vec<Hint> = hints
                 .iter()
-                .zip(&from_embedded)
-                .filter(|(_, e)| embedded || !**e)
+                .zip(&origins)
+                .filter(|(_, o)| match origin {
+                    Origin::Embedded => true,
+                    Origin::User => **o == Origin::User,
+                })
                 .map(|(h, _)| h.clone())
                 .collect();
             if let Some(hint) = build_hint(&name, h, &pool, &mut errs) {
                 if let Some(i) = hints.iter().position(|x| x.key == hint.key) {
                     hints.remove(i);
-                    from_embedded.remove(i);
+                    origins.remove(i);
                 }
                 hints.push(hint);
-                from_embedded.push(embedded);
+                origins.push(origin);
             }
         }
     }

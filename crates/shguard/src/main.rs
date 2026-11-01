@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use shguard::catalog::{EMBEDDED, LoadError, Source, load};
+use shguard::catalog::{EMBEDDED, LoadError, Origin, Source, load};
 use shguard::config::{Location, Settings, locate, settings};
 use shguard::hook::{Response, panic_output, render, to_bytes};
 use shguard::respond::{INPUT_CAP, answer};
@@ -305,7 +305,11 @@ fn check(files: &[PathBuf], err: &mut impl Write) -> ExitCode {
     if !failed {
         let sources: Vec<Source<'_>> = texts
             .iter()
-            .map(|(name, text)| Source { name, text })
+            .map(|(name, text)| Source {
+                name,
+                origin: Origin::User,
+                text,
+            })
             .collect();
         if let Err(errors) = load(&sources) {
             for e in errors {
