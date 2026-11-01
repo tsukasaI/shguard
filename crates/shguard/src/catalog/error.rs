@@ -190,8 +190,8 @@ pub enum LoadError {
         normal: String,
     },
     /// A rule `reason` or a hint `text` is empty, longer than 300 bytes
-    /// (`TEXT_CAP`), or holds a control, line separator, zero-width or
-    /// bidirectional-format character. `item` is "rule `id`" or
+    /// (`TEXT_CAP`), or holds a control, line separator, invisible or format
+    /// character. `item` is "rule `id`" or
     /// "hint `key`".
     #[error("{file}: {item}: {why}")]
     BadText {
@@ -199,9 +199,11 @@ pub enum LoadError {
         item: String,
         why: &'static str,
     },
-    /// A hint key is empty, has an empty segment, or a segment that starts
-    /// with `-` or `+`.
-    #[error("{file}: hint `{hint}`: empty key segment, or one that starts with `-` or `+`")]
+    /// A hint key is empty, has an empty segment, a segment that starts with
+    /// `-` or `+`, or a segment with whitespace or an invisible character.
+    #[error(
+        "{file}: hint `{hint}`: empty key segment, one that starts with `-` or `+`, or one with whitespace or an invisible character"
+    )]
     BadHintKey { file: String, hint: String },
     /// Two hints share a key.
     #[error("{file}: hint `{hint}`: duplicate key")]

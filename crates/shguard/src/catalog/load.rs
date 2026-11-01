@@ -215,9 +215,11 @@ pub const TEXT_CAP: usize = 300;
 
 /// Why `text` cannot be a reason or hint text, if it cannot. The text goes
 /// into the hook answer that the agent reads, so a line break (control
-/// characters, U+2028, U+2029), a zero-width character or a
-/// bidirectional-format character (which can make the text read
-/// differently from its bytes) is refused.
+/// characters, U+2028, U+2029) or an invisible or format character (zero
+/// width, bidirectional, joiner, variation selector, tag, fillers, soft
+/// hyphen and the other `Cf` characters, which can make the text read
+/// differently from its bytes or carry hidden text) is refused. The "300"
+/// in the message is tied to `TEXT_CAP` by a loader test.
 fn text_problem(text: &str) -> Option<&'static str> {
     if text.trim().is_empty() {
         Some("empty text")
@@ -227,14 +229,33 @@ fn text_problem(text: &str) -> Option<&'static str> {
         c.is_control()
             || matches!(
                 c,
-                '\u{061C}'
+                '\u{00AD}'
+                    | '\u{034F}'
+                    | '\u{0600}'..='\u{0605}'
+                    | '\u{061C}'
+                    | '\u{06DD}'
+                    | '\u{070F}'
+                    | '\u{08E2}'
+                    | '\u{115F}'..='\u{1160}'
+                    | '\u{17B4}'..='\u{17B5}'
+                    | '\u{180B}'..='\u{180F}'
                     | '\u{200B}'..='\u{200F}'
                     | '\u{2028}'..='\u{202E}'
-                    | '\u{2060}'..='\u{2069}'
+                    | '\u{2060}'..='\u{206F}'
+                    | '\u{3164}'
+                    | '\u{FE00}'..='\u{FE0F}'
                     | '\u{FEFF}'
+                    | '\u{FFA0}'
+                    | '\u{FFF0}'..='\u{FFFB}'
+                    | '\u{110BD}'
+                    | '\u{110CD}'
+                    | '\u{13430}'..='\u{1343F}'
+                    | '\u{1BCA0}'..='\u{1BCA3}'
+                    | '\u{1D173}'..='\u{1D17A}'
+                    | '\u{E0000}'..='\u{E0FFF}'
             )
     }) {
-        Some("text with a control, line separator, zero-width or bidirectional-format character")
+        Some("text with a control, line separator, invisible or format character")
     } else {
         None
     }
@@ -459,7 +480,13 @@ fn build_hint(
     let label = dto.key.join(" ");
     let key = seg_bytes(&dto.key);
     let mut ok = true;
-    if !key_ok(&key) || option_like(&dto.key) {
+    if !key_ok(&key)
+        || option_like(&dto.key)
+        || dto
+            .key
+            .iter()
+            .any(|s| text_problem(s).is_some() || s.chars().any(char::is_whitespace))
+    {
         errs.push(LoadError::BadHintKey {
             file: file.to_owned(),
             hint: label.clone(),

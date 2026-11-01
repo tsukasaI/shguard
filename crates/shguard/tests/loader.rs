@@ -984,6 +984,11 @@ fn reason_and_hint_texts_are_checked() {
         "zero \\u200b width",
         "bom \\ufeff",
         "arabic mark \\u061c",
+        "tag \\U000e0041",
+        "selector \\ufe0f",
+        "soft \\u00ad hyphen",
+        "\\u3164",
+        "word joiner \\u206a",
         long.as_str(),
     ] {
         let text = format!("{rm}{}", rule(&format!("reason = \"{bad}\"")));
@@ -1008,7 +1013,14 @@ fn reason_and_hint_texts_are_checked() {
         ))
         .is_ok()
     );
-    for key in ["[]", "[\"\"]", "[\"git\", \"-c\"]", "[\"+x\"]"] {
+    for key in [
+        "[]",
+        "[\"\"]",
+        "[\"git\", \"-c\"]",
+        "[\"+x\"]",
+        "[\"a b\"]",
+        "[\"a\\u200bb\"]",
+    ] {
         let hint = format!("[[hint]]\nkey = {key}\ntext = \"t\"\n");
         assert!(
             errors(&hint)
@@ -1030,4 +1042,24 @@ fn reason_and_hint_texts_are_checked() {
         errors("[[hint]]\nkey = [\"find\"]\ntext = \"t\"\nbogus = 1\n")[0],
         LoadError::Toml { .. }
     ));
+}
+
+/// The "longer than N bytes" message names the real cap.
+#[test]
+fn the_text_cap_message_names_the_cap() {
+    let long = "x".repeat(shguard::catalog::TEXT_CAP + 1);
+    let rm = row("\"rm\"", "rest = \"path\"");
+    let errs = errors(&format!("{rm}{}", rule(&format!("reason = \"{long}\""))));
+    assert!(errs.iter().any(|e| matches!(
+        e,
+        LoadError::BadText { why, .. } if why.contains(&shguard::catalog::TEXT_CAP.to_string())
+    )));
+}
+
+/// Pins presence only: every embedded rule explains itself.
+#[test]
+fn every_embedded_rule_has_a_reason() {
+    let loaded = load(shguard::catalog::EMBEDDED).expect("embedded catalog loads");
+    assert!(!loaded.rule_reasons.is_empty());
+    assert!(loaded.rule_reasons.iter().all(Option::is_some));
 }

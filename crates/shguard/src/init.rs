@@ -27,7 +27,7 @@ ask_outcome = "ask"
 
 # A hint adds text to the reason when a command under its key is Unknown.
 # It changes no decision. A key may have one hint only, embedded ones
-# included (`find`, `git checkout`, `git restore`).
+# included (see catalog/*.toml).
 # [[hint]]
 # key = ["make"]
 # text = "run the targets through `cargo` instead"

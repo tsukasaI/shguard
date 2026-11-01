@@ -1359,7 +1359,7 @@ targets = [
   { pat = "ftps:", kind = "prefix" },
 ]
 outcome = "ask"
-reason = "an `ext::` remote runs a command, and a URL is not a configured remote name"
+reason = "an `ext::` remote runs a command; a URL remote is not a configured remote name"
 
 # A `+` refspec after `--` force-updates a local ref.
 [[rule]]
@@ -1377,7 +1377,7 @@ reason = "a `+` refspec force-updates a local ref"
 id = "git-ask-credential-dirs"
 key = ["git"]
 outcome = "ask"
-reason = "the path names a credential file or directory"
+reason = "the path names, or looks like, a credential file or directory"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },

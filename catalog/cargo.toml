@@ -268,7 +268,7 @@ opt = [
 id = "cargo-build-ask-nonlocal-target"
 key = ["cargo", "build"]
 outcome = "ask"
-reason = "absolute and `~` paths are asked: the hook cannot tell the project directory from the rest of the disk; use a relative path"
+reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -279,7 +279,7 @@ targets = [
 id = "cargo-check-ask-nonlocal-target"
 key = ["cargo", "check"]
 outcome = "ask"
-reason = "absolute and `~` paths are asked: the hook cannot tell the project directory from the rest of the disk; use a relative path"
+reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -290,7 +290,7 @@ targets = [
 id = "cargo-test-ask-nonlocal-target"
 key = ["cargo", "test"]
 outcome = "ask"
-reason = "absolute and `~` paths are asked: the hook cannot tell the project directory from the rest of the disk; use a relative path"
+reason = "absolute, `~` and `^` paths, and --logfile (it writes a file), are asked: the hook cannot tell the project directory from the rest of the disk; use a relative path and drop the flag"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -302,7 +302,7 @@ targets = [
 id = "cargo-doc-ask-nonlocal-target"
 key = ["cargo", "doc"]
 outcome = "ask"
-reason = "absolute and `~` paths are asked: the hook cannot tell the project directory from the rest of the disk; use a relative path"
+reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -313,7 +313,7 @@ targets = [
 id = "cargo-clippy-ask-nonlocal-target"
 key = ["cargo", "clippy"]
 outcome = "ask"
-reason = "absolute and `~` paths are asked: the hook cannot tell the project directory from the rest of the disk; use a relative path"
+reason = "absolute, `~` and `^` paths, and rustc flags that load code, change the toolchain or write files (-Z, -C, -L, -o, --emit, --print, --extern), are asked; use a relative path and drop the flag"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -345,7 +345,7 @@ targets = [
 id = "cargo-fmt-ask-nonlocal-target"
 key = ["cargo", "fmt"]
 outcome = "ask"
-reason = "absolute and `~` paths are asked: the hook cannot tell the project directory from the rest of the disk; use a relative path"
+reason = "absolute, `~` and `^` paths, and --print-config, --emit and --config-path (they write or load files), are asked; use a relative path and drop the flag"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
