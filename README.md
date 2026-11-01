@@ -126,7 +126,9 @@ express (`find`, `tar`, `ps`). A row for one of them must set
 leaves those options out or declares that they take a `code` value
 (`value = { takes = "code" }`). The embedded `fd-ask-broad` rule (fd from
 `/` or a home directory is Ask) is keyed `fd` only; a user `fdfind` row
-needs its own rule with `key = ["fdfind"]`.
+needs its own rule with `key = ["fdfind"]`. `fd` already has an embedded
+row, and a second row with the same key is a load error, so user rows are
+for `fdfind`, `split` and `gsplit`.
 
 A config or catalog that fails to load makes the hook deny every Bash call,
 with the first error as the reason. `shguard check <file.toml>...` checks
