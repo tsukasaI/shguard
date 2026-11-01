@@ -145,6 +145,9 @@ to it is yours.
   cannot express, so they stay Unknown. `jq -n env` and `$ENV` print the
   environment, tokens included, and `jq . <file>` reads any file; add a
   `[[rule]]` with the credential targets of the embedded `cat` rule.
+- Credential rules read a search pattern as a path: `grep .ssh docs/` is
+  Ask. Pass the pattern with `-e` (`grep -e .ssh docs/`) to search for the
+  text.
 - `nix build`: it runs the flake's code (derivation builders; on macOS the
   Nix sandbox is off by default), and an installable can name a remote flake
   (`github:o/r#x`), which is code from outside the repository.

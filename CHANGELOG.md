@@ -14,6 +14,21 @@
   is Allowed and opens the editor (#1115).
 - README recipes for user rows the catalog leaves out: `gh pr create`, `jq`,
   `nix build` (#1115).
+- Rule targets of kind `component` and `component_prefix`: the pattern is
+  one or more whole segments anywhere in the path (`.ssh` covers
+  `/Users/me/.ssh/id_rsa` and `sub/.ssh`), or starts one (`.env.` covers
+  `app/.env.local`). Proved in the kernel (#1113).
+- Recursive reads (`grep -r`, `rg`, `ls -R`, `fd`, `tree`, `eza`) of
+  `/System` (which holds the `/System/Volumes/Data` firmlink to every
+  home), `/var/root` and `/private/var/root` are Ask, like
+  the other spellings of the home and root directories (#1113).
+- A search pattern of `grep` or `rg` that names a credential file is a path
+  word, so `grep .ssh docs/` and `grep -rn .env src/` are Ask; pass it with
+  `-e PATTERN` (`grep -e .ssh docs/`) to search for the text (#1113).
+- Reads and `git` operations on `.env.*` siblings such as `.env.example`
+  are Ask too (`git add .env.example`, `cat .env.example`) (#1113).
+- A `component` or `component_prefix` target with a `..` segment is a load
+  error (#1113).
 
 ### Changed
 
@@ -29,6 +44,11 @@
 - A row whose head holds a `/` (`/bin/bash`, `/opt/homebrew/bin/fd`) is a
   load error: the kernel matches heads byte for byte, so a path head skipped
   the head checks (#1111).
+- The credential rules of `cat`, `head`, `tail`, `grep`, `rg`, `wc` and
+  `sort` match credential names at any depth and under any spelling of the
+  home directory, so `cat /Users/me/.ssh/id_rsa` and `cat sub/.env` are Ask;
+  `cp`, `uniq` and `git` get the same rule, which also makes `cp x .env`
+  an Ask (#1113).
 
 ## 0.10.0 - 2026-10-31
 

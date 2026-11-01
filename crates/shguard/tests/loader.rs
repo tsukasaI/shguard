@@ -539,7 +539,27 @@ fn targets_must_be_in_normal_form() {
             );
         }
     }
-    for kind in ["prefix", "under"] {
+    for pat in ["~/.ssh", "/.ssh", "~", "/"] {
+        for kind in ["component", "component_prefix"] {
+            let errs = errors(&target(pat, kind));
+            assert!(
+                errs.iter()
+                    .any(|e| matches!(e, LoadError::AnchoredComponentTarget { .. })),
+                "{pat} {kind}: {errs:?}"
+            );
+        }
+    }
+    for pat in ["..", "a/..", "../b"] {
+        for kind in ["component", "component_prefix"] {
+            let errs = errors(&target(pat, kind));
+            assert!(
+                errs.iter()
+                    .any(|e| matches!(e, LoadError::DotDotTarget { .. })),
+                "{pat} {kind}: {errs:?}"
+            );
+        }
+    }
+    for kind in ["prefix", "under", "component", "component_prefix"] {
         let errs = errors(&target(".", kind));
         assert!(
             errs.iter()
@@ -560,8 +580,34 @@ fn targets_must_be_in_normal_form() {
         ("/ETC", "under"),
         ("~/.SSH", "prefix"),
         ("^", "prefix"),
+        (".ssh", "component"),
+        (".config/gh", "component"),
+        (".env.", "component_prefix"),
     ] {
         assert!(load_one(&target(pat, kind)).is_ok(), "{pat} {kind}");
+    }
+}
+
+#[test]
+fn component_target_decisions() {
+    let rm = row("\"rm\"", "rest = \"path\"");
+    let l = loaded(&format!(
+        "{rm}{}",
+        rule(
+            "targets = [{ pat = \".ssh\", kind = \"component\" }, { pat = \".env.\", kind = \"component_prefix\" }]"
+        )
+    ));
+    for cmd in [
+        "rm .ssh",
+        "rm /Users/me/.ssh/id_rsa",
+        "rm a/.SSH/b",
+        "rm -- ~/.ssh",
+        "rm sub/.env.local",
+    ] {
+        assert_eq!(decision(&l, cmd), Decision::Block, "{cmd}");
+    }
+    for cmd in ["rm .sshx", "rm x.ssh", "rm sub/.env", "rm a.env.x"] {
+        assert_eq!(decision(&l, cmd), Decision::Allow, "{cmd}");
     }
 }
 

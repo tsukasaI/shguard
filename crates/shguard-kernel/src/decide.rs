@@ -73,6 +73,15 @@
 //! cover the home directory, add a `~` `Prefix` or `Under` target (`[Tilde]`
 //! as either matches every `~` word, `~` and `~/x` included).
 //!
+//! `Component` and `ComponentPrefix` (#1113) ignore the heads and compare
+//! keys only: the pattern's key must occur in the word's key starting at
+//! the key's start or right after a `/` (`seg_at`); `Component` also needs
+//! it to end at the key's end or right before a `/` (`seg_end`). So `.ssh`
+//! covers `~/.ssh/k` (key `/.ssh/k`), `/Users/me/.ssh` and `sub/.ssh`, and
+//! a multi-segment pattern (`.config/gh`) works the same way. An empty
+//! pattern key occurs at the start of every key, so as `ComponentPrefix` it
+//! matches every word (the loader admits no such target).
+//!
 //! This equals the canonical-sequence comparison for every pattern without
 //! an opaque part beyond a leading `~`, up to path normalization.
 //! Deliberately more permissive: a pattern with such a part (`$HOME/x`)
@@ -297,20 +306,57 @@ pub fn under_l(q: Seq<u8>, s: Seq<u8>) -> bool {
 #[ensures(s[q.len()] == SLASH)]
 pub fn lemma_under_boundary(q: Seq<u8>, s: Seq<u8>) {}
 
-/// `pat` matches a word whose view is head `wt`, normalized lead `wnorm`,
-/// key `wkey` and trailing-opaque flag `wmore`.
+/// `p` occurs in `k` at `i`, and `i` starts a segment of `k`: it is `k`'s
+/// start or right after a `/`.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn seg_at(p: Seq<u8>, k: Seq<u8>, i: Int) -> bool {
+    pearlite! {
+        0 <= i && i + p.len() <= k.len()
+            && (i == 0 || k[i - 1] == SLASH)
+            && k.subsequence(i, i + p.len()) == p
+    }
+}
+
+/// The occurrence of `p` at `i` ends a segment of `k`: at `k`'s end or right
+/// before a `/`.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn seg_end(p: Seq<u8>, k: Seq<u8>, i: Int) -> bool {
+    pearlite! { i + p.len() == k.len() || k[i + p.len()] == SLASH }
+}
+
+/// `p` occurs in `k` at `i` as `Component` (`whole`) or `ComponentPrefix`
+/// asks.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn seg_hit_l(p: Seq<u8>, k: Seq<u8>, i: Int, whole: bool) -> bool {
+    seg_at(p, k, i) && (!whole || seg_end(p, k, i))
+}
+
+/// `p` occurs somewhere in `k` as `Component` (`whole`) or
+/// `ComponentPrefix` asks.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn component_l(p: Seq<u8>, k: Seq<u8>, whole: bool) -> bool {
+    pearlite! { exists<i> seg_hit_l(p, k, i, whole) }
+}
+
+/// `pat`, an `Exact`, `Prefix` or `Under` pattern, matches a word whose view
+/// is head `wt`, normalized lead `wnorm`, key `wkey` and trailing-opaque
+/// flag `wmore`.
 #[cfg(creusot)]
 #[logic(open(crate))]
-pub fn pat_match_view(pat: Pat, wt: bool, wnorm: Seq<u8>, wkey: Seq<u8>, wmore: bool) -> bool {
+pub fn anchored_match_view(pat: Pat, wt: bool, wnorm: Seq<u8>, wkey: Seq<u8>, wmore: bool) -> bool {
     pearlite! {
-        if path_more(pat.parts@) {
-            true
-        } else if path_tilde(pat.parts@) != wt {
+        if path_tilde(pat.parts@) != wt {
             !path_tilde(pat.parts@) && match_lead(pat.parts@).len() == 0
                 && match pat.kind {
                     PatKind::Prefix => true,
                     PatKind::Exact => false,
                     PatKind::Under => false,
+                    PatKind::Component => false,
+                    PatKind::ComponentPrefix => false,
                 }
         } else {
             match pat.kind {
@@ -320,6 +366,28 @@ pub fn pat_match_view(pat: Pat, wt: bool, wnorm: Seq<u8>, wkey: Seq<u8>, wmore: 
                     || is_prefix(path_key(pat.parts@), wkey),
                 PatKind::Under => under_l(match_lead(pat.parts@), wnorm)
                     || under_l(path_key(pat.parts@), wkey),
+                PatKind::Component => false,
+                PatKind::ComponentPrefix => false,
+            }
+        }
+    }
+}
+
+/// `pat` matches a word whose view is head `wt`, normalized lead `wnorm`,
+/// key `wkey` and trailing-opaque flag `wmore`.
+#[cfg(creusot)]
+#[logic(open(crate))]
+pub fn pat_match_view(pat: Pat, wt: bool, wnorm: Seq<u8>, wkey: Seq<u8>, wmore: bool) -> bool {
+    pearlite! {
+        if path_more(pat.parts@) {
+            true
+        } else {
+            match pat.kind {
+                PatKind::Component => component_l(path_key(pat.parts@), wkey, true),
+                PatKind::ComponentPrefix => component_l(path_key(pat.parts@), wkey, false),
+                PatKind::Exact => anchored_match_view(pat, wt, wnorm, wkey, wmore),
+                PatKind::Prefix => anchored_match_view(pat, wt, wnorm, wkey, wmore),
+                PatKind::Under => anchored_match_view(pat, wt, wnorm, wkey, wmore),
             }
         }
     }
@@ -1129,6 +1197,69 @@ fn path_view(parts: &[Part]) -> PathView {
     }
 }
 
+/// `p` equals `k[i..i + p.len()]`.
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, requires(i@ + p@.len() <= k@.len()))]
+#[cfg_attr(creusot, ensures(result == (k@.subsequence(i@, i@ + p@.len()) == p@)))]
+fn eq_at(k: &[u8], i: usize, p: &[u8]) -> bool {
+    let mut j: usize = 0;
+    #[cfg_attr(creusot, variant(p@.len() - j@))]
+    #[cfg_attr(creusot, invariant(j@ <= p@.len()))]
+    #[cfg_attr(creusot, invariant(forall<m> 0 <= m && m < j@ ==> k@[i@ + m] == p@[m]))]
+    while j < p.len() {
+        if k[i + j] != p[j] {
+            #[cfg(creusot)]
+            proof_assert!(k@.subsequence(i@, i@ + p@.len())[j@] != p@[j@]);
+            return false;
+        }
+        j += 1;
+    }
+    #[cfg(creusot)]
+    proof_assert!(k@.subsequence(i@, i@ + p@.len()).ext_eq(p@));
+    true
+}
+
+/// `p` occurs in `k` at `i` as `Component` (`whole`) or `ComponentPrefix`
+/// asks (see `seg_hit_l`).
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, requires(i@ + p@.len() <= k@.len()))]
+#[cfg_attr(creusot, ensures(result == seg_hit_l(p@, k@, i@, whole)))]
+fn seg_hit(k: &[u8], p: &[u8], i: usize, whole: bool) -> bool {
+    let starts = i == 0 || k[i - 1] == SLASH;
+    let end = i + p.len();
+    let ends = end == k.len() || k[end] == SLASH;
+    starts && eq_at(k, i, p) && (!whole || ends)
+}
+
+/// `p` occurs somewhere in `k` as `Component` (`whole`) or
+/// `ComponentPrefix` asks (see `component_l`).
+#[cfg_attr(creusot, check(terminates))]
+#[cfg_attr(creusot, ensures(result == component_l(p@, k@, whole)))]
+fn component(k: &[u8], p: &[u8], whole: bool) -> bool {
+    if p.len() > k.len() {
+        #[cfg(creusot)]
+        proof_assert!(forall<j> !seg_hit_l(p@, k@, j, whole));
+        return false;
+    }
+    let last = k.len() - p.len();
+    let mut i: usize = 0;
+    #[cfg_attr(creusot, variant(last@ - i@))]
+    #[cfg_attr(creusot, invariant(i@ <= last@))]
+    #[cfg_attr(creusot, invariant(forall<j> 0 <= j && j < i@ ==> !seg_hit_l(p@, k@, j, whole)))]
+    while i < last {
+        if seg_hit(k, p, i, whole) {
+            return true;
+        }
+        i += 1;
+    }
+    let hit = seg_hit(k, p, last, whole);
+    #[cfg(creusot)]
+    proof_assert!(hit || forall<j> 0 <= j && j <= last@ ==> !seg_hit_l(p@, k@, j, whole));
+    #[cfg(creusot)]
+    proof_assert!(hit || forall<j> !seg_hit_l(p@, k@, j, whole));
+    hit
+}
+
 /// `pat` matches a word with the view `w`.
 #[cfg_attr(creusot, check(terminates))]
 #[cfg_attr(creusot, ensures(result == pat_match_view(*pat, w.tilde, w.norm@, w.key@, w.more)))]
@@ -1137,18 +1268,26 @@ fn pat_match(pat: &Pat, w: &PathView) -> bool {
     if p.more {
         return true;
     }
+    match pat.kind {
+        PatKind::Component => return component(&w.key, &p.key, true),
+        PatKind::ComponentPrefix => return component(&w.key, &p.key, false),
+        PatKind::Exact | PatKind::Prefix | PatKind::Under => {}
+    }
     if p.tilde != w.tilde {
         return !p.tilde
             && <[u8]>::is_empty(&p.lead)
             && match pat.kind {
                 PatKind::Prefix => true,
-                PatKind::Exact | PatKind::Under => false,
+                PatKind::Exact | PatKind::Under | PatKind::Component | PatKind::ComponentPrefix => {
+                    false
+                }
             };
     }
     match pat.kind {
         PatKind::Exact => !w.more && (bytes_eq(&w.norm, &p.lead) || bytes_eq(&w.key, &p.key)),
         PatKind::Prefix => starts_with(&w.norm, &p.lead) || starts_with(&w.key, &p.key),
         PatKind::Under => under(&w.norm, &p.lead) || under(&w.key, &p.key),
+        PatKind::Component | PatKind::ComponentPrefix => false,
     }
 }
 
@@ -1720,7 +1859,9 @@ pub fn decide(cat: &Catalog, rules: &[Rule], sc: Script) -> Verdict {
 
 #[cfg(test)]
 mod tests {
-    use super::{OptAlts, Verdict, decide, inline_hit, inline_path_check, word_path_check};
+    use super::{
+        OptAlts, Verdict, component, decide, inline_hit, inline_path_check, word_path_check,
+    };
     use crate::ast::{AndOr, Connector, Link, Opaque, Part, Pipeline, Script, Simple, Word};
     use crate::catalog::{
         Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role,
@@ -2273,6 +2414,68 @@ mod tests {
         let d = decide(&catalog(), &r, sc).decision();
         assert_ne!(d, Decision::Ask, "`rm {path}` must pass the path checks");
         d == Decision::Block
+    }
+
+    #[test]
+    fn component_targets_match_segments_anywhere() {
+        let ssh = pat(".ssh", PatKind::Component);
+        for w in [
+            ".ssh",
+            ".ssh/id_rsa",
+            "./.ssh/id_rsa",
+            "sub/.ssh/k",
+            "/Users/me/.ssh/id_rsa",
+            "/System/Volumes/Data/Users/me/.ssh",
+            "/USERS/ME/.SSH/ID_RSA",
+            "~/.ssh",
+            "~/.ssh/config",
+            "~/x/.ssh/",
+        ] {
+            assert!(rm_hits(&ssh, w), "{w}");
+        }
+        for w in [
+            ".sshx",
+            "x.ssh",
+            "a/b.ssh/c",
+            "/x/.sshd/k",
+            "~",
+            "~/x",
+            "ssh",
+        ] {
+            assert!(!rm_hits(&ssh, w), "{w}");
+        }
+        let gh = pat(".config/gh", PatKind::Component);
+        assert!(rm_hits(&gh, "/h/.config/gh/hosts.yml"));
+        assert!(rm_hits(&gh, "~/.config/gh"));
+        assert!(!rm_hits(&gh, "~/.config/ghx"));
+        assert!(!rm_hits(&gh, "~/.config"));
+        let env = pat(".env.", PatKind::ComponentPrefix);
+        for w in [".env.local", "sub/.env.prod", "~/.env.x"] {
+            assert!(rm_hits(&env, w), "{w}");
+        }
+        for w in [".env", "x.env.local", "sub/a.env.x"] {
+            assert!(!rm_hits(&env, w), "{w}");
+        }
+        // An option's inline path value is matched the same way.
+        let cat = catalog_with_cp();
+        let r = [block_rule("cp", Vec::new(), vec![ssh])];
+        let cp = |w: &str, want| check_in(&cat, &r, seq(vec![cmd(&["cp", w, "a"])]), want);
+        cp("-t/u/.ssh/x", Decision::Block);
+        cp("--opt=sub/.ssh", Decision::Block);
+        cp("-t/u/.sshx", Decision::Allow);
+    }
+
+    #[test]
+    fn component_edges() {
+        // An empty pattern occurs at the start of every key.
+        assert!(component(b"", b"", true));
+        assert!(component(b"x", b"", false));
+        assert!(!component(b"x", b"", true));
+        assert!(component(b"/a", b"", false));
+        assert!(!component(b"ab", b"abc", false));
+        assert!(component(b"a/b/c", b"b", true));
+        assert!(component(b"a/bc", b"b", false));
+        assert!(!component(b"a/bc", b"b", true));
     }
 
     #[test]

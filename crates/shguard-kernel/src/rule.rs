@@ -48,6 +48,15 @@ pub enum PatKind {
     /// `/etc` and `/etc/x`, not `/etcfoo`). A pattern that ends in `/`
     /// (such as `/`) covers every word it is a byte prefix of.
     Under,
+    /// The pattern is one or more whole segments of the word, anywhere in it:
+    /// it starts at the word's start or right after a `/`, and ends at the
+    /// word's end or right before a `/` (`.ssh` covers `~/.ssh/id_rsa`,
+    /// `/Users/me/.ssh` and `sub/.ssh`, not `.sshx`; `.config/gh` covers
+    /// `/h/.config/gh/hosts.yml`). The word's `~` head plays no part.
+    Component,
+    /// Like `Component`, but the pattern's end need not be a segment's end:
+    /// it starts a segment (`.env.` covers `sub/.env.local`).
+    ComponentPrefix,
 }
 
 /// A target pattern. It reuses [`Part`], so `~/.bashrc` is

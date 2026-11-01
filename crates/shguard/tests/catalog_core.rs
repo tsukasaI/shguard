@@ -337,6 +337,50 @@ fn reading_credential_directories_is_asked() {
     );
 }
 
+/// #1113: the absolute home spelling, other volumes, and names at any depth.
+#[test]
+fn credential_files_are_asked_wherever_they_are() {
+    assert_all(
+        &[
+            "cat /Users/me/.ssh/id_rsa",
+            "cat /home/me/.ssh/id_ed25519",
+            "cat /System/Volumes/Data/Users/me/.ssh/id_rsa",
+            "cat /USERS/ME/.SSH/ID_RSA",
+            "head /Users/me/.aws/credentials",
+            "tail /root/.config/gh/hosts.yml",
+            "grep token /Users/me/.netrc",
+            "wc -l /Users/me/.zsh_history",
+            "sort /Users/me/.git-credentials",
+            "cat .env",
+            "cat sub/.env",
+            "cat ./app/.env.local",
+            "cat keys/id_rsa",
+            "cat /tmp/backup/id_ed25519.pub",
+            "cat /Users/me/.claude/.credentials.json",
+            "cat /Users/me/.claude.json",
+            "cp sub/.env x",
+            "uniq app/.env.prod",
+            "rg token app/.env",
+            "cat .envrc",
+            "cat /Users/me/.cargo/credentials.toml",
+            "cat sub/.env-prod",
+        ],
+        Decision::Ask,
+    );
+    // Neighbouring names are ordinary paths.
+    assert_all(
+        &[
+            "cat envrc.md",
+            "cat sub/x.env",
+            "cat .sshd_config",
+            "cat docs/ssh.md",
+            "cat .claude/settings.json",
+            "cat CLAUDE.md",
+        ],
+        Decision::Allow,
+    );
+}
+
 #[test]
 fn relative_paths_after_cd_and_dotdot_are_asked() {
     assert_all(
@@ -454,11 +498,28 @@ fn recursive_readers_of_broad_roots_are_not_allowed() {
         "rg -- BEGIN ~",
         "rg --files /Users/x",
         "ls -laR -- ~",
+        "grep -rA40 PRIVATE /System/Volumes/Data/Users/me",
+        "rg -A 40 PRIVATE /System/Volumes/Data/Users/me",
+        "grep -r x /System",
+        "grep -r x /System/Volumes",
+        "rg x /System/Volumes",
+        "grep -r x /var/root",
+        "grep -r x /private/var/root",
+        "ls -R /System/Volumes/Data/Users/me",
+        "fd . /System/Volumes/Data/Users/me",
+        "tree /System/Volumes/Data/Users/me",
+        "eza -T /System/Volumes/Data/Users/me",
     ]);
     assert_all(
         &["grep -r foo src", "rg foo src", "ls -R src"],
         Decision::Allow,
     );
+}
+
+#[test]
+fn a_search_pattern_naming_a_credential_is_a_path_unless_given_with_e() {
+    assert_not_allow(&["grep .ssh docs/", "grep -rn .env src/"]);
+    assert_all(&["grep -e .ssh docs/", "rg -e .env src/"], Decision::Allow);
 }
 
 #[test]
