@@ -1592,6 +1592,9 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
+  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/var/root", kind = "under" },
+  { pat = "/private/var/root", kind = "under" },
 ]
 
 # rg is always recursive.
@@ -1605,6 +1608,9 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
+  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/var/root", kind = "under" },
+  { pat = "/private/var/root", kind = "under" },
 ]
 
 [[rule]]
@@ -1618,6 +1624,9 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
+  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/var/root", kind = "under" },
+  { pat = "/private/var/root", kind = "under" },
 ]
 
 # fd is recursive: it lists every name under `/` or a home directory.
@@ -1631,6 +1640,9 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
+  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/var/root", kind = "under" },
+  { pat = "/private/var/root", kind = "under" },
 ]
 
 # tree is recursive, and eza is with -R or -T: they list every name under
@@ -1645,6 +1657,9 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
+  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/var/root", kind = "under" },
+  { pat = "/private/var/root", kind = "under" },
 ]
 
 [[rule]]
@@ -1658,4 +1673,7 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
+  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/var/root", kind = "under" },
+  { pat = "/private/var/root", kind = "under" },
 ]

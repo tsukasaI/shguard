@@ -18,6 +18,9 @@
   one or more whole segments anywhere in the path (`.ssh` covers
   `/Users/me/.ssh/id_rsa` and `sub/.ssh`), or starts one (`.env.` covers
   `app/.env.local`). Proved in the kernel (#1113).
+- Recursive reads (`grep -r`, `rg`, `ls -R`, `fd`, `tree`, `eza`) of
+  `/System/Volumes/Data`, `/var/root` and `/private/var/root` are Ask, like
+  the other spellings of the home and root directories (#1113).
 
 ### Changed
 

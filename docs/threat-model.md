@@ -70,12 +70,15 @@ recorded, not hidden.
   is `cwd_sensitive`, so `cd /tmp/x && git status` is Ask. Only `cd` is
   tracked; `pushd`, `popd` and `env -C` have no row and are Ask.
 - **Credential files.** `cat`, `head`, `tail`, `grep`, `rg`, `wc`, `sort`,
-  `cp`, `uniq` and every `git` row are Ask on a path with a credential segment anywhere in it
-  (`.ssh`, `.aws`, `.config/gh`, `.netrc`, `.env`, `.env.*`, `id_rsa*`, ...,
-  #1113), whatever the spelling of the home directory. Still Allow: a copy
-  or link under another name, a recursive read of a directory that holds
-  one (`grep -r x dir`) outside the broad home/root rules, and readers with
-  no such rule.
+  `cp`, `uniq` and every `git` row are Ask on a path with a credential
+  segment anywhere in it (`.ssh`, `.aws`, `.config/gh`, `.netrc`, `.env`,
+  `.env.*`, `id_rsa*`, ..., #1113), whatever the spelling of the home
+  directory. Still Allow: a copy or link under another name, a recursive
+  read of a directory that holds one (`grep -r x dir`) outside the broad
+  home/root rules, and readers with no such rule. The broad home/root rules
+  of `grep -r`, `rg`, `ls -R`, `fd`, `tree` and `eza` cover `/`, `~`,
+  `/Users`, `/home`, `/root`, the macOS firmlink `/System/Volumes/Data`, and
+  `/var/root` and `/private/var/root`.
 - **Writes to `.env`.** Since #1113 the credential rule of `cp` covers every
   operand, so `cp x .env` and `cp .env.example .env` are Ask (they were
   Allow under #1090). Writes to relative credential-shaped directories

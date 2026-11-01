@@ -498,6 +498,14 @@ fn recursive_readers_of_broad_roots_are_not_allowed() {
         "rg -- BEGIN ~",
         "rg --files /Users/x",
         "ls -laR -- ~",
+        "grep -rA40 PRIVATE /System/Volumes/Data/Users/me",
+        "rg -A 40 PRIVATE /System/Volumes/Data/Users/me",
+        "grep -r x /var/root",
+        "grep -r x /private/var/root",
+        "ls -R /System/Volumes/Data/Users/me",
+        "fd . /System/Volumes/Data/Users/me",
+        "tree /System/Volumes/Data/Users/me",
+        "eza -T /System/Volumes/Data/Users/me",
     ]);
     assert_all(
         &["grep -r foo src", "rg foo src", "ls -R src"],
