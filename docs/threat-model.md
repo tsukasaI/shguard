@@ -101,6 +101,9 @@ recorded, not hidden.
   they can send a token to another host or print gh's environment.
   `--template` is Allow; gh's template functions have no file or exec
   access.
+  `gh api` GETs any endpoint the token can read, across repositories and
+  organizations (for example another private repository's contents), unlike
+  the other gh rows, which `-R` cannot point elsewhere.
 - **Tilde words in option position.** `cd ~/x` and `ls ~/x` are Ask today
   (a fail-closed parse of the argv spec, #1038), at a usability cost.
 
