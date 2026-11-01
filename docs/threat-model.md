@@ -77,8 +77,9 @@ recorded, not hidden.
   read of a directory that holds one (`grep -r x dir`) outside the broad
   home/root rules, and readers with no such rule. The broad home/root rules
   of `grep -r`, `rg`, `ls -R`, `fd`, `tree` and `eza` cover `/`, `~`,
-  `/Users`, `/home`, `/root`, the macOS firmlink `/System/Volumes/Data`, and
-  `/var/root` and `/private/var/root`. A search pattern of `grep` or `rg`
+  `/Users`, `/home`, `/root`, `/System` (it holds the firmlink
+  `/System/Volumes/Data` to every home), `/var/root` and
+  `/private/var/root`. A search pattern of `grep` or `rg`
   that names a credential file is a path word, so `grep .ssh docs/` is
   Ask; `grep -e .ssh docs/` is Allow. Reads and `git` operations on `.env.*`
   siblings such as `.env.example` are Ask. `git show <rev>:<path>` (for

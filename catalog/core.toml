@@ -1592,7 +1592,7 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
-  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/System", kind = "under" },
   { pat = "/var/root", kind = "under" },
   { pat = "/private/var/root", kind = "under" },
 ]
@@ -1608,7 +1608,7 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
-  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/System", kind = "under" },
   { pat = "/var/root", kind = "under" },
   { pat = "/private/var/root", kind = "under" },
 ]
@@ -1624,7 +1624,7 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
-  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/System", kind = "under" },
   { pat = "/var/root", kind = "under" },
   { pat = "/private/var/root", kind = "under" },
 ]
@@ -1640,7 +1640,7 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
-  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/System", kind = "under" },
   { pat = "/var/root", kind = "under" },
   { pat = "/private/var/root", kind = "under" },
 ]
@@ -1657,7 +1657,7 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
-  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/System", kind = "under" },
   { pat = "/var/root", kind = "under" },
   { pat = "/private/var/root", kind = "under" },
 ]
@@ -1673,7 +1673,7 @@ targets = [
   { pat = "/Users", kind = "prefix" },
   { pat = "/home", kind = "prefix" },
   { pat = "/root", kind = "prefix" },
-  { pat = "/System/Volumes/Data", kind = "under" },
+  { pat = "/System", kind = "under" },
   { pat = "/var/root", kind = "under" },
   { pat = "/private/var/root", kind = "under" },
 ]

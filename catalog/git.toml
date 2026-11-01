@@ -1354,8 +1354,8 @@ outcome = "ask"
 
 # A path with a credential segment, as for the core readers (#1113):
 # `git add .env`, `git add -N .env` and `git log -p -- .env` would put the
-# file where `git log -p` and `git diff --cached` print it. The targets are the same as
-# those of `cat-ask-credential-dirs` in core.toml.
+# file where `git log -p` and `git diff --cached` print it. The targets are
+# the same as those of `cat-ask-credential-dirs` in core.toml.
 [[rule]]
 id = "git-ask-credential-dirs"
 key = ["git"]
