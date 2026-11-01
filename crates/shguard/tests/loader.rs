@@ -549,6 +549,16 @@ fn targets_must_be_in_normal_form() {
             );
         }
     }
+    for pat in ["..", "a/..", "../b"] {
+        for kind in ["component", "component_prefix"] {
+            let errs = errors(&target(pat, kind));
+            assert!(
+                errs.iter()
+                    .any(|e| matches!(e, LoadError::DotDotTarget { .. })),
+                "{pat} {kind}: {errs:?}"
+            );
+        }
+    }
     for kind in ["prefix", "under", "component", "component_prefix"] {
         let errs = errors(&target(".", kind));
         assert!(

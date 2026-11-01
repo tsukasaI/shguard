@@ -157,6 +157,15 @@ pub enum LoadError {
         rule: String,
         pat: String,
     },
+    /// A `component` or `component_prefix` target has a `..` segment.
+    #[error(
+        "{file}: rule `{rule}`: component target `{pat}` has a `..` segment; words keep `..` unresolved, so no credential name is ever `..`; name the segments only (`.ssh`)"
+    )]
+    DotDotTarget {
+        file: String,
+        rule: String,
+        pat: String,
+    },
     /// The target `.` has a kind other than `exact`.
     #[error(
         "{file}: rule `{rule}`: target `.` must be `exact`; relative words are compared in normal form (`./x` is `x`), so name the paths instead (`.git` as `under`)"

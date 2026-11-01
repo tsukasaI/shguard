@@ -514,6 +514,12 @@ fn recursive_readers_of_broad_roots_are_not_allowed() {
 }
 
 #[test]
+fn a_search_pattern_naming_a_credential_is_a_path_unless_given_with_e() {
+    assert_not_allow(&["grep .ssh docs/", "grep -rn .env src/"]);
+    assert_all(&["grep -e .ssh docs/", "rg -e .env src/"], Decision::Allow);
+}
+
+#[test]
 fn more_credential_files_are_asked() {
     assert_not_allow(&[
         "cat -- ~/.claude/.credentials.json",

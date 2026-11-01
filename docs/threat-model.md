@@ -78,7 +78,12 @@ recorded, not hidden.
   home/root rules, and readers with no such rule. The broad home/root rules
   of `grep -r`, `rg`, `ls -R`, `fd`, `tree` and `eza` cover `/`, `~`,
   `/Users`, `/home`, `/root`, the macOS firmlink `/System/Volumes/Data`, and
-  `/var/root` and `/private/var/root`.
+  `/var/root` and `/private/var/root`. A search pattern of `grep` or `rg`
+  that names a credential file is a path word, so `grep .ssh docs/` is
+  Ask; `grep -e .ssh docs/` is Allow. Reads and `git` operations on `.env.*`
+  siblings such as `.env.example` are Ask. `git show <rev>:<path>` (for
+  example `git show HEAD:.env`) is Allow, because `rev:path` is not a path
+  word, so no target sees it.
 - **Writes to `.env`.** Since #1113 the credential rule of `cp` covers every
   operand, so `cp x .env` and `cp .env.example .env` are Ask (they were
   Allow under #1090). Writes to relative credential-shaped directories

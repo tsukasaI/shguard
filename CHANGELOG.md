@@ -21,6 +21,13 @@
 - Recursive reads (`grep -r`, `rg`, `ls -R`, `fd`, `tree`, `eza`) of
   `/System/Volumes/Data`, `/var/root` and `/private/var/root` are Ask, like
   the other spellings of the home and root directories (#1113).
+- A search pattern of `grep` or `rg` that names a credential file is a path
+  word, so `grep .ssh docs/` and `grep -rn .env src/` are Ask; pass it with
+  `-e PATTERN` (`grep -e .ssh docs/`) to search for the text (#1113).
+- Reads and `git` operations on `.env.*` siblings such as `.env.example`
+  are Ask too (`git add .env.example`, `cat .env.example`) (#1113).
+- A `component` or `component_prefix` target with a `..` segment is a load
+  error (#1113).
 
 ### Changed
 

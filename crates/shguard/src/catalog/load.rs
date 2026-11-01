@@ -773,6 +773,20 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
         });
         return None;
     }
+    // Words keep `..` unresolved (`a/../.ssh` is not `.ssh`), so a component
+    // that is `..` would match a traversal, not a name. `exact`, `prefix`
+    // and `under` compare whole normalized forms on both sides and stay
+    // coherent with `..`, so only the component kinds refuse it.
+    if matches!(kind, PatKind::Component | PatKind::ComponentPrefix)
+        && t.pat.split('/').any(|seg| seg == "..")
+    {
+        errs.push(LoadError::DotDotTarget {
+            file: file.to_owned(),
+            rule: rule.to_owned(),
+            pat: t.pat.clone(),
+        });
+        return None;
+    }
     let (head, body) = match t.pat.strip_prefix('~') {
         Some(rest) => ("~", rest),
         None => ("", t.pat.as_str()),
