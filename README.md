@@ -94,7 +94,8 @@ one, in the same command line:
   and `cargo` row is marked, because those tools read configuration or code
   from the directory they run in (`.git/config`, the git remotes,
   `.cargo/config.toml`, `build.rs`): `cd /tmp/x && git status` is Ask,
-  `git status` alone is Allow.
+  `git status` alone is Allow. The `fd` row is marked too, because it
+  searches the working directory recursively (`cd /Users/me && fd -H`).
 
 A `cd` later in the line does not reach back: `git status; cd /tmp/x` is
 Allow.
