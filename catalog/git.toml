@@ -1129,9 +1129,10 @@ long = "multiple"
 
 # Changes the checked-out branch; git refuses when tracked local changes
 # would be lost, but it overwrites an ignored file that the target branch
-# tracks (the default --overwrite-ignore). Left out: -f/--force and --discard-changes (throw local changes
-# away), -m/--merge, -C/--force-create (resets an existing branch),
-# --orphan, --recurse-submodules and --conflict.
+# tracks (the default --overwrite-ignore). Left out: -f/--force and
+# --discard-changes (throw local changes away), -m/--merge,
+# -C/--force-create (resets an existing branch), --orphan,
+# --recurse-submodules and --conflict.
 [[row]]
 key = ["git", "switch"]
 source = "https://git-scm.com/docs/git-switch"
