@@ -14,9 +14,27 @@
       systems = [ "aarch64-darwin" "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
     in {
-      # No `packages.default` yet: `shguard` is a lib until the hook binary
-      # lands (M13), so there is nothing to install. Add a
-      # `rustPlatform.buildRustPackage` over ./Cargo.lock with that milestone.
+      # The hook binary, built like the release job builds it
+      # (`cargo build --locked --release -p shguard`), with nixpkgs' stable
+      # rustc. Tests are not run here: the differential tests need bash,
+      # brush and shfmt, and the release job runs `cargo test` before it
+      # publishes.
+      packages = forAllSystems (system: pkgs: {
+        default = pkgs.rustPlatform.buildRustPackage {
+          pname = "shguard";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+          src = self;
+          cargoLock.lockFile = ./Cargo.lock;
+          cargoBuildFlags = [ "-p" "shguard" ];
+          doCheck = false;
+          meta = {
+            description = "PreToolUse hook gating shell commands through a Creusot-verified kernel";
+            license = with pkgs.lib.licenses; [ mit asl20 ];
+            mainProgram = "shguard";
+          };
+        };
+      });
+
       devShells = forAllSystems (system: pkgs: {
         default = pkgs.mkShell {
           packages = [

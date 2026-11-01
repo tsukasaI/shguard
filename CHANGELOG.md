@@ -34,6 +34,9 @@
   when the rule hits, or when a command under the hint's key is Unknown; no
   decision changes. Embedded rules carry reasons, and `find`,
   `git checkout` and `git restore` have hints (#1112).
+- `packages.default` in the flake: the `shguard` binary built with
+  nixpkgs' `rustPlatform.buildRustPackage` from `Cargo.lock`, so a Nix
+  configuration can install it from a pinned rev (#1114).
 
 ### Changed
 
