@@ -1,4 +1,5 @@
-# The embedded git catalog: read-only subcommands and `push`.
+# The embedded git catalog: read-only subcommands, the local writes `add`,
+# `commit`, `switch` and `stash`, and `fetch` and `push`.
 #
 # git has one implementation, parses options with parse-options (options
 # may follow operands, `--opt=value`, `--` ends options), and the rows cite
@@ -18,8 +19,11 @@
 # and asked. `cwd_sensitive` asks `cd /x && git status` the same way: git
 # reads `/x`'s `.git/config`. Every row below sets it too, as the loader
 # requires. The row takes no operand either, so any subcommand without a
-# row below (`reset`, `clean`, `checkout`, `commit`, `rebase`, ...) is
-# Unknown and asked; they have no rows, hence no rules.
+# row below (`reset`, `clean`, `checkout`, `restore`, `rebase`, ...) is
+# Unknown and asked; they have no rows, hence no rules. `checkout` and
+# `restore` stay out because a row cannot require an option: `git checkout
+# -b x` and `git restore --staged f` are harmless, but `git checkout f` and
+# `git restore f` throw away local changes. Use `git switch -c` instead.
 [[row]]
 key = ["git"]
 source = "https://git-scm.com/docs/git"
@@ -31,8 +35,11 @@ positionals = []
 # Left out: --output (writes a file), --ext-diff and --textconv (run
 # configured programs), --show-signature (runs gpg; the `%G?`-style format
 # placeholders of --pretty/--format still do, which is P3), -O<orderfile>, -L, -c,
-# -C, --no-pager (a global option), -<number> and the abbreviated long
-# options (git accepts `--max-c=5`; here only the full name matches).
+# -C, --no-pager (a global option) and the abbreviated long options (git
+# accepts `--max-c=5`; here only the full name matches). `-<number>` (`-5`,
+# `-15`) is read as a cluster of the digit flags 0-9 listed after `-n`; a
+# cluster git rejects (`-5p`, which is not all digits) is a git error, never
+# another meaning.
 # Revisions and paths share one operand slot, so both take the `path` role:
 # a range (`a..b`) is fine, but a `..` path segment is asked.
 [[row]]
@@ -198,6 +205,26 @@ long = "relative-date"
 short = "n"
 long = "max-count"
 value = { takes = "inert" }
+[[row.opt]]
+short = "0"
+[[row.opt]]
+short = "1"
+[[row.opt]]
+short = "2"
+[[row.opt]]
+short = "3"
+[[row.opt]]
+short = "4"
+[[row.opt]]
+short = "5"
+[[row.opt]]
+short = "6"
+[[row.opt]]
+short = "7"
+[[row.opt]]
+short = "8"
+[[row.opt]]
+short = "9"
 [[row.opt]]
 long = "skip"
 value = { takes = "inert" }
@@ -931,6 +958,315 @@ value = { optional = "inert" }
 [[row.opt]]
 long = "force-if-includes"
 
+# Staging. Left out: -f/--force (adds ignored files), -p/--patch,
+# -i/--interactive and -e/--edit (open an editor or a prompt),
+# --pathspec-from-file, --chmod and --sparse.
+[[row]]
+key = ["git", "add"]
+source = "https://git-scm.com/docs/git-add"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "n"
+long = "dry-run"
+[[row.opt]]
+short = "v"
+long = "verbose"
+[[row.opt]]
+short = "u"
+long = "update"
+[[row.opt]]
+short = "A"
+long = "all"
+[[row.opt]]
+long = "no-all"
+[[row.opt]]
+short = "N"
+long = "intent-to-add"
+[[row.opt]]
+long = "ignore-removal"
+[[row.opt]]
+long = "no-ignore-removal"
+[[row.opt]]
+long = "refresh"
+[[row.opt]]
+long = "ignore-errors"
+[[row.opt]]
+long = "renormalize"
+
+# A local commit. Hooks (`pre-commit`, `commit-msg`) and the editor are
+# repo-local config, P3. A row cannot require -m, so a bare `git commit` is
+# Allowed and opens `core.editor`, which waits for input. Left out:
+# -n/--no-verify (skips the hooks), -S/--gpg-sign (runs `gpg.program`),
+# -p/--patch and --interactive (prompt), -e/--edit, -t/--template (editor),
+# --pathspec-from-file, -F/--file (reads any file into the message, which
+# `git push` then publishes).
+[[row]]
+key = ["git", "commit"]
+source = "https://git-scm.com/docs/git-commit"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "m"
+long = "message"
+value = { takes = "inert" }
+[[row.opt]]
+short = "a"
+long = "all"
+[[row.opt]]
+short = "q"
+long = "quiet"
+[[row.opt]]
+short = "s"
+long = "signoff"
+[[row.opt]]
+long = "no-signoff"
+[[row.opt]]
+long = "allow-empty"
+[[row.opt]]
+long = "allow-empty-message"
+[[row.opt]]
+short = "v"
+long = "verbose"
+[[row.opt]]
+long = "amend"
+[[row.opt]]
+long = "no-edit"
+[[row.opt]]
+short = "C"
+long = "reuse-message"
+value = { takes = "inert" }
+[[row.opt]]
+long = "author"
+value = { takes = "inert" }
+[[row.opt]]
+long = "date"
+value = { takes = "inert" }
+[[row.opt]]
+long = "trailer"
+value = { takes = "inert" }
+[[row.opt]]
+long = "fixup"
+value = { takes = "inert" }
+[[row.opt]]
+long = "squash"
+value = { takes = "inert" }
+[[row.opt]]
+long = "cleanup"
+value = { takes = "inert" }
+[[row.opt]]
+long = "dry-run"
+[[row.opt]]
+long = "short"
+[[row.opt]]
+long = "porcelain"
+[[row.opt]]
+short = "u"
+long = "untracked-files"
+value = { optional = "inert" }
+[[row.opt]]
+short = "i"
+long = "include"
+[[row.opt]]
+short = "o"
+long = "only"
+[[row.opt]]
+long = "reset-author"
+[[row.opt]]
+long = "status"
+[[row.opt]]
+long = "no-status"
+
+# Downloads objects and updates remote-tracking refs. The remote and the
+# refspecs are `path` words so the rules below can target them; a `+`
+# refspec (a forced local update) is a `+` word, which the row rejects in
+# option position and a rule asks after `--`. Left out: --upload-pack (runs
+# a program on the remote side of a local or ssh transport), -f/--force,
+# -p/--prune and -P/--prune-tags (delete local refs and tags, which have no
+# reflog), --depth, --deepen and --shallow-since (make a full clone
+# shallow), --refmap, --set-upstream (writes config), --negotiation-tip,
+# --server-option/-o and --recurse-submodules.
+[[row]]
+key = ["git", "fetch"]
+source = "https://git-scm.com/docs/git-fetch https://git-scm.com/docs/fetch-options"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+long = "all"
+[[row.opt]]
+short = "t"
+long = "tags"
+[[row.opt]]
+short = "n"
+long = "no-tags"
+[[row.opt]]
+short = "q"
+long = "quiet"
+[[row.opt]]
+short = "v"
+long = "verbose"
+[[row.opt]]
+long = "dry-run"
+[[row.opt]]
+long = "unshallow"
+[[row.opt]]
+long = "progress"
+[[row.opt]]
+long = "porcelain"
+[[row.opt]]
+short = "j"
+long = "jobs"
+value = { takes = "inert" }
+[[row.opt]]
+long = "no-recurse-submodules"
+[[row.opt]]
+long = "multiple"
+
+# Changes the checked-out branch; git refuses when tracked local changes
+# would be lost, but it overwrites an ignored file that the target branch
+# tracks (the default --overwrite-ignore). Left out: -f/--force and
+# --discard-changes (throw local changes away), -m/--merge,
+# -C/--force-create (resets an existing branch), --orphan,
+# --recurse-submodules and --conflict.
+[[row]]
+key = ["git", "switch"]
+source = "https://git-scm.com/docs/git-switch"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["path", "path"]
+[[row.opt]]
+short = "c"
+long = "create"
+value = { takes = "inert" }
+[[row.opt]]
+short = "d"
+long = "detach"
+[[row.opt]]
+long = "guess"
+[[row.opt]]
+long = "no-guess"
+[[row.opt]]
+short = "t"
+long = "track"
+value = { optional = "inert" }
+[[row.opt]]
+long = "no-track"
+[[row.opt]]
+short = "q"
+long = "quiet"
+[[row.opt]]
+long = "progress"
+[[row.opt]]
+long = "no-progress"
+
+# A bare `git stash` saves the local changes and resets the work tree to
+# HEAD; they stay recoverable with `git stash pop`. The row takes no
+# operand, so `git stash push`, `drop`, `clear`, `branch` and `create` are
+# Unknown. Left out: -p/--patch, -a/--all (stashes ignored files too),
+# --pathspec-from-file.
+[[row]]
+key = ["git", "stash"]
+source = "https://git-scm.com/docs/git-stash"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = []
+[[row.opt]]
+short = "q"
+long = "quiet"
+[[row.opt]]
+short = "u"
+long = "include-untracked"
+[[row.opt]]
+short = "k"
+long = "keep-index"
+[[row.opt]]
+long = "no-keep-index"
+[[row.opt]]
+short = "m"
+long = "message"
+value = { takes = "inert" }
+
+[[row]]
+key = ["git", "stash", "list"]
+source = "https://git-scm.com/docs/git-stash"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = []
+[[row.opt]]
+long = "oneline"
+[[row.opt]]
+long = "stat"
+[[row.opt]]
+long = "format"
+value = { takes = "inert" }
+[[row.opt]]
+long = "pretty"
+value = { optional = "inert" }
+[[row.opt]]
+short = "n"
+long = "max-count"
+value = { takes = "inert" }
+
+[[row]]
+key = ["git", "stash", "show"]
+source = "https://git-scm.com/docs/git-stash"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]
+[[row.opt]]
+short = "p"
+long = "patch"
+[[row.opt]]
+long = "stat"
+[[row.opt]]
+long = "name-only"
+[[row.opt]]
+long = "name-status"
+[[row.opt]]
+short = "u"
+long = "include-untracked"
+[[row.opt]]
+long = "only-untracked"
+
+# `pop` and `apply` restore a stash; git refuses when tracked local changes
+# would be overwritten, but it overwrites an ignored file that the stash
+# holds.
+[[row]]
+key = ["git", "stash", "pop"]
+source = "https://git-scm.com/docs/git-stash"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]
+[[row.opt]]
+long = "index"
+[[row.opt]]
+short = "q"
+long = "quiet"
+
+[[row]]
+key = ["git", "stash", "apply"]
+source = "https://git-scm.com/docs/git-stash"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["inert"]
+[[row.opt]]
+long = "index"
+[[row.opt]]
+short = "q"
+long = "quiet"
+
 # Rules. A rule only raises a decision.
 
 # A forced push can overwrite remote history.
@@ -986,6 +1322,34 @@ outcome = "ask"
 id = "git-push-ext-remote"
 key = ["git", "push"]
 targets = [{ pat = "ext::", kind = "prefix" }]
+outcome = "ask"
+
+# Fetching from `ext::cmd` runs the command when `protocol.ext.allow` is set.
+# A URL remote downloads from a host the repository's remotes may not name.
+# Not covered, as for push: the scp form `user@host:path` and other
+# `<helper>::` remotes.
+[[rule]]
+id = "git-fetch-ext-or-url-remote"
+key = ["git", "fetch"]
+targets = [
+  { pat = "ext::", kind = "prefix" },
+  { pat = "https:", kind = "prefix" },
+  { pat = "http:", kind = "prefix" },
+  { pat = "ssh:", kind = "prefix" },
+  { pat = "git:", kind = "prefix" },
+  { pat = "git+ssh:", kind = "prefix" },
+  { pat = "ssh+git:", kind = "prefix" },
+  { pat = "file:", kind = "prefix" },
+  { pat = "ftp:", kind = "prefix" },
+  { pat = "ftps:", kind = "prefix" },
+]
+outcome = "ask"
+
+# A `+` refspec after `--` force-updates a local ref.
+[[rule]]
+id = "git-fetch-plus-refspec"
+key = ["git", "fetch"]
+targets = [{ pat = "+", kind = "prefix" }]
 outcome = "ask"
 
 # An absolute or `~` path (a local remote, a file outside the repository,

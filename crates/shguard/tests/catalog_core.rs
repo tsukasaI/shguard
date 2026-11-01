@@ -81,6 +81,13 @@ fn every_row_has_an_allowed_command() {
             "fd -H -t f -E target 'Cargo\\.toml$' .",
             "fd --max-depth=2 -g '*.rs' crates",
             "fd -0 foo | wc -l",
+            "eza",
+            "eza -la --git src",
+            "eza -T -L 2 --git-ignore",
+            "tree",
+            "tree -L 2 src",
+            "tree -a -I target --gitignore --dirsfirst",
+            "eza -l /etc",
         ],
         Decision::Allow,
     );
@@ -154,6 +161,17 @@ fn every_row_has_a_non_allowed_command() {
         "fd . /",
         "fd . /Users/me",
         "fd --search-path /home/me x",
+        "eza --icons src",
+        "eza --stdin",
+        "eza --color-scale all",
+        "tree -o out.txt",
+        "tree --fromfile list.txt",
+        "tree -H . -o x.html",
+        "tree --gitfile=x",
+        "tree /",
+        "tree -L 2 /Users/me",
+        "eza -R /",
+        "eza -T /home/me",
     ]);
 }
 

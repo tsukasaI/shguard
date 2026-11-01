@@ -80,6 +80,19 @@ recorded, not hidden.
   `<helper>::` remotes other than `ext::` (#1096), glob refspecs
   (`'refs/heads/*:refs/heads/*'`, #1095), `--follow-tags` (#1097), and
   relative local remotes (`git push sub/repo main`, #1100).
+- **git fetch remotes.** Fetches from `ext::` remotes, from the URL schemes
+  push asks plus `ftp:` and `ftps:`, and with a `+` refspec are Ask. Still
+  Allow, as for push: the scp form (`git fetch git@host:o/r`), other
+  `<helper>::` remotes, relative local remotes (`git fetch sub/repo`, as
+  #1100 records for push) and `<scheme>://` URLs whose scheme has a remote
+  helper other than the asked ones. A fetch writes only remote-tracking refs
+  and `FETCH_HEAD`, or the local refs an explicit `src:dst` refspec names.
+- **git hooks.** The `git commit`, `git switch`, `git fetch` and `git stash`
+  rows run repository hooks (`pre-commit`, `commit-msg`, `post-checkout`,
+  `reference-transaction`, ...), which P3 covers.
+- **Ignored files.** `git switch`, `git stash pop` and `git stash apply`
+  overwrite an ignored file that the target branch or the stash tracks; a row
+  cannot require `--no-overwrite-ignore`.
 - **git format placeholders.** `%G?`-style placeholders in a quoted
   `--format` (`git log '--format=%G?'`) verify signatures through
   `gpg.program`, as `--show-signature` would (#1099).
@@ -87,6 +100,9 @@ recorded, not hidden.
   they can send a token to another host or print gh's environment.
   `--template` is Allow; gh's template functions have no file or exec
   access.
+  `gh api` GETs any endpoint the token can read, across repositories and
+  organizations (for example another private repository's contents), unlike
+  the other gh rows, which `-R` cannot point elsewhere.
 - **Tilde words in option position.** `cd ~/x` and `ls ~/x` are Ask today
   (a fail-closed parse of the argv spec, #1038), at a usability cost.
 

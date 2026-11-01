@@ -8,9 +8,19 @@
   `-X`/`--exec-batch`, `-l`/`--list-details`, `-C`/`--base-directory` or
   `--ignore-file`; `fd` from `/` or a home directory is Ask, and so is `fd`
   after a `cd` (#1111).
+- Embedded rows for `git add`, `git commit`, `git fetch`, `git switch`,
+  `git stash` (with `list`, `show`, `pop`, `apply`), a GET-only `gh api`,
+  `eza` and `tree`; `git log` takes `-<number>` (`-5`). A bare `git commit`
+  is Allowed and opens the editor (#1115).
+- README recipes for user rows the catalog leaves out: `gh pr create`, `jq`,
+  `nix build` (#1115).
 
 ### Changed
 
+- The embedded catalog now has rows keyed `git add`, `git commit`,
+  `git fetch`, `git switch`, `git stash`, `gh api`, `eza` and `tree`. A user
+  config with its own row under one of those keys fails to load (duplicate
+  key, every Bash call is denied) until that row is removed (#1115).
 - `fd`, `split` and `gsplit` are no longer denylisted heads. A row for one of
   them, or for `fdfind` (embedded or user), loads when it leaves out the
   options that run code (`fd -x`/`-X`/`-l`, `split --filter` and its

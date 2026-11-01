@@ -1,7 +1,8 @@
 # The embedded gh catalog: read-only `pr`, `issue` and `run` subcommands.
 #
-# Only commands that print what GitHub returns are rows. Left out on purpose:
-# `--web`/`-w` (opens a browser), `gh api`, `gh auth`, `gh extension`,
+# Only commands that print what GitHub returns are rows, and `gh api` in its
+# GET-only form (see its row). Left out on purpose:
+# `--web`/`-w` (opens a browser), `gh auth`, `gh extension`,
 # `gh alias` and every subcommand that edits (`merge`, `create`, `close`,
 # `comment`, `rerun`, ...). A parent row has no options, so a global option
 # before the subcommand (`gh -R x pr view`) and an unlisted subcommand are
@@ -216,6 +217,33 @@ opt = [
   { short = "q", long = "jq", value = { takes = "inert" } },
   { short = "t", long = "template", value = { takes = "inert" } },
   { short = "R", long = "repo", value = { takes = "inert" } },
+]
+
+# ---- gh api ----
+
+# GET only. gh sends a request with a body, and switches the method to POST,
+# when it is given fields, so the row leaves out every option that sets the
+# method or a body: -X/--method, -f/--raw-field, -F/--field, --input. Also
+# left out: -H/--header (`X-HTTP-Method-Override`), --hostname (sends the
+# token to another host), --verbose (prints the request). The endpoint is a
+# `path` word so the URL rule below can see it; `-q/--jq` is listed only so
+# that the jq rule blocks it.
+[[row]]
+key = ["gh", "api"]
+source = "https://cli.github.com/manual/gh_api"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = ["path"]
+opt = [
+  { long = "paginate" },
+  { long = "slurp" },
+  { short = "i", long = "include" },
+  { long = "silent" },
+  { long = "cache", value = { takes = "inert" } },
+  { short = "p", long = "preview", value = { takes = "inert" } },
+  { short = "t", long = "template", value = { takes = "inert" } },
+  { short = "q", long = "jq", value = { takes = "inert" } },
 ]
 
 # Rules. A rule only raises a decision.

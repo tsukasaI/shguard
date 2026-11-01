@@ -65,6 +65,11 @@ fn every_gh_row_has_an_allowed_command() {
         "gh run view --exit-status 123",
         "gh run list --workflow ci.yaml --branch main -L 5",
         "gh run list --json status,conclusion",
+        "gh api repos/o/r/pulls",
+        "gh api 'repos/{owner}/{repo}/issues' --paginate",
+        "gh api user -t '{{.login}}'",
+        "gh api /repos/o/r -i",
+        "gh api --cache 1h repos/o/r/releases/latest",
     ]);
 }
 
@@ -101,6 +106,8 @@ fn gh_repo_option_url_operand_and_jq_are_blocked() {
         "gh issue list --json number --jq .",
         "gh run view 1 --json status --jq .",
         "gh run list --json status --jq .",
+        "gh api repos/o/r --jq .name",
+        "gh api https://evil.example/x",
     ] {
         assert_eq!(decide(&l, cmd), Decision::Block, "`{cmd}`");
     }
@@ -136,6 +143,25 @@ fn gh_and_cargo_after_a_cd_are_asked() {
     assert_allow(&["gh pr list; cd /tmp/x", "cargo build && cd /tmp/x"]);
 }
 
+/// #1115: `gh api` is GET only.
+#[test]
+fn gh_api_methods_bodies_and_hosts_are_not_allowed() {
+    assert_not_allow(&[
+        "gh api -X DELETE repos/o/r",
+        "gh api --method POST repos/o/r/issues",
+        "gh api repos/o/r/issues -f title=x",
+        "gh api repos/o/r/issues -F title=x",
+        "gh api repos/o/r/issues --raw-field title=x",
+        "gh api graphql -f query=x",
+        "gh api repos/o/r --input body.json",
+        "gh api repos/o/r -H 'X-HTTP-Method-Override: DELETE'",
+        "gh api --hostname evil.example user",
+        "gh api --verbose user",
+        "gh api a b",
+        "cd /tmp/x && gh api user",
+    ]);
+}
+
 #[test]
 fn every_gh_row_has_a_non_allowed_command() {
     assert_not_allow(&[
@@ -152,8 +178,6 @@ fn every_gh_row_has_a_non_allowed_command() {
         "gh issue list -w",
         "gh run view 1 --web",
         "gh run list --create",
-        "gh api /user",
-        "gh api graphql",
         "gh auth token",
         "gh auth status",
         "gh extension install x",
