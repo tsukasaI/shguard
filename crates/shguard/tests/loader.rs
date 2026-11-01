@@ -245,6 +245,20 @@ fn denylisted_head() {
 }
 
 #[test]
+fn a_path_head_is_a_load_error() {
+    // A path head would skip the head checks a bare name gets.
+    for head in ["/bin/bash", "/opt/homebrew/bin/fd", "./fd", "bin/ls"] {
+        let t = row(&format!("\"{head}\""), "");
+        assert!(
+            errors(&t)
+                .iter()
+                .any(|e| matches!(e, LoadError::PathHead { .. })),
+            "{head}"
+        );
+    }
+}
+
+#[test]
 fn code_option_heads_load_without_their_code_options() {
     for head in ["fd", "split", "gsplit"] {
         let t = row(&format!("\"{head}\""), "rest = \"path\"");

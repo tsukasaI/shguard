@@ -324,6 +324,8 @@ fn relative_paths_after_cd_and_dotdot_are_asked() {
     assert_all(
         &[
             "cd src && cat a.txt",
+            "cd /Users/me && fd -H",
+            "cd src && fd -e rs",
             "cat ../a.txt",
             "rm -rf ../build",
             "cp a ../b",

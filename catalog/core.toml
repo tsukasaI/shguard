@@ -617,9 +617,12 @@ value = { takes = "inert" }
 # --has-results, --mount, --xdev, --newer, --changed-after,
 # --change-newer-than, --older and --change-older-than. clap does not infer
 # abbreviated long options here, so only the full name matches.
+# fd is recursive from the working directory, so it is `cwd_sensitive`:
+# `cd /Users/me && fd -H` would list the home directory.
 [[row]]
 key = ["fd"]
 source = "https://github.com/sharkdp/fd#readme https://github.com/sharkdp/fd/blob/master/src/cli.rs"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 positionals = ["inert"]

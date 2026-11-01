@@ -6,7 +6,8 @@
 
 - An embedded `fd` row: names only, without `-x`/`--exec`,
   `-X`/`--exec-batch`, `-l`/`--list-details`, `-C`/`--base-directory` or
-  `--ignore-file`; `fd` from `/` or a home directory is Ask (#1111).
+  `--ignore-file`; `fd` from `/` or a home directory is Ask, and so is `fd`
+  after a `cd` (#1111).
 
 ### Changed
 
@@ -15,6 +16,9 @@
   options that run code (`fd -x`/`-X`/`-l`, `split --filter` and its
   abbreviations) or declares that they take a `code` value; listing one any
   other way is a load error (#1111).
+- A row whose head holds a `/` (`/bin/bash`, `/opt/homebrew/bin/fd`) is a
+  load error: the kernel matches heads byte for byte, so a path head skipped
+  the head checks (#1111).
 
 ## 0.10.0 - 2026-10-31
 
