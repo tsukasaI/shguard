@@ -80,14 +80,13 @@ recorded, not hidden.
   `<helper>::` remotes other than `ext::` (#1096), glob refspecs
   (`'refs/heads/*:refs/heads/*'`, #1095), `--follow-tags` (#1097), and
   relative local remotes (`git push sub/repo main`, #1100).
-- **git fetch remotes.** Fetches from `ext::` remotes, from the same URL
-  schemes as push and with a `+` refspec are Ask. Still Allow, as for push:
-  the scp form (`git fetch git@host:o/r`), other `<helper>::` remotes,
-  relative local remotes (`git fetch sub/repo`, as #1100 records for push)
-  and `<scheme>://` URLs whose scheme has a remote helper other than the
-  asked ones. A
-  fetch writes only remote-tracking refs and `FETCH_HEAD`, or the local refs
-  an explicit `src:dst` refspec names.
+- **git fetch remotes.** Fetches from `ext::` remotes, from the URL schemes
+  push asks plus `ftp:` and `ftps:`, and with a `+` refspec are Ask. Still
+  Allow, as for push: the scp form (`git fetch git@host:o/r`), other
+  `<helper>::` remotes, relative local remotes (`git fetch sub/repo`, as
+  #1100 records for push) and `<scheme>://` URLs whose scheme has a remote
+  helper other than the asked ones. A fetch writes only remote-tracking refs
+  and `FETCH_HEAD`, or the local refs an explicit `src:dst` refspec names.
 - **git hooks.** The `git commit`, `git switch`, `git fetch` and `git stash`
   rows run repository hooks (`pre-commit`, `commit-msg`, `post-checkout`,
   `reference-transaction`, ...), which P3 covers.

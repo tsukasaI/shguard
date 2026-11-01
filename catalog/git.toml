@@ -1001,7 +1001,8 @@ long = "renormalize"
 # Allowed and opens `core.editor`, which waits for input. Left out:
 # -n/--no-verify (skips the hooks), -S/--gpg-sign (runs `gpg.program`),
 # -p/--patch and --interactive (prompt), -e/--edit, -t/--template (editor),
-# --pathspec-from-file. `-F` reads the message from a file.
+# --pathspec-from-file, -F/--file (reads any file into the message, which
+# `git push` then publishes).
 [[row]]
 key = ["git", "commit"]
 source = "https://git-scm.com/docs/git-commit"
