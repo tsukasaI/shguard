@@ -17,6 +17,10 @@
 
 ### Changed
 
+- The embedded catalog now has rows keyed `git add`, `git commit`,
+  `git fetch`, `git switch`, `git stash`, `gh api`, `eza` and `tree`. A user
+  config with its own row under one of those keys fails to load (duplicate
+  key, every Bash call is denied) until that row is removed (#1115).
 - `fd`, `split` and `gsplit` are no longer denylisted heads. A row for one of
   them, or for `fdfind` (embedded or user), loads when it leaves out the
   options that run code (`fd -x`/`-X`/`-l`, `split --filter` and its

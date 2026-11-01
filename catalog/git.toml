@@ -1014,10 +1014,6 @@ short = "m"
 long = "message"
 value = { takes = "inert" }
 [[row.opt]]
-short = "F"
-long = "file"
-value = { takes = "path" }
-[[row.opt]]
 short = "a"
 long = "all"
 [[row.opt]]
@@ -1131,8 +1127,9 @@ long = "no-recurse-submodules"
 [[row.opt]]
 long = "multiple"
 
-# Changes the checked-out branch; git refuses when local changes would be
-# lost. Left out: -f/--force and --discard-changes (throw local changes
+# Changes the checked-out branch; git refuses when tracked local changes
+# would be lost, but it overwrites an ignored file that the target branch
+# tracks (the default --overwrite-ignore). Left out: -f/--force and --discard-changes (throw local changes
 # away), -m/--merge, -C/--force-create (resets an existing branch),
 # --orphan, --recurse-submodules and --conflict.
 [[row]]
@@ -1239,8 +1236,9 @@ long = "include-untracked"
 [[row.opt]]
 long = "only-untracked"
 
-# `pop` and `apply` restore a stash; git refuses when local changes would
-# be overwritten.
+# `pop` and `apply` restore a stash; git refuses when tracked local changes
+# would be overwritten, but it overwrites an ignored file that the stash
+# holds.
 [[row]]
 key = ["git", "stash", "pop"]
 source = "https://git-scm.com/docs/git-stash"
@@ -1340,6 +1338,8 @@ targets = [
   { pat = "git+ssh:", kind = "prefix" },
   { pat = "ssh+git:", kind = "prefix" },
   { pat = "file:", kind = "prefix" },
+  { pat = "ftp:", kind = "prefix" },
+  { pat = "ftps:", kind = "prefix" },
 ]
 outcome = "ask"
 
