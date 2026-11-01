@@ -18,7 +18,7 @@ use shguard_kernel::decide::{Verdict, decide};
 use shguard_kernel::verdict::{Addr, Reason, UnknownKind};
 use shguard_syntax::parse;
 
-use crate::catalog::{Hint, LoadError, Loaded};
+use crate::catalog::{GuidanceText, Hint, LoadError, Loaded};
 use crate::config::{AskOutcome, Settings};
 use crate::hook::{Request, Response, parse_request, render};
 use serde_json::Value;
@@ -140,7 +140,7 @@ fn guidance<'a>(reason: &Reason, script: &Script, loaded: &'a Loaded) -> Option<
         Reason::Rule(id, _) => usize::try_from(id.0)
             .ok()
             .and_then(|i| loaded.rule_reasons.get(i))
-            .and_then(Option::as_deref),
+            .and_then(|r| r.as_ref().map(GuidanceText::as_str)),
     }
 }
 

@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-use shguard::catalog::{LoadError, Loaded, Source, load};
+use shguard::catalog::{GuidanceText, LoadError, Loaded, Source, load};
 use shguard_kernel::ast::{Opaque, Part};
 use shguard_kernel::catalog::{
     Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role, Row,
@@ -965,8 +965,11 @@ fn reason_and_hint_texts_are_checked() {
     );
     let l = loaded(&ok);
     assert_eq!(
-        l.rule_reasons,
-        vec![Some("rm -r of / is never wanted".to_owned())]
+        l.rule_reasons
+            .iter()
+            .map(|r| r.as_ref().map(GuidanceText::as_str))
+            .collect::<Vec<_>>(),
+        vec![Some("rm -r of / is never wanted")]
     );
     assert_eq!(l.hints.len(), 1);
     assert_eq!(
@@ -1062,4 +1065,55 @@ fn every_embedded_rule_has_a_reason() {
     let loaded = load(shguard::catalog::EMBEDDED).expect("embedded catalog loads");
     assert!(!loaded.rule_reasons.is_empty());
     assert!(loaded.rule_reasons.iter().all(Option::is_some));
+}
+
+/// A user hint replaces the embedded hint with the same key; two hints of
+/// one origin with the same key stay an error.
+#[test]
+fn a_user_hint_replaces_an_embedded_one() {
+    let user = "[[hint]]\nkey = [\"find\"]\ntext = \"mine\"\n";
+    let mut sources = shguard::catalog::EMBEDDED.to_vec();
+    sources.push(Source {
+        name: "user.toml",
+        text: user,
+    });
+    let l = load(&sources).expect("loads");
+    let key = vec![b"find".to_vec()];
+    let found: Vec<_> = l.hints.iter().filter(|h| h.key == key).collect();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].text.as_str(), "mine");
+    // Two user files with the same key are still a duplicate.
+    sources.push(Source {
+        name: "user2.toml",
+        text: user,
+    });
+    let errs = load(&sources).expect_err("duplicate");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::DuplicateHint { .. }))
+    );
+    // So is one file with the key twice.
+    let twice = format!("{user}{user}");
+    assert!(
+        errors(&twice)
+            .iter()
+            .any(|e| matches!(e, LoadError::DuplicateHint { .. }))
+    );
+}
+
+#[test]
+fn rule_ids_use_a_plain_charset() {
+    let rm = row("\"rm\"", "rest = \"path\"");
+    for id in ["x y", "x\\u202ey", "x\\ny", "x/y"] {
+        let text = format!("{rm}[[rule]]\nid = \"{id}\"\nkey = [\"rm\"]\noutcome = \"block\"\n");
+        assert!(
+            errors(&text)
+                .iter()
+                .any(|e| matches!(e, LoadError::BadRuleId { .. })),
+            "{id}"
+        );
+    }
+    let ok =
+        format!("{rm}[[rule]]\nid = \"dotfiles-a.b_C9\"\nkey = [\"rm\"]\noutcome = \"block\"\n");
+    assert!(load_one(&ok).is_ok());
 }

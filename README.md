@@ -115,9 +115,10 @@ decision_log = "/home/you/.local/state/shguard/decisions.jsonl"   # optional
 A rule may carry `reason = "..."`, which the hook appends to its reason when
 the rule hits; a `[[hint]]` appends its `text` when a command under its key
 is Unknown (the longest matching key wins; a hint needs no row; a key has
-at most one hint, embedded ones included). Neither changes a decision. Each
+at most one hint among your files, and yours replaces an embedded hint with
+the same key). Neither changes a decision. Each
 text is at most 300 bytes, on one line, with no control, line separator,
-zero-width or bidirectional-format character, so the agent reads what you
+invisible or format character, so the agent reads what you
 wrote.
 
 User rows and rules are merged with the embedded catalog and go through the

@@ -108,6 +108,10 @@ pub enum LoadError {
     /// A rule `id` is empty or only whitespace.
     #[error("{file}: a rule has an empty `id`")]
     EmptyRuleId { file: String },
+    /// A rule `id` has a character outside `A-Z a-z 0-9 . _ -`. The id goes
+    /// into the hook reason the agent reads.
+    #[error("{file}: rule `{rule}`: an id may only use `A-Z a-z 0-9 . _ -`")]
+    BadRuleId { file: String, rule: String },
     /// Two rules share an id.
     #[error("{file}: rule `{rule}`: duplicate id")]
     DuplicateRuleId { file: String, rule: String },

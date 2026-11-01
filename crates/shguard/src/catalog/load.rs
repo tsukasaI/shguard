@@ -194,7 +194,7 @@ pub struct Loaded {
     pub rule_ids: Vec<String>,
     /// The `reason` text of each rule, if it has one, indexed by its
     /// `RuleId`.
-    pub rule_reasons: Vec<Option<String>>,
+    pub rule_reasons: Vec<Option<GuidanceText>>,
     /// Text for the reason of an Unknown command, by command key.
     pub hints: Vec<Hint>,
 }
@@ -207,7 +207,33 @@ pub struct Hint {
     /// The command words the hint applies to (`["find"]`, `["git", "log"]`).
     pub key: Vec<Vec<u8>>,
     /// The text.
-    pub text: String,
+    pub text: GuidanceText,
+}
+
+/// A rule `reason` or a hint `text` that passed [`text_problem`]: not empty,
+/// at most [`TEXT_CAP`] bytes, no line break, invisible or format character.
+/// Only [`GuidanceText::new`] builds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuidanceText(String);
+
+impl GuidanceText {
+    /// Checks `text` and wraps it.
+    ///
+    /// # Errors
+    ///
+    /// The reason `text` cannot be guidance text.
+    pub fn new(text: String) -> Result<Self, &'static str> {
+        match text_problem(&text) {
+            Some(why) => Err(why),
+            None => Ok(Self(text)),
+        }
+    }
+
+    /// The text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// The most bytes a rule `reason` or a hint `text` may have.
@@ -400,14 +426,29 @@ pub fn load_files(
     let mut entries = Vec::new();
     let mut rule_dtos: Vec<(String, RuleDto)> = Vec::new();
     let mut hints: Vec<Hint> = Vec::new();
+    let mut from_embedded: Vec<bool> = Vec::new();
     for (name, ParsedFile(file)) in files {
         for row in file.row {
             entries.push(build_row(&name, row, &mut errs));
         }
         rule_dtos.extend(file.rule.into_iter().map(|r| (name.clone(), r)));
+        // A user hint replaces an embedded hint with the same key; two
+        // hints of one origin with the same key stay an error.
+        let embedded = name.starts_with("embedded:");
         for h in file.hint {
-            if let Some(hint) = build_hint(&name, h, &hints, &mut errs) {
+            let pool: Vec<Hint> = hints
+                .iter()
+                .zip(&from_embedded)
+                .filter(|(_, e)| embedded || !**e)
+                .map(|(h, _)| h.clone())
+                .collect();
+            if let Some(hint) = build_hint(&name, h, &pool, &mut errs) {
+                if let Some(i) = hints.iter().position(|x| x.key == hint.key) {
+                    hints.remove(i);
+                    from_embedded.remove(i);
+                }
                 hints.push(hint);
+                from_embedded.push(embedded);
             }
         }
     }
@@ -422,6 +463,15 @@ pub fn load_files(
         if dto.id.trim().is_empty() {
             errs.push(LoadError::EmptyRuleId {
                 file: file.to_owned(),
+            });
+        } else if !dto
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            errs.push(LoadError::BadRuleId {
+                file: file.to_owned(),
+                rule: dto.id.clone(),
             });
         } else if !seen.insert(dto.id.clone()) {
             errs.push(LoadError::DuplicateRuleId {
@@ -440,16 +490,18 @@ pub fn load_files(
             }
         };
         let name = dto.id.clone();
-        let reason = dto.reason.clone();
-        if let Some(r) = &reason
-            && let Some(why) = text_problem(r)
-        {
-            errs.push(LoadError::BadText {
-                file: file.to_owned(),
-                item: format!("rule `{name}`"),
-                why,
-            });
-        }
+        let reason = match dto.reason.clone().map(GuidanceText::new) {
+            Some(Ok(t)) => Some(t),
+            Some(Err(why)) => {
+                errs.push(LoadError::BadText {
+                    file: file.to_owned(),
+                    item: format!("rule `{name}`"),
+                    why,
+                });
+                None
+            }
+            None => None,
+        };
         if let Some(rule) = build_rule(file, id, dto, &entries, &mut errs) {
             rules.push(rule);
         }
@@ -499,18 +551,18 @@ fn build_hint(
         });
         ok = false;
     }
-    if let Some(why) = text_problem(&dto.text) {
-        errs.push(LoadError::BadText {
-            file: file.to_owned(),
-            item: format!("hint `{label}`"),
-            why,
-        });
-        ok = false;
-    }
-    ok.then_some(Hint {
-        key,
-        text: dto.text,
-    })
+    let text = match GuidanceText::new(dto.text) {
+        Ok(t) => Some(t),
+        Err(why) => {
+            errs.push(LoadError::BadText {
+                file: file.to_owned(),
+                item: format!("hint `{label}`"),
+                why,
+            });
+            None
+        }
+    };
+    text.filter(|_| ok).map(|text| Hint { key, text })
 }
 
 fn role(r: RoleDto) -> Role {

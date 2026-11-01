@@ -26,8 +26,9 @@ ask_outcome = "ask"
 # reason = "say which files and why"   # optional; added to the hook's reason
 
 # A hint adds text to the reason when a command under its key is Unknown.
-# It changes no decision. A key may have one hint only, embedded ones
-# included (see catalog/*.toml).
+# It changes no decision. A key may have one hint only among your
+# files; yours replaces an embedded one with the same key (see
+# catalog/*.toml).
 # [[hint]]
 # key = ["make"]
 # text = "run the targets through `cargo` instead"
