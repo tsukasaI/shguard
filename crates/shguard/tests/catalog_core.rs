@@ -76,6 +76,11 @@ fn every_row_has_an_allowed_command() {
             "rg foo -n",
             "tokei",
             "tokei src --files",
+            "fd",
+            "fd -e ts src",
+            "fd -H -t f -E target 'Cargo\\.toml$' .",
+            "fd --max-depth=2 -g '*.rs' crates",
+            "fd -0 foo | wc -l",
         ],
         Decision::Allow,
     );
@@ -135,6 +140,20 @@ fn every_row_has_a_non_allowed_command() {
         "rg --search-zip foo",
         "rg --hostname-bin x foo",
         "tokei -i stats.json",
+        "fd -x rm",
+        "fd -X cat",
+        "fd -l",
+        "fd -Hl foo",
+        "fd --exec rm x",
+        "fd --exec=rm",
+        "fd --exec-batch cat",
+        "fd --list-details",
+        "fd -C /tmp foo",
+        "fd --batch-size 2 foo",
+        "fd --ignore-file /Users/me/.aws/credentials x",
+        "fd . /",
+        "fd . /Users/me",
+        "fd --search-path /home/me x",
     ]);
 }
 
@@ -305,6 +324,8 @@ fn relative_paths_after_cd_and_dotdot_are_asked() {
     assert_all(
         &[
             "cd src && cat a.txt",
+            "cd /Users/me && fd -H",
+            "cd src && fd -e rs",
             "cat ../a.txt",
             "rm -rf ../build",
             "cp a ../b",

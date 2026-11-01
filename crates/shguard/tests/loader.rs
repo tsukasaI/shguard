@@ -184,7 +184,6 @@ fn denylisted_head() {
         "ssh",
         "docker",
         "kubectl",
-        "fd",
         "socat",
         "flock",
         "strace",
@@ -200,7 +199,6 @@ fn denylisted_head() {
         "watch",
         "script",
         "parallel",
-        "split",
         "gxargs",
         "gsed",
         "gfind",
@@ -215,7 +213,6 @@ fn denylisted_head() {
         "bash",
         "sh",
         "zsh",
-        "gsplit",
         "gtimeout",
         "genv",
         "gnohup",
@@ -245,6 +242,102 @@ fn denylisted_head() {
         let ok = row(&format!("\"{head}\""), "runs_code = true");
         assert!(load_one(&ok).is_ok(), "{head}");
     }
+}
+
+#[test]
+fn a_path_head_is_a_load_error() {
+    // A path head would skip the head checks a bare name gets.
+    for head in ["/bin/bash", "/opt/homebrew/bin/fd", "./fd", "bin/ls"] {
+        let t = row(&format!("\"{head}\""), "");
+        assert!(
+            errors(&t)
+                .iter()
+                .any(|e| matches!(e, LoadError::PathHead { .. })),
+            "{head}"
+        );
+    }
+}
+
+#[test]
+fn code_option_heads_load_without_their_code_options() {
+    for head in ["fd", "split", "gsplit"] {
+        let t = row(&format!("\"{head}\""), "rest = \"path\"");
+        assert!(load_one(&t).is_ok(), "{head}");
+    }
+    let fd = |opt: &str| {
+        row(
+            "\"fd\"",
+            &format!("positionals = [\"inert\"]\nrest = \"path\"\n[[row.opt]]\n{opt}\n"),
+        )
+    };
+    for opt in [
+        "short = \"x\"\nvalue = { takes = \"inert\" }",
+        "long = \"exec\"\nvalue = { takes = \"path\" }",
+        "short = \"q\"\nlong = \"exec-batch\"",
+        "short = \"X\"",
+        "short = \"l\"",
+        "long = \"list-details\"",
+    ] {
+        assert!(
+            matches!(errors(&fd(opt))[0], LoadError::CodeOptionNotCode { .. }),
+            "{opt}"
+        );
+    }
+    // An optional value is read only inline, so it is refused even as code.
+    for opt in [
+        "short = \"x\"\nvalue = { optional = \"code\" }",
+        "short = \"l\"\nvalue = { optional = \"code\" }",
+    ] {
+        assert!(
+            matches!(errors(&fd(opt))[0], LoadError::CodeOptionNotCode { .. }),
+            "{opt}"
+        );
+    }
+    // fdfind is fd under its Debian name.
+    let fdfind = row(
+        "\"fdfind\"",
+        "[[row.opt]]\nshort = \"x\"\nvalue = { takes = \"inert\" }",
+    );
+    assert!(matches!(
+        errors(&fdfind)[0],
+        LoadError::CodeOptionNotCode { .. }
+    ));
+    // split takes abbreviations, so a prefix of `--filter` is refused too.
+    for long in ["filter", "fil", "f"] {
+        let split = row(
+            "\"split\"",
+            &format!("[[row.opt]]\nlong = \"{long}\"\nvalue = {{ takes = \"inert\" }}"),
+        );
+        assert!(
+            matches!(errors(&split)[0], LoadError::CodeOptionNotCode { .. }),
+            "{long}"
+        );
+    }
+    // fd does not take abbreviations.
+    assert!(load_one(&fd("long = \"ex\"")).is_ok());
+    // Declared with a `code` value, the option loads and makes the command
+    // an Ask; left out, it is Unknown.
+    let l = loaded(&fd(
+        "short = \"x\"\nlong = \"exec\"\nvalue = { takes = \"code\" }",
+    ));
+    assert_eq!(decision(&l, "fd ts src"), Decision::Allow);
+    for cmd in [
+        "fd -x rm",
+        "fd --exec rm",
+        "fd -X cat",
+        "fd -l",
+        "fd -Hl foo",
+    ] {
+        assert_eq!(decision(&l, cmd), Decision::Ask, "{cmd}");
+    }
+    // A runs_code row may list them freely.
+    assert!(
+        load_one(&row(
+            "\"fd\"",
+            "runs_code = true\n[[row.opt]]\nshort = \"x\""
+        ))
+        .is_ok()
+    );
 }
 
 #[test]

@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- An embedded `fd` row: names only, without `-x`/`--exec`,
+  `-X`/`--exec-batch`, `-l`/`--list-details`, `-C`/`--base-directory` or
+  `--ignore-file`; `fd` from `/` or a home directory is Ask, and so is `fd`
+  after a `cd` (#1111).
+
+### Changed
+
+- `fd`, `split` and `gsplit` are no longer denylisted heads. A row for one of
+  them, or for `fdfind` (embedded or user), loads when it leaves out the
+  options that run code (`fd -x`/`-X`/`-l`, `split --filter` and its
+  abbreviations) or declares that they take a `code` value; listing one any
+  other way is a load error (#1111).
+- A row whose head holds a `/` (`/bin/bash`, `/opt/homebrew/bin/fd`) is a
+  load error: the kernel matches heads byte for byte, so a path head skipped
+  the head checks (#1111).
+
 ## 0.10.0 - 2026-10-31
 
 A rebuild. The 0.9 engine is preserved at the tag `legacy-v0.9.5`.

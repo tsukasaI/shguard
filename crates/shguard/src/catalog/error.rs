@@ -60,6 +60,22 @@ pub enum LoadError {
     /// A row whose head the grammar cannot express (#1039) does not run code.
     #[error("{file}: row `{row}`: head is not expressible, so the row must set `runs_code`")]
     DenylistedHead { file: String, row: String },
+    /// A row head holds a `/` (`/bin/bash`, `/opt/homebrew/bin/fd`). The
+    /// kernel matches heads byte for byte, so a path head would skip the
+    /// head checks that a bare name gets.
+    #[error("{file}: row `{row}`: head is a path; name the command without `/`")]
+    PathHead { file: String, row: String },
+    /// A row for a head that runs code through known options (`fd -x`)
+    /// lists one of them, or an abbreviation of one, without a
+    /// `takes = "code"` value (#1111).
+    #[error(
+        "{file}: row `{row}`: option `{opt}` runs code, so leave it out or give it `value = {{ takes = \"code\" }}`"
+    )]
+    CodeOptionNotCode {
+        file: String,
+        row: String,
+        opt: String,
+    },
     /// A parent option spells a `runs_code` child's last key segment but
     /// does not take a `Code` value (#1070).
     #[error("{file}: row `{row}`: option `{opt}` is the child key but its value is not `code`")]
