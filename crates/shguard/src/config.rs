@@ -9,6 +9,7 @@
 //!
 //! [[row]]    # exactly the catalog row schema; `source` is required
 //! [[rule]]   # exactly the catalog rule schema; outcome "block" or "ask"
+//! [[hint]]   # key and text: added to the reason of an Unknown command
 //! ```
 //!
 //! Rows and rules are merged with the embedded catalog through the same
@@ -31,7 +32,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub use crate::catalog::AskOutcome;
-use crate::catalog::{LoadError, Loaded, Source, load_files, parse_config, parse_file};
+use crate::catalog::{LoadError, Loaded, Origin, Source, load_files, parse_config, parse_file};
 
 /// What the hook runs with.
 #[derive(Debug)]
@@ -96,7 +97,7 @@ pub fn settings(
     let mut files = Vec::new();
     for src in embedded {
         match parse_file(src.name, src.text) {
-            Ok(f) => files.push((src.name.to_owned(), f)),
+            Ok(f) => files.push((src.name.to_owned(), src.origin, f)),
             Err(e) => errs.push(e),
         }
     }
@@ -107,7 +108,7 @@ pub fn settings(
             Ok((head, f)) => {
                 ask_outcome = head.ask_outcome;
                 decision_log = head.decision_log;
-                files.push((name.to_owned(), f));
+                files.push((name.to_owned(), Origin::User, f));
             }
             Err(e) => errs.push(e),
         }

@@ -1267,6 +1267,15 @@ long = "index"
 short = "q"
 long = "quiet"
 
+# Hints only add text to the reason of an Unknown command.
+[[hint]]
+key = ["git", "checkout"]
+text = "git checkout has no row because `git checkout <path>` discards local changes; use git switch (-c creates a branch)"
+
+[[hint]]
+key = ["git", "restore"]
+text = "git restore has no row because `git restore <path>` discards local changes"
+
 # Rules. A rule only raises a decision.
 
 # A forced push can overwrite remote history.
@@ -1275,6 +1284,7 @@ id = "git-push-force"
 key = ["git", "push"]
 opts = [["-f", "--force"]]
 outcome = "block"
+reason = "a forced push can overwrite remote history"
 
 # `+refspec` forces that one update, like --force.
 [[rule]]
@@ -1282,6 +1292,7 @@ id = "git-push-plus-refspec"
 key = ["git", "push"]
 targets = [{ pat = "+", kind = "prefix" }]
 outcome = "block"
+reason = "a `+` refspec forces that update, like --force"
 
 # A lease check is weaker than a plain push but still rewrites history.
 [[rule]]
@@ -1289,6 +1300,7 @@ id = "git-push-force-with-lease"
 key = ["git", "push"]
 opts = [["--force-with-lease", "--force-if-includes"]]
 outcome = "ask"
+reason = "a lease push still rewrites remote history"
 
 # `:ref` deletes the remote ref.
 [[rule]]
@@ -1296,6 +1308,7 @@ id = "git-push-delete-refspec"
 key = ["git", "push"]
 targets = [{ pat = ":", kind = "prefix" }]
 outcome = "ask"
+reason = "a `:ref` refspec deletes the remote ref"
 
 # A URL remote sends the commits to a host or path the repository's remotes
 # may not name. The kernel compares normalized words, so `https://h/r` is
@@ -1316,6 +1329,7 @@ targets = [
   { pat = "file:", kind = "prefix" },
 ]
 outcome = "ask"
+reason = "the remote is a URL rather than a configured remote name"
 
 # `ext::cmd` is a remote helper that runs a command.
 [[rule]]
@@ -1323,6 +1337,7 @@ id = "git-push-ext-remote"
 key = ["git", "push"]
 targets = [{ pat = "ext::", kind = "prefix" }]
 outcome = "ask"
+reason = "an `ext::` remote runs a command"
 
 # Fetching from `ext::cmd` runs the command when `protocol.ext.allow` is set.
 # A URL remote downloads from a host the repository's remotes may not name.
@@ -1344,6 +1359,7 @@ targets = [
   { pat = "ftps:", kind = "prefix" },
 ]
 outcome = "ask"
+reason = "an `ext::` remote runs a command; a URL remote is not a configured remote name"
 
 # A `+` refspec after `--` force-updates a local ref.
 [[rule]]
@@ -1351,6 +1367,7 @@ id = "git-fetch-plus-refspec"
 key = ["git", "fetch"]
 targets = [{ pat = "+", kind = "prefix" }]
 outcome = "ask"
+reason = "a `+` refspec force-updates a local ref"
 
 # A path with a credential segment, as for the core readers (#1113):
 # `git add .env`, `git add -N .env` and `git log -p -- .env` would put the
@@ -1360,6 +1377,7 @@ outcome = "ask"
 id = "git-ask-credential-dirs"
 key = ["git"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1402,3 +1420,4 @@ id = "git-absolute-path"
 key = ["git"]
 targets = [{ pat = "/", kind = "prefix" }, { pat = "~", kind = "prefix" }]
 outcome = "ask"
+reason = "git is asked for absolute and `~` paths; use a path relative to the repository"

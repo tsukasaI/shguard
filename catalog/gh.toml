@@ -254,6 +254,7 @@ id = "gh-repo-option"
 key = ["gh"]
 opts = [["-R", "--repo"]]
 outcome = "block"
+reason = "-R/--repo can send the request, and a token, to another host"
 
 # A URL operand can name another host.
 [[rule]]
@@ -261,6 +262,7 @@ id = "gh-url-operand"
 key = ["gh"]
 targets = [{ pat = "https:", kind = "prefix" }, { pat = "http:", kind = "prefix" }]
 outcome = "block"
+reason = "a URL operand can send the request, and a token, to another host"
 
 # A jq filter can print gh's environment, tokens included.
 [[rule]]
@@ -268,3 +270,4 @@ id = "gh-jq"
 key = ["gh"]
 opts = [["-q", "--jq"]]
 outcome = "block"
+reason = "a jq filter can print gh's environment, tokens included; use --template or --json"

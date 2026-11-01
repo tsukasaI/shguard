@@ -29,6 +29,11 @@
   are Ask too (`git add .env.example`, `cat .env.example`) (#1113).
 - A `component` or `component_prefix` target with a `..` segment is a load
   error (#1113).
+- An optional `reason` on `[[rule]]` and a `[[hint]] key text` table, in the
+  catalog and the user config. The text is appended to the hook's reason
+  when the rule hits, or when a command under the hint's key is Unknown; no
+  decision changes. Embedded rules carry reasons, and `find`,
+  `git checkout` and `git restore` have hints (#1112).
 
 ### Changed
 

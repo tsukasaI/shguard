@@ -109,7 +109,17 @@ decision_log = "/home/you/.local/state/shguard/decisions.jsonl"   # optional
 
 [[row]]    # the catalog row schema; `source` is required
 [[rule]]   # the catalog rule schema; outcome "block" or "ask"
+[[hint]]   # key = ["make"], text = "..." for an Unknown command under key
 ```
+
+A rule may carry `reason = "..."`, which the hook appends to its reason when
+the rule hits; a `[[hint]]` appends its `text` when a command under its key
+is Unknown (the longest matching key wins; a hint needs no row; a key has
+at most one hint among your files, and yours replaces an embedded hint with
+the same key). Neither changes a decision. Each
+text is at most 300 bytes, on one line, with no control, line separator,
+invisible or format character, so the agent reads what you
+wrote.
 
 User rows and rules are merged with the embedded catalog and go through the
 same checks. A user `[[row]]` widens what can be Allowed, and the user owns

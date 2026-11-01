@@ -997,6 +997,11 @@ long = "help"
 [[row.opt]]
 long = "version"
 
+# Hints only add text to the reason of an Unknown command.
+[[hint]]
+key = ["find"]
+text = "find has no row: its options (-exec, -delete) are outside the grammar; fd and rg --files list files"
+
 # Deleting a top-level directory recursively. The data directories (/Users,
 # /home, /var, /opt, /private, /Library, /Applications) match only themselves,
 # so `rm -r /var/tmp/x` is an Ask (absolute path), not a Block. A `~` word
@@ -1008,6 +1013,7 @@ long = "version"
 id = "rm-recursive-dangerous-target"
 key = ["rm"]
 outcome = "block"
+reason = "recursive removal of the filesystem root, a home, data or system directory, or the working directory"
 opts = [["-r", "-R"]]
 targets = [
   { pat = "/", kind = "exact" },
@@ -1043,6 +1049,7 @@ targets = [
 id = "cp-block-sensitive-target"
 key = ["cp"]
 outcome = "block"
+reason = "the path is a device, shell startup or tool config, a secret, or the project's hooks or config, which can run code later"
 targets = [
   { pat = "/dev", kind = "under" },
   { pat = ".claude", kind = "under" },
@@ -1081,6 +1088,7 @@ targets = [
 id = "rm-block-sensitive-target"
 key = ["rm"]
 outcome = "block"
+reason = "the path is a device, shell startup or tool config, a secret, or the project's hooks or config, which can run code later"
 targets = [
   { pat = "/dev", kind = "under" },
   { pat = ".claude", kind = "under" },
@@ -1119,6 +1127,7 @@ targets = [
 id = "mkdir-block-sensitive-target"
 key = ["mkdir"]
 outcome = "block"
+reason = "the path is a device, shell startup or tool config, a secret, or the project's hooks or config, which can run code later"
 targets = [
   { pat = "/dev", kind = "under" },
   { pat = ".claude", kind = "under" },
@@ -1157,6 +1166,7 @@ targets = [
 id = "uniq-block-sensitive-target"
 key = ["uniq"]
 outcome = "block"
+reason = "the path is a device, shell startup or tool config, a secret, or the project's hooks or config, which can run code later"
 targets = [
   { pat = "/dev", kind = "under" },
   { pat = ".claude", kind = "under" },
@@ -1199,6 +1209,7 @@ targets = [
 id = "cp-ask-nonlocal-target"
 key = ["cp"]
 outcome = "ask"
+reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -1209,6 +1220,7 @@ targets = [
 id = "rm-ask-nonlocal-target"
 key = ["rm"]
 outcome = "ask"
+reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -1219,6 +1231,7 @@ targets = [
 id = "mkdir-ask-nonlocal-target"
 key = ["mkdir"]
 outcome = "ask"
+reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -1229,6 +1242,7 @@ targets = [
 id = "uniq-ask-nonlocal-target"
 key = ["uniq"]
 outcome = "ask"
+reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -1250,6 +1264,7 @@ targets = [
 id = "cat-ask-credential-dirs"
 key = ["cat"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1287,6 +1302,7 @@ targets = [
 id = "head-ask-credential-dirs"
 key = ["head"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1324,6 +1340,7 @@ targets = [
 id = "tail-ask-credential-dirs"
 key = ["tail"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1361,6 +1378,7 @@ targets = [
 id = "grep-ask-credential-dirs"
 key = ["grep"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory; a pattern given without -e is compared as a path too, so pass it with -e"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1398,6 +1416,7 @@ targets = [
 id = "rg-ask-credential-dirs"
 key = ["rg"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory; a pattern given without -e is compared as a path too, so pass it with -e"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1435,6 +1454,7 @@ targets = [
 id = "wc-ask-credential-dirs"
 key = ["wc"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1472,6 +1492,7 @@ targets = [
 id = "sort-ask-credential-dirs"
 key = ["sort"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1509,6 +1530,7 @@ targets = [
 id = "cp-ask-credential-dirs"
 key = ["cp"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1546,6 +1568,7 @@ targets = [
 id = "uniq-ask-credential-dirs"
 key = ["uniq"]
 outcome = "ask"
+reason = "the path names, or looks like, a credential file or directory"
 targets = [
   { pat = ".env", kind = "component" },
   { pat = ".ssh", kind = "component" },
@@ -1585,6 +1608,7 @@ targets = [
 id = "grep-ask-recursive-broad"
 key = ["grep"]
 outcome = "ask"
+reason = "a recursive search of `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory; a pattern given without -e is read as a path too: pass it with -e"
 opts = [["-r"]]
 targets = [
   { pat = "/", kind = "exact" },
@@ -1602,6 +1626,7 @@ targets = [
 id = "rg-ask-broad"
 key = ["rg"]
 outcome = "ask"
+reason = "rg is recursive: `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory; a pattern given without -e is read as a path too: pass it with -e"
 targets = [
   { pat = "/", kind = "exact" },
   { pat = "~", kind = "prefix" },
@@ -1617,6 +1642,7 @@ targets = [
 id = "ls-ask-recursive-broad"
 key = ["ls"]
 outcome = "ask"
+reason = "a recursive listing of `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory"
 opts = [["-R"]]
 targets = [
   { pat = "/", kind = "exact" },
@@ -1634,6 +1660,7 @@ targets = [
 id = "fd-ask-broad"
 key = ["fd"]
 outcome = "ask"
+reason = "fd from `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory"
 targets = [
   { pat = "/", kind = "exact" },
   { pat = "~", kind = "prefix" },
@@ -1651,6 +1678,7 @@ targets = [
 id = "tree-ask-broad"
 key = ["tree"]
 outcome = "ask"
+reason = "tree from `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory"
 targets = [
   { pat = "/", kind = "exact" },
   { pat = "~", kind = "prefix" },
@@ -1666,6 +1694,7 @@ targets = [
 id = "eza-ask-recursive-broad"
 key = ["eza"]
 outcome = "ask"
+reason = "a recursive listing of `/`, a home directory, or an absolute or `~` path under /Users, /home, /root, /System or /var/root, is asked even inside a project; name the directory relative to the working directory"
 opts = [["-R", "-T"]]
 targets = [
   { pat = "/", kind = "exact" },

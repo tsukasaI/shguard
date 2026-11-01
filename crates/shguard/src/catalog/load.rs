@@ -13,7 +13,7 @@ use shguard_kernel::rule::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
 
 use super::LoadError;
 use super::dto::{
-    AskOutcome, ConfigDto, DashDashDto, FileDto, OptDto, OrderDto, OutcomeDto, PatKindDto,
+    AskOutcome, ConfigDto, DashDashDto, FileDto, HintDto, OptDto, OrderDto, OutcomeDto, PatKindDto,
     PlusWordsDto, RoleDto, RowDto, RuleDto, ScopeDto, TargetDto, ValueDto,
 };
 
@@ -172,17 +172,30 @@ fn code_option_hit(c: &CodeOptions, name: &OptName) -> Option<&'static str> {
     })
 }
 
-/// One catalog file's name and text.
+/// Where a catalog file comes from. A user hint replaces an embedded hint
+/// with the same key; the file name says nothing about the origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// Compiled into the binary.
+    Embedded,
+    /// The user's config or a file given to `shguard check`.
+    User,
+}
+
+/// One catalog file's name, origin and text.
 #[derive(Debug, Clone, Copy)]
 pub struct Source<'a> {
-    /// The name used in error messages.
+    /// The name used in error messages; display only.
     pub name: &'a str,
+    /// Where the file comes from.
+    pub origin: Origin,
     /// The TOML text.
     pub text: &'a str,
 }
 
-/// A loaded catalog: the kernel catalog, the rules, and each rule's name
-/// (`rule_ids[i]` names the rule with `RuleId(i)`).
+/// A loaded catalog: the kernel catalog, the rules, each rule's name
+/// (`rule_ids[i]` names the rule with `RuleId(i)`) and reason, and the
+/// hints.
 #[derive(Debug)]
 pub struct Loaded {
     /// The catalog rows.
@@ -191,6 +204,99 @@ pub struct Loaded {
     pub rules: Vec<Rule>,
     /// The TOML id of each rule, indexed by its `RuleId`.
     pub rule_ids: Vec<String>,
+    /// The `reason` text of each rule, if it has one, indexed by its
+    /// `RuleId`.
+    pub rule_reasons: Vec<Option<GuidanceText>>,
+    /// Text for the reason of an Unknown command, by command key.
+    pub hints: Vec<Hint>,
+}
+
+/// Text added to the reason when a command under `key` is Unknown. It
+/// changes no decision and comes only from catalog files, never from the
+/// command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hint {
+    /// The command words the hint applies to (`["find"]`, `["git", "log"]`).
+    pub key: Vec<Vec<u8>>,
+    /// The text.
+    pub text: GuidanceText,
+}
+
+/// A rule `reason` or a hint `text` that passed [`text_problem`]: not empty,
+/// at most [`TEXT_CAP`] bytes, no line break, invisible or format character.
+/// Only [`GuidanceText::new`] builds one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuidanceText(String);
+
+impl GuidanceText {
+    /// Checks `text` and wraps it.
+    ///
+    /// # Errors
+    ///
+    /// The reason `text` cannot be guidance text.
+    pub fn new(text: String) -> Result<Self, &'static str> {
+        match text_problem(&text) {
+            Some(why) => Err(why),
+            None => Ok(Self(text)),
+        }
+    }
+
+    /// The text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The most bytes a rule `reason` or a hint `text` may have.
+pub const TEXT_CAP: usize = 300;
+
+/// Why `text` cannot be a reason or hint text, if it cannot. The text goes
+/// into the hook answer that the agent reads, so a line break (control
+/// characters, U+2028, U+2029) or an invisible or format character (zero
+/// width, bidirectional, joiner, variation selector, tag, fillers, soft
+/// hyphen and the other `Cf` characters, which can make the text read
+/// differently from its bytes or carry hidden text) is refused. The "300"
+/// in the message is tied to `TEXT_CAP` by a loader test.
+fn text_problem(text: &str) -> Option<&'static str> {
+    if text.trim().is_empty() {
+        Some("empty text")
+    } else if text.len() > TEXT_CAP {
+        Some("text longer than 300 bytes")
+    } else if text.chars().any(|c| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{00AD}'
+                    | '\u{034F}'
+                    | '\u{0600}'..='\u{0605}'
+                    | '\u{061C}'
+                    | '\u{06DD}'
+                    | '\u{070F}'
+                    | '\u{08E2}'
+                    | '\u{115F}'..='\u{1160}'
+                    | '\u{17B4}'..='\u{17B5}'
+                    | '\u{180B}'..='\u{180F}'
+                    | '\u{200B}'..='\u{200F}'
+                    | '\u{2028}'..='\u{202E}'
+                    | '\u{2060}'..='\u{206F}'
+                    | '\u{3164}'
+                    | '\u{FE00}'..='\u{FE0F}'
+                    | '\u{FEFF}'
+                    | '\u{FFA0}'
+                    | '\u{FFF0}'..='\u{FFFB}'
+                    | '\u{110BD}'
+                    | '\u{110CD}'
+                    | '\u{13430}'..='\u{1343F}'
+                    | '\u{1BCA0}'..='\u{1BCA3}'
+                    | '\u{1D173}'..='\u{1D17A}'
+                    | '\u{E0000}'..='\u{E0FFF}'
+            )
+    }) {
+        Some("text with a control, line separator, invisible or format character")
+    } else {
+        None
+    }
 }
 
 /// A row as seen by the cross-row checks. `row` is `None` when the row
@@ -216,7 +322,7 @@ pub fn load(sources: &[Source<'_>]) -> Result<Loaded, Vec<LoadError>> {
     let mut files = Vec::new();
     for src in sources {
         match parse_file(src.name, src.text) {
-            Ok(file) => files.push((src.name.to_owned(), file)),
+            Ok(file) => files.push((src.name.to_owned(), src.origin, file)),
             Err(e) => errs.push(e),
         }
     }
@@ -304,6 +410,7 @@ pub fn parse_config(name: &str, text: &str) -> Result<(ConfigHead, ParsedFile), 
         ParsedFile(FileDto {
             row: c.row,
             rule: c.rule,
+            hint: c.hint,
         }),
     ))
 }
@@ -325,20 +432,44 @@ fn is_legacy(text: &str) -> bool {
 ///
 /// Every [`LoadError`] found, if there is at least one.
 pub fn load_files(
-    files: Vec<(String, ParsedFile)>,
+    files: Vec<(String, Origin, ParsedFile)>,
     mut errs: Vec<LoadError>,
 ) -> Result<Loaded, Vec<LoadError>> {
     let mut entries = Vec::new();
     let mut rule_dtos: Vec<(String, RuleDto)> = Vec::new();
-    for (name, ParsedFile(file)) in files {
+    let mut hints: Vec<Hint> = Vec::new();
+    let mut origins: Vec<Origin> = Vec::new();
+    for (name, origin, ParsedFile(file)) in files {
         for row in file.row {
             entries.push(build_row(&name, row, &mut errs));
         }
         rule_dtos.extend(file.rule.into_iter().map(|r| (name.clone(), r)));
+        // A user hint replaces an embedded hint with the same key; two
+        // hints of one origin with the same key stay an error.
+        for h in file.hint {
+            let pool: Vec<Hint> = hints
+                .iter()
+                .zip(&origins)
+                .filter(|(_, o)| match origin {
+                    Origin::Embedded => true,
+                    Origin::User => **o == Origin::User,
+                })
+                .map(|(h, _)| h.clone())
+                .collect();
+            if let Some(hint) = build_hint(&name, h, &pool, &mut errs) {
+                if let Some(i) = hints.iter().position(|x| x.key == hint.key) {
+                    hints.remove(i);
+                    origins.remove(i);
+                }
+                hints.push(hint);
+                origins.push(origin);
+            }
+        }
     }
     check_rows(&entries, &mut errs);
     let mut rules = Vec::new();
     let mut rule_ids = Vec::new();
+    let mut rule_reasons = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for (index, (file_name, dto)) in rule_dtos.into_iter().enumerate() {
         let file = file_name.as_str();
@@ -346,6 +477,15 @@ pub fn load_files(
         if dto.id.trim().is_empty() {
             errs.push(LoadError::EmptyRuleId {
                 file: file.to_owned(),
+            });
+        } else if !dto
+            .id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            errs.push(LoadError::BadRuleId {
+                file: file.to_owned(),
+                rule: dto.id.clone(),
             });
         } else if !seen.insert(dto.id.clone()) {
             errs.push(LoadError::DuplicateRuleId {
@@ -364,10 +504,23 @@ pub fn load_files(
             }
         };
         let name = dto.id.clone();
+        let reason = match dto.reason.clone().map(GuidanceText::new) {
+            Some(Ok(t)) => Some(t),
+            Some(Err(why)) => {
+                errs.push(LoadError::BadText {
+                    file: file.to_owned(),
+                    item: format!("rule {name:?}"),
+                    why,
+                });
+                None
+            }
+            None => None,
+        };
         if let Some(rule) = build_rule(file, id, dto, &entries, &mut errs) {
             rules.push(rule);
         }
         rule_ids.push(name);
+        rule_reasons.push(reason);
     }
     if !errs.is_empty() {
         return Err(errs);
@@ -377,7 +530,53 @@ pub fn load_files(
         catalog: Catalog::new(rows, Vec::new()),
         rules,
         rule_ids,
+        rule_reasons,
+        hints,
     })
+}
+
+/// Checks one hint against the hints before it. A hint key needs no row:
+/// a hint is most useful for a command that has none (`find`).
+fn build_hint(
+    file: &str,
+    dto: HintDto,
+    before: &[Hint],
+    errs: &mut Vec<LoadError>,
+) -> Option<Hint> {
+    let label = dto.key.join(" ");
+    let key = seg_bytes(&dto.key);
+    let mut ok = true;
+    if !key_ok(&key)
+        || option_like(&dto.key)
+        || dto
+            .key
+            .iter()
+            .any(|s| text_problem(s).is_some() || s.chars().any(char::is_whitespace))
+    {
+        errs.push(LoadError::BadHintKey {
+            file: file.to_owned(),
+            hint: label.clone(),
+        });
+        ok = false;
+    } else if before.iter().any(|h| h.key == key) {
+        errs.push(LoadError::DuplicateHint {
+            file: file.to_owned(),
+            hint: label.clone(),
+        });
+        ok = false;
+    }
+    let text = match GuidanceText::new(dto.text) {
+        Ok(t) => Some(t),
+        Err(why) => {
+            errs.push(LoadError::BadText {
+                file: file.to_owned(),
+                item: format!("hint {label:?}"),
+                why,
+            });
+            None
+        }
+    };
+    text.filter(|_| ok).map(|text| Hint { key, text })
 }
 
 fn role(r: RoleDto) -> Role {
@@ -476,7 +675,7 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
     if option_like(&dto.key) && !(dto.runs_code && is_option_child(&dto.key)) {
         errs.push(LoadError::OptionLikeKey {
             file: file.to_owned(),
-            item: format!("row `{label}`"),
+            item: format!("row {label:?}"),
         });
     }
     if dto.source.as_deref().is_none_or(|s| s.trim().is_empty()) {
@@ -872,7 +1071,7 @@ fn build_rule(
     if option_like(&dto.key) && !names_code_row {
         errs.push(LoadError::OptionLikeKey {
             file: file.to_owned(),
-            item: format!("rule `{}`", dto.id),
+            item: format!("rule {:?}", dto.id),
         });
     }
     // Rows whose key is a prefix of the rule's, or extends it.

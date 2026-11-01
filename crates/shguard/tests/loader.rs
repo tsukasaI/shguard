@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-use shguard::catalog::{LoadError, Loaded, Source, load};
+use shguard::catalog::{GuidanceText, LoadError, Loaded, Origin, Source, load};
 use shguard_kernel::ast::{Opaque, Part};
 use shguard_kernel::catalog::{
     Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role, Row,
@@ -14,6 +14,7 @@ use shguard_kernel::rule::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
 
 fn load_one(text: &str) -> Result<Loaded, Vec<LoadError>> {
     load(&[Source {
+        origin: Origin::User,
         name: "t.toml",
         text,
     }])
@@ -64,10 +65,12 @@ fn toml_error_in_one_file_does_not_hide_others() {
     let both = format!("{dup}{dup}");
     let errs = load(&[
         Source {
+            origin: Origin::User,
             name: "a.toml",
             text: "[[row]\n",
         },
         Source {
+            origin: Origin::User,
             name: "b.toml",
             text: &both,
         },
@@ -131,10 +134,12 @@ fn duplicate_row_key_across_files() {
     let t = row("\"ls\"", "");
     let errs = load(&[
         Source {
+            origin: Origin::User,
             name: "a.toml",
             text: &t,
         },
         Source {
+            origin: Origin::User,
             name: "b.toml",
             text: &t,
         },
@@ -871,10 +876,12 @@ fn option_like_key_segment() {
         // Across files, as an embedded row and a user row.
         let errs = load(&[
             Source {
+                origin: Origin::Embedded,
                 name: "embedded.toml",
                 text: &rm,
             },
             Source {
+                origin: Origin::User,
                 name: "user.toml",
                 text: &user,
             },
@@ -953,4 +960,186 @@ fn check_subcommand_status() {
     assert_eq!(run_check(&[&dir.path().join("missing.toml")]), Some(1));
     // `check` with no files, and the bare binary, are covered in
     // `hook_contract.rs`.
+}
+
+/// #1112: rule reasons and hints.
+#[test]
+fn reason_and_hint_texts_are_checked() {
+    let rm = row("\"rm\"", "rest = \"path\"");
+    let ok = format!(
+        "{rm}{}[[hint]]\nkey = [\"find\"]\ntext = \"use fd\"\n",
+        rule("reason = \"rm -r of / is never wanted\"")
+    );
+    let l = loaded(&ok);
+    assert_eq!(
+        l.rule_reasons
+            .iter()
+            .map(|r| r.as_ref().map(GuidanceText::as_str))
+            .collect::<Vec<_>>(),
+        vec![Some("rm -r of / is never wanted")]
+    );
+    assert_eq!(l.hints.len(), 1);
+    assert_eq!(
+        loaded(&format!("{rm}{}", rule(""))).rule_reasons,
+        vec![None]
+    );
+    let long = "x".repeat(301);
+    for bad in [
+        "",
+        "   ",
+        "two\\nlines",
+        "tab\\there",
+        "bidi \\u202e txt",
+        "line \\u2028 sep",
+        "zero \\u200b width",
+        "bom \\ufeff",
+        "arabic mark \\u061c",
+        "tag \\U000e0041",
+        "selector \\ufe0f",
+        "soft \\u00ad hyphen",
+        "\\u3164",
+        "word joiner \\u206a",
+        long.as_str(),
+    ] {
+        let text = format!("{rm}{}", rule(&format!("reason = \"{bad}\"")));
+        assert!(
+            errors(&text)
+                .iter()
+                .any(|e| matches!(e, LoadError::BadText { .. })),
+            "reason {bad:?}"
+        );
+        let hint = format!("[[hint]]\nkey = [\"find\"]\ntext = \"{bad}\"\n");
+        assert!(
+            errors(&hint)
+                .iter()
+                .any(|e| matches!(e, LoadError::BadText { .. })),
+            "hint {bad:?}"
+        );
+    }
+    assert!(
+        load_one(&format!(
+            "{rm}{}",
+            rule(&format!("reason = \"{}\"", "x".repeat(300)))
+        ))
+        .is_ok()
+    );
+    for key in [
+        "[]",
+        "[\"\"]",
+        "[\"git\", \"-c\"]",
+        "[\"+x\"]",
+        "[\"a b\"]",
+        "[\"a\\u200bb\"]",
+    ] {
+        let hint = format!("[[hint]]\nkey = {key}\ntext = \"t\"\n");
+        assert!(
+            errors(&hint)
+                .iter()
+                .any(|e| matches!(e, LoadError::BadHintKey { .. })),
+            "{key}"
+        );
+    }
+    let dup =
+        "[[hint]]\nkey = [\"find\"]\ntext = \"a\"\n[[hint]]\nkey = [\"find\"]\ntext = \"b\"\n";
+    assert!(
+        errors(dup)
+            .iter()
+            .any(|e| matches!(e, LoadError::DuplicateHint { .. }))
+    );
+    // A hint needs no row, and unknown fields are refused.
+    assert!(load_one("[[hint]]\nkey = [\"find\"]\ntext = \"t\"\n").is_ok());
+    assert!(matches!(
+        errors("[[hint]]\nkey = [\"find\"]\ntext = \"t\"\nbogus = 1\n")[0],
+        LoadError::Toml { .. }
+    ));
+}
+
+/// The "longer than N bytes" message names the real cap.
+#[test]
+fn the_text_cap_message_names_the_cap() {
+    let long = "x".repeat(shguard::catalog::TEXT_CAP + 1);
+    let rm = row("\"rm\"", "rest = \"path\"");
+    let errs = errors(&format!("{rm}{}", rule(&format!("reason = \"{long}\""))));
+    assert!(errs.iter().any(|e| matches!(
+        e,
+        LoadError::BadText { why, .. } if why.contains(&shguard::catalog::TEXT_CAP.to_string())
+    )));
+}
+
+/// Pins presence only: every embedded rule explains itself.
+#[test]
+fn every_embedded_rule_has_a_reason() {
+    let loaded = load(shguard::catalog::EMBEDDED).expect("embedded catalog loads");
+    assert!(!loaded.rule_reasons.is_empty());
+    assert!(loaded.rule_reasons.iter().all(Option::is_some));
+}
+
+/// A user hint replaces the embedded hint with the same key; two hints of
+/// one origin with the same key stay an error.
+#[test]
+fn a_user_hint_replaces_an_embedded_one() {
+    let user = "[[hint]]\nkey = [\"find\"]\ntext = \"mine\"\n";
+    let mut sources = shguard::catalog::EMBEDDED.to_vec();
+    sources.push(Source {
+        origin: Origin::User,
+        name: "user.toml",
+        text: user,
+    });
+    let l = load(&sources).expect("loads");
+    let key = vec![b"find".to_vec()];
+    let found: Vec<_> = l.hints.iter().filter(|h| h.key == key).collect();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].text.as_str(), "mine");
+    // Two user files with the same key are still a duplicate.
+    sources.push(Source {
+        origin: Origin::User,
+        name: "user2.toml",
+        text: user,
+    });
+    let errs = load(&sources).expect_err("duplicate");
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::DuplicateHint { .. }))
+    );
+    // So is one file with the key twice.
+    let twice = format!("{user}{user}");
+    assert!(
+        errors(&twice)
+            .iter()
+            .any(|e| matches!(e, LoadError::DuplicateHint { .. }))
+    );
+}
+
+#[test]
+fn rule_ids_use_a_plain_charset() {
+    let rm = row("\"rm\"", "rest = \"path\"");
+    for id in ["x y", "x\\u202ey", "x\\ny", "x/y"] {
+        let text = format!("{rm}[[rule]]\nid = \"{id}\"\nkey = [\"rm\"]\noutcome = \"block\"\n");
+        assert!(
+            errors(&text)
+                .iter()
+                .any(|e| matches!(e, LoadError::BadRuleId { .. })),
+            "{id}"
+        );
+    }
+    let ok =
+        format!("{rm}[[rule]]\nid = \"dotfiles-a.b_C9\"\nkey = [\"rm\"]\noutcome = \"block\"\n");
+    assert!(load_one(&ok).is_ok());
+}
+
+/// The origin is typed: a user file named like an embedded one still
+/// replaces the embedded hint, and is not mistaken for embedded.
+#[test]
+fn a_user_source_named_embedded_still_replaces_the_embedded_hint() {
+    let mut sources = shguard::catalog::EMBEDDED.to_vec();
+    sources.push(Source {
+        origin: Origin::User,
+        name: "embedded:x.toml",
+        text: "[[hint]]\nkey = [\"find\"]\ntext = \"mine\"\n",
+    });
+    let l = load(&sources).expect("no DuplicateHint");
+    let key = vec![b"find".to_vec()];
+    let found: Vec<_> = l.hints.iter().filter(|h| h.key == key).collect();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].text.as_str(), "mine");
 }
