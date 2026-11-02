@@ -1,5 +1,6 @@
 # The embedded git catalog: read-only subcommands, the local writes `add`,
-# `commit`, `switch` and `stash`, and `fetch` and `push`.
+# `commit`, `switch`, `stash` and `remote` (list and `prune`), and `fetch`
+# and `push`.
 #
 # git has one implementation, parses options with parse-options (options
 # may follow operands, `--opt=value`, `--` ends options), and the rows cite
@@ -1129,7 +1130,9 @@ long = "no-recurse-submodules"
 long = "multiple"
 
 # Lists the configured remotes. The row takes no operand, so `add`,
-# `remove`, `rename`, `set-url` and the other subcommands are Unknown.
+# `remove`, `rename`, `set-url` and the other subcommands are Unknown. `-v`
+# prints the configured URLs, including credentials embedded in them, as
+# `cat .git/config` already does.
 [[row]]
 key = ["git", "remote"]
 source = "https://git-scm.com/docs/git-remote"
@@ -1141,11 +1144,14 @@ positionals = []
 short = "v"
 long = "verbose"
 
-# Deletes the remote-tracking refs of a configured remote that the remote no
-# longer has. Unlike `git fetch --prune`, which stays out of the fetch row,
-# it uses only the remote's configured fetch refspec, so no argument can
-# point it at local branches; a remote configured with a `refs/heads/*`
-# destination is repository config (P3). It contacts the remote.
+# Deletes the refs that the remote no longer has. The operand is a configured
+# remote name or, failing that, a URL; `git-remote-prune-ext-or-url-remote`
+# asks the URL and `ext::` forms. Not covered, as for fetch: the scp form
+# `user@host:path` and relative paths. With the default refspec it touches
+# only `refs/remotes/<name>/*`. In a mirror remote (`+refs/*:refs/*`, made by
+# `git clone --mirror`) it deletes the local branches and tags the remote
+# lacks, as `git fetch origin` already force-updates every ref there. It runs
+# the reference-transaction hook (P3) and contacts the remote.
 [[row]]
 key = ["git", "remote", "prune"]
 source = "https://git-scm.com/docs/git-remote"
@@ -1389,6 +1395,26 @@ targets = [
 ]
 outcome = "ask"
 reason = "an `ext::` remote runs a command; a URL remote is not a configured remote name"
+
+# `git remote prune` falls back to a URL when the operand is not a configured
+# remote, so it needs the same targets as fetch.
+[[rule]]
+id = "git-remote-prune-ext-or-url-remote"
+key = ["git", "remote", "prune"]
+targets = [
+  { pat = "ext::", kind = "prefix" },
+  { pat = "https:", kind = "prefix" },
+  { pat = "http:", kind = "prefix" },
+  { pat = "ssh:", kind = "prefix" },
+  { pat = "git:", kind = "prefix" },
+  { pat = "git+ssh:", kind = "prefix" },
+  { pat = "ssh+git:", kind = "prefix" },
+  { pat = "file:", kind = "prefix" },
+  { pat = "ftp:", kind = "prefix" },
+  { pat = "ftps:", kind = "prefix" },
+]
+outcome = "ask"
+reason = "an `ext::` remote runs a command; a URL is not a configured remote name: name the remote"
 
 # A `+` refspec after `--` force-updates a local ref.
 [[rule]]
