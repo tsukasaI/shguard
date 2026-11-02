@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Embedded rows for `git remote` (lists the configured remotes, `-v`) and
+  `git remote prune` (`-n`): it prunes the stale remote-tracking refs of a
+  configured remote. URL and `ext::` operands are asked, because git falls
+  back to a URL when the operand is not a configured remote. `git fetch
+  --prune` stays Ask because a refspec argument can point it at local
+  branches.
+
 ## 0.11.0 - 2026-11-01
 
 ### Added

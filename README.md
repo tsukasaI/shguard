@@ -81,9 +81,10 @@ braces, assignments, `&`) is Ask, whatever the command.
 
 The embedded catalog (`catalog/*.toml`) covers read-mostly shell tools, `fd`
 (without `-x`, `-X` and `-l`), `eza`, `tree`, read commands of `git`, its
-local writes `add`, `commit`, `switch` and `stash`, `fetch` and `push`, read
-commands of `gh` and a GET-only `gh api`, and `cargo` build, check, test,
-clippy, fmt and doc. Every row names its upstream source.
+local writes `add`, `commit`, `switch`, `stash` and `remote` (list and
+`prune`), `fetch` and `push`, read commands of `gh` and a GET-only `gh api`,
+and `cargo` build, check, test, clippy, fmt and doc. Every row names its
+upstream source.
 
 ### After a `cd`
 
