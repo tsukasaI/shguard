@@ -1128,6 +1128,35 @@ long = "no-recurse-submodules"
 [[row.opt]]
 long = "multiple"
 
+# Lists the configured remotes. The row takes no operand, so `add`,
+# `remove`, `rename`, `set-url` and the other subcommands are Unknown.
+[[row]]
+key = ["git", "remote"]
+source = "https://git-scm.com/docs/git-remote"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+positionals = []
+[[row.opt]]
+short = "v"
+long = "verbose"
+
+# Deletes the remote-tracking refs of a configured remote that the remote no
+# longer has. Unlike `git fetch --prune`, which stays out of the fetch row,
+# it uses only the remote's configured fetch refspec, so no argument can
+# point it at local branches; a remote configured with a `refs/heads/*`
+# destination is repository config (P3). It contacts the remote.
+[[row]]
+key = ["git", "remote", "prune"]
+source = "https://git-scm.com/docs/git-remote"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+[[row.opt]]
+short = "n"
+long = "dry-run"
+
 # Changes the checked-out branch; git refuses when tracked local changes
 # would be lost, but it overwrites an ignored file that the target branch
 # tracks (the default --overwrite-ignore). Left out: -f/--force and
