@@ -32,7 +32,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub use crate::catalog::AskOutcome;
-use crate::catalog::{LoadError, Loaded, Origin, Source, load_files, parse_config, parse_sources};
+use crate::catalog::load::{load_files, parse_sources};
+use crate::catalog::{LoadError, Loaded, Origin, Source, parse_config};
 
 /// What the hook runs with.
 #[derive(Debug)]
