@@ -256,4 +256,8 @@ fn init_needs_a_place_for_the_config() {
         .current_dir(home.path());
     let out = spawn(cmd, b"");
     assert_ne!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        !home.path().join("relative.toml").exists(),
+        "a refused init must not write the config"
+    );
 }

@@ -551,12 +551,13 @@ fn run(program: &Path, args: &[&str], input: &str) -> std::process::Output {
         .args(args)
         .env_clear()
         .env("HOME", home.path())
-        // Not the inherited locale: our parser is byte-oriented.
+        // Not the tool's default for an unset locale: pin C, our parser is byte-oriented.
         .env("LC_ALL", "C")
         .current_dir(cwd.path());
     run_command(command, &program.to_string_lossy(), input)
 }
 
+// Not access(X_OK): no libc dependency; a wrong guess only fails the spawn.
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     path.is_file()
@@ -571,8 +572,14 @@ fn is_executable(path: &Path) -> bool {
 /// tool's own environment is cleared and has no `PATH`.
 fn tool_program(name: &str) -> PathBuf {
     if name.contains('/') {
-        return std::path::absolute(name)
+        let path = std::path::absolute(name)
             .unwrap_or_else(|err| panic!("cannot make {name} absolute: {err}"));
+        assert!(
+            is_executable(&path),
+            "{} is not an executable file",
+            path.display()
+        );
+        return path;
     }
     let paths = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&paths)

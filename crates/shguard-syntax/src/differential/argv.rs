@@ -137,6 +137,7 @@ impl Sandbox {
             .env_clear()
             .env("PATH", self.path_dir.path())
             .env("HOME", self.home_dir.path())
+            .env("LC_ALL", "C")
             .envs(vars.iter().map(|(k, v)| (k, v)))
             .current_dir(self.cwd_dir.path());
         let output = run_command(command, bash, "");
