@@ -540,8 +540,8 @@ impl Corpus {
 }
 
 /// Runs the tool at the absolute path `program` with `input` on stdin, in a
-/// cleared environment with a temporary `HOME` and working directory, and
-/// returns its output. Panics when the program cannot be started: a missing
+/// cleared environment with a temporary `HOME` and working directory and
+/// `LC_ALL=C`, and returns its output. Panics when the program cannot be started: a missing
 /// tool is a failure.
 fn run(program: &Path, args: &[&str], input: &str) -> std::process::Output {
     let home = tempfile::tempdir().expect("temporary HOME");
