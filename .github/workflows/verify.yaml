@@ -71,7 +71,8 @@ jobs:
           save: ${{ github.event_name == 'push' }}
       # verif/ is not committed (#1005), so CI translates from source. Solver
       # versions are pinned by flake.lock, and why3find.json selects the
-      # provers, tactics and timeouts.
+      # provers, tactics and the fast timeout; PROVER_TIME (job env) sets the
+      # main one.
       #
       # Solver results are reused from why3find's cache (.why3find/). It holds
       # per-prover {status, time} entries keyed by goal digest, so a changed
@@ -83,10 +84,11 @@ jobs:
       # workflow_run, schedule). A missing artifact only means proving from
       # scratch.
       # The artifact name carries the solver and prover setup, so results
-      # from another flake or why3find.json are never mixed in. The time limit
-      # is left out: why3find re-checks cached results against the current
-      # one. A job-level
-      # `env` cannot use `runner` or `hashFiles`, so a step exports it.
+      # from another flake or why3find.json are never mixed in. PROVER_TIME
+      # is left out: a cached timeout under a lower limit is proved again, and
+      # a cached proof slower than the current limit counts as a timeout. A
+      # job-level `env` cannot use `runner` or `hashFiles`, so a step exports
+      # the name.
       - name: Restore why3find results from main
         env:
           GH_TOKEN: ${{ github.token }}
