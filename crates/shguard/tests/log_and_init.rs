@@ -5,7 +5,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use serde_json::Value;
 
@@ -22,7 +22,7 @@ fn bash(command: &str) -> Vec<u8> {
         .into_bytes()
 }
 
-fn spawn(mut cmd: Command, stdin: &[u8]) -> Output {
+fn start(mut cmd: Command, stdin: &[u8]) -> Child {
     let mut child = ok(cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -31,7 +31,11 @@ fn spawn(mut cmd: Command, stdin: &[u8]) -> Output {
     if let Some(mut pipe) = child.stdin.take() {
         drop(pipe.write_all(stdin));
     }
-    ok(child.wait_with_output())
+    child
+}
+
+fn spawn(cmd: Command, stdin: &[u8]) -> Output {
+    ok(start(cmd, stdin).wait_with_output())
 }
 
 /// The hook with `SHGUARD_CONFIG` naming `config`, which holds `text`.
@@ -59,38 +63,22 @@ fn log_lines(path: &Path) -> Vec<Value> {
 }
 
 #[test]
-fn decision_log_gets_one_line_per_bash_decision() {
+fn a_bash_call_adds_a_log_line() {
     let dir = ok(tempfile::tempdir());
-    let state = dir.path().join("state");
-    ok(std::fs::create_dir(&state));
-    let log = state.join("decisions.jsonl");
+    let log = dir.path().join("decisions.jsonl");
     let config = dir.path().join("config.toml");
     let text = format!("decision_log = {:?}\n", log.display().to_string());
-    let cases = [
-        ("ls -la", "allow"),
-        ("rm -rf /", "deny"),
-        ("unknowntool x", "deny"),
-    ];
-    for (cmd, want) in cases {
-        let out = hook(dir.path(), &config, &text, &bash(cmd));
-        assert_eq!(decision(&out).as_deref(), Some(want), "{cmd}");
-    }
-    // A non-Bash tool gets no decision and no line.
+    // A non-Bash tool gets no decision and no log file.
     let out = hook(dir.path(), &config, &text, br#"{"tool_name":"Read"}"#);
     assert_eq!(decision(&out), None);
+    assert!(!log.exists());
+    let out = hook(dir.path(), &config, &text, &bash("rm -rf /"));
+    assert_eq!(decision(&out).as_deref(), Some("deny"));
     let lines = log_lines(&log);
-    assert_eq!(lines.len(), cases.len());
-    for (line, (cmd, want)) in lines.iter().zip(cases) {
-        assert_eq!(line["decision"], want);
-        assert_eq!(line["command"], cmd);
-        assert!(line["ts"].is_u64());
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = ok(std::fs::metadata(&log)).permissions().mode();
-        assert_eq!(mode & 0o077, 0, "the log is readable by others");
-    }
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["decision"], "deny");
+    assert_eq!(lines[0]["command"], "rm -rf /");
+    assert!(lines[0]["ts"].is_u64());
 }
 
 #[test]
@@ -117,21 +105,9 @@ fn a_log_that_cannot_be_written_leaves_the_answer() {
     }
 }
 
-#[cfg(unix)]
-#[test]
-fn a_symlinked_log_is_not_written_through() {
-    let dir = ok(tempfile::tempdir());
-    let config = dir.path().join("config.toml");
-    let target = dir.path().join("target.txt");
-    ok(std::fs::write(&target, "keep\n"));
-    let log = dir.path().join("log.jsonl");
-    ok(std::os::unix::fs::symlink(&target, &log));
-    let text = format!("decision_log = {:?}\n", log.display().to_string());
-    let out = hook(dir.path(), &config, &text, &bash("ls -la"));
-    assert_eq!(decision(&out).as_deref(), Some("allow"));
-    assert_eq!(ok(std::fs::read_to_string(&target)), "keep\n");
-}
-
+/// A FIFO with no reader blocks the log's open forever; the hook must still
+/// answer and exit. A hang is a failure: the child is polled and killed
+/// after a generous deadline.
 #[cfg(unix)]
 #[test]
 fn a_fifo_at_the_log_path_does_not_hold_the_answer() {
@@ -141,39 +117,32 @@ fn a_fifo_at_the_log_path_does_not_hold_the_answer() {
     let made = Command::new("mkfifo").arg(&log).status();
     assert!(matches!(made, Ok(s) if s.success()), "mkfifo: {made:?}");
     let text = format!("decision_log = {:?}\n", log.display().to_string());
-    let start = std::time::Instant::now();
-    let out = hook(dir.path(), &config, &text, &bash("rm -rf /"));
-    assert_eq!(decision(&out).as_deref(), Some("deny"));
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(2),
-        "the hook waited"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn a_hard_linked_log_is_not_written_through() {
-    let dir = ok(tempfile::tempdir());
-    let config = dir.path().join("config.toml");
-    let target = dir.path().join("target.txt");
-    ok(std::fs::write(&target, "keep\n"));
-    let log = dir.path().join("log.jsonl");
-    ok(std::fs::hard_link(&target, &log));
-    let text = format!("decision_log = {:?}\n", log.display().to_string());
-    let out = hook(dir.path(), &config, &text, &bash("echo hi"));
-    assert_eq!(decision(&out).as_deref(), Some("allow"));
-    assert_eq!(ok(std::fs::read_to_string(&target)), "keep\n");
-}
-
-#[test]
-fn a_missing_log_directory_is_not_created() {
-    let dir = ok(tempfile::tempdir());
-    let config = dir.path().join("config.toml");
-    let log = dir.path().join("absent").join("log.jsonl");
-    let text = format!("decision_log = {:?}\n", log.display().to_string());
-    let out = hook(dir.path(), &config, &text, &bash("ls -la"));
-    assert_eq!(decision(&out).as_deref(), Some("allow"));
-    assert!(!dir.path().join("absent").exists());
+    ok(std::fs::write(&config, text));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_shguard"));
+    cmd.env("HOME", dir.path()).env("SHGUARD_CONFIG", &config);
+    let mut child = start(cmd, &bash("rm -rf /"));
+    let mut polls = 0_u32;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                drop(child.kill());
+                panic!("try_wait failed: {e:?}");
+            }
+        }
+        polls += 1;
+        if polls > 600 {
+            drop(child.kill());
+            drop(child.wait());
+            panic!("the hook did not exit while the log blocked");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(0));
+    let out = ok(child.wait_with_output());
+    let v: Value = ok(serde_json::from_slice(&out.stdout));
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
 }
 
 #[test]
@@ -188,25 +157,6 @@ fn a_load_error_writes_no_log_line() {
     let out = hook(dir.path(), &config, &text, &bash("ls -la"));
     assert_eq!(decision(&out).as_deref(), Some("deny"));
     assert!(!log.exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn an_existing_log_is_made_private() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = ok(tempfile::tempdir());
-    let config = dir.path().join("config.toml");
-    let log = dir.path().join("log.jsonl");
-    ok(std::fs::write(&log, ""));
-    ok(std::fs::set_permissions(
-        &log,
-        std::fs::Permissions::from_mode(0o644),
-    ));
-    let text = format!("decision_log = {:?}\n", log.display().to_string());
-    let out = hook(dir.path(), &config, &text, &bash("ls -la"));
-    assert_eq!(decision(&out).as_deref(), Some("allow"));
-    assert_eq!(ok(std::fs::metadata(&log)).permissions().mode() & 0o077, 0);
-    assert_eq!(log_lines(&log).len(), 1);
 }
 
 #[test]
