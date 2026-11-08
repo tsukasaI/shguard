@@ -37,13 +37,25 @@ fn main() -> ExitCode {
         None => hook(location),
         Some((cmd, rest)) if cmd == "check" && rest.first().is_some_and(|a| a == "--config") => {
             match rest {
-                [_] => check_config(location, &mut std::io::stderr().lock()),
+                [_] => {
+                    let mut err = std::io::stderr().lock();
+                    note_embedded_only(&location, &mut err);
+                    check_config(location, &mut err)
+                }
                 [_, path] => check_config(
                     Location::Explicit(PathBuf::from(path)),
                     &mut std::io::stderr().lock(),
                 ),
                 _ => usage_error(),
             }
+        }
+        Some((cmd, rest))
+            if cmd == "check"
+                && rest
+                    .first()
+                    .is_some_and(|a| a.to_string_lossy().starts_with('-')) =>
+        {
+            usage_error()
         }
         Some((cmd, rest)) if cmd == "check" && !rest.is_empty() => {
             let paths: Vec<PathBuf> = rest.iter().map(PathBuf::from).collect();
@@ -297,6 +309,29 @@ fn load_settings(location: Location) -> Result<Settings, Vec<LoadError>> {
         Ok(text) => settings(EMBEDDED, Some((&name, &text))),
         Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => settings(EMBEDDED, None),
         Err(source) => Err(vec![LoadError::Read { file: name, source }]),
+    }
+}
+
+/// Says so when `check --config` has no file to read, so an exit 0 is not
+/// mistaken for a checked config.
+fn note_embedded_only(location: &Location, err: &mut impl Write) {
+    match location {
+        Location::Default(p)
+            if std::fs::metadata(p).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            drop(writeln!(
+                err,
+                "shguard check: no config at {}; checked the embedded catalog only",
+                p.display()
+            ));
+        }
+        Location::Nowhere => {
+            drop(writeln!(
+                err,
+                "shguard check: no config location; checked the embedded catalog only"
+            ));
+        }
+        Location::Default(_) | Location::Explicit(_) | Location::Relative(_) => {}
     }
 }
 
