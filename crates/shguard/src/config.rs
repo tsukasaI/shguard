@@ -32,8 +32,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub use crate::catalog::AskOutcome;
-use crate::catalog::load::{load_files, parse_sources};
-use crate::catalog::{LoadError, Loaded, Origin, Source, parse_config};
+use crate::catalog::{LoadError, Loaded, Origin, Source, load_files, parse_config, parse_sources};
 
 /// What the hook runs with.
 #[derive(Debug)]
@@ -60,9 +59,6 @@ pub enum Location {
     /// working directory is not under the user's control.
     Relative(PathBuf),
 }
-
-/// Why a [`Location::Relative`] path is refused.
-pub const RELATIVE_PATH_MESSAGE: &str = "SHGUARD_CONFIG must be an absolute path";
 
 /// Picks the config path from the two environment variables. An empty value
 /// counts as unset.

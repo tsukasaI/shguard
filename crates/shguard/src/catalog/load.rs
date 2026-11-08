@@ -313,7 +313,7 @@ fn text_problem(text: &str) -> Option<&'static str> {
 /// Checks a rule `reason` or hint `text`; a bad one is recorded in `errs`.
 fn guidance(
     file: &str,
-    item: String,
+    item: impl FnOnce() -> String,
     text: String,
     errs: &mut Vec<LoadError>,
 ) -> Option<GuidanceText> {
@@ -322,7 +322,7 @@ fn guidance(
         Err(why) => {
             errs.push(LoadError::BadText {
                 file: file.to_owned(),
-                item,
+                item: item(),
                 why,
             });
             None
@@ -538,7 +538,7 @@ pub(crate) fn load_files(
         let reason = dto
             .reason
             .clone()
-            .and_then(|t| guidance(file, format!("rule {name:?}"), t, &mut errs));
+            .and_then(|t| guidance(file, || format!("rule {name:?}"), t, &mut errs));
         if let Some(rule) = build_rule(file, id, dto, &entries, &mut errs) {
             rules.push(rule);
         }
@@ -588,7 +588,7 @@ fn build_hint(
         });
         ok = false;
     }
-    let text = guidance(file, format!("hint {label:?}"), dto.text, errs);
+    let text = guidance(file, || format!("hint {label:?}"), dto.text, errs);
     text.filter(|_| ok).map(|text| Hint { key, text })
 }
 
