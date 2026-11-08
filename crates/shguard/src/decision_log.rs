@@ -275,14 +275,15 @@ mod tests {
         let log = dir.path().join("log.jsonl");
         let made = std::process::Command::new("mkfifo").arg(&log).status();
         assert!(matches!(made, Ok(s) if s.success()), "mkfifo: {made:?}");
-        let reader = {
+        let (sent, received) = mpsc::channel();
+        {
             let log = log.clone();
-            thread::spawn(move || fs::read(log))
-        };
+            thread::spawn(move || drop(sent.send(fs::read(log))));
+        }
         let result = log_bounded(Duration::from_secs(30), move || append(&log, b"x\n"));
         assert_eq!(kind(result), Some(io::ErrorKind::InvalidInput));
-        let Ok(read) = reader.join() else {
-            panic!("the reader thread panicked");
+        let Ok(read) = received.recv_timeout(Duration::from_secs(30)) else {
+            panic!("the FIFO reader did not finish: append refused without opening the FIFO");
         };
         assert_eq!(ok(read).len(), 0);
     }
@@ -298,9 +299,9 @@ mod tests {
             (Some("unknowntool x"), Response::Ask(String::new())),
         ];
         for (command, response) in &answers {
-            let line = entry(1, *command, response).as_ref().and_then(line);
-            if let Some(line) = line {
-                ok(append(&log, &line));
+            let bytes = entry(1, *command, response).as_ref().and_then(line);
+            if let Some(bytes) = bytes {
+                ok(append(&log, &bytes));
             }
         }
         let text = ok(fs::read_to_string(&log));
