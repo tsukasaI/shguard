@@ -15,13 +15,12 @@
 
 use shguard_kernel::ast::{Part, Script};
 use shguard_kernel::decide::{Verdict, decide};
-use shguard_kernel::verdict::{Addr, Reason, UnknownKind};
+use shguard_kernel::verdict::{Addr, Reason, UnknownKind, simple_at};
 use shguard_syntax::parse;
 
 use crate::catalog::{GuidanceText, Hint, LoadError, Loaded};
 use crate::config::{AskOutcome, Settings};
-use crate::hook::{Request, Response, parse_request, render};
-use serde_json::Value;
+use crate::hook::{Request, Response, parse_request};
 
 /// The most stdin the hook reads. More is malformed.
 pub const INPUT_CAP: usize = 1024 * 1024;
@@ -31,12 +30,6 @@ enum Judged {
     Allow(String),
     Ask(String),
     Deny(String),
-}
-
-/// The hook output for one stdin.
-#[must_use]
-pub fn respond(stdin: &[u8], settings: Result<&Settings, &[LoadError]>) -> Value {
-    render(&answer(stdin, settings).1)
 }
 
 /// The Bash command of one stdin, if it had one, and the answer to it.
@@ -58,18 +51,17 @@ pub fn answer(
 }
 
 fn response(request: Request, settings: Result<&Settings, &[LoadError]>) -> Response {
-    if request == Request::NotBash {
-        return Response::NoDecision;
+    match (request, settings) {
+        (Request::NotBash, Ok(_) | Err(_)) => Response::NoDecision,
+        (Request::Malformed(_) | Request::Command(_), Err(errs)) => {
+            Response::Deny(load_reason(errs))
+        }
+        (Request::Malformed(why), Ok(s)) => settle(Judged::Ask(why.to_owned()), s),
+        (Request::Command(command), Ok(s)) => settle(judge(&command, s), s),
     }
-    let settings = match settings {
-        Ok(s) => s,
-        Err(errs) => return Response::Deny(load_reason(errs)),
-    };
-    let judged = match request {
-        Request::NotBash => return Response::NoDecision,
-        Request::Malformed(why) => Judged::Ask(why.to_owned()),
-        Request::Command(command) => judge(&command, settings),
-    };
+}
+
+fn settle(judged: Judged, settings: &Settings) -> Response {
     match judged {
         Judged::Allow(r) => Response::Allow(r),
         Judged::Deny(r) => Response::Deny(r),
@@ -148,12 +140,7 @@ fn guidance<'a>(reason: &Reason, script: &Script, loaded: &'a Loaded) -> Option<
 /// starts with. Only the literal words at the start of the command are
 /// compared; the first word with an opaque part ends the comparison.
 fn hint_for<'a>(script: &Script, addr: Addr, hints: &'a [Hint]) -> Option<&'a str> {
-    let item = script.items().get(addr.item)?;
-    let pipeline = match addr.link.checked_sub(1) {
-        None => item.first(),
-        Some(k) => item.rest().get(k)?.rhs(),
-    };
-    let simple = pipeline.cmds().get(addr.cmd)?;
+    let simple = simple_at(script, addr)?;
     let mut words: Vec<Vec<u8>> = Vec::new();
     for w in simple.words() {
         let mut bytes = Vec::new();
@@ -214,6 +201,8 @@ mod tests {
     use super::*;
     use crate::catalog::{Origin, Source};
     use crate::config::settings;
+    use crate::hook::render;
+    use serde_json::Value;
 
     const CATALOG: &str = r#"
 [[row]]
@@ -227,6 +216,10 @@ short = "l"
 [[row.opt]]
 short = "a"
 "#;
+
+    fn respond(stdin: &[u8], settings: Result<&Settings, &[LoadError]>) -> Value {
+        render(&answer(stdin, settings).1)
+    }
 
     fn bash(cmd: &str) -> Vec<u8> {
         let v = serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": cmd } });
