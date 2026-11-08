@@ -43,6 +43,11 @@ jobs:
       contents: read
       # Read the why3find artifact of main's last green push run (#1052).
       actions: read
+    # Not set in why3find.json: local runs keep 1.0 for fast feedback. A goal
+    # near that limit fails intermittently on noisy shared runners even after
+    # why3find's velocity calibration, so CI raises it (#1018).
+    env:
+      PROVER_TIME: "5"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,7 +71,8 @@ jobs:
           save: ${{ github.event_name == 'push' }}
       # verif/ is not committed (#1005), so CI translates from source. Solver
       # versions are pinned by flake.lock, and why3find.json selects the
-      # provers, tactics and timeouts.
+      # provers, tactics and the fast timeout; PROVER_TIME (job env) sets the
+      # main one.
       #
       # Solver results are reused from why3find's cache (.why3find/). It holds
       # per-prover {status, time} entries keyed by goal digest, so a changed
@@ -78,8 +84,11 @@ jobs:
       # workflow_run, schedule). A missing artifact only means proving from
       # scratch.
       # The artifact name carries the solver and prover setup, so results
-      # from another flake or why3find.json are never mixed in. A job-level
-      # `env` cannot use `runner` or `hashFiles`, so a step exports it.
+      # from another flake or why3find.json are never mixed in. PROVER_TIME
+      # is left out: a cached timeout under a lower limit is proved again, and
+      # a cached proof slower than the current limit counts as a timeout. A
+      # job-level `env` cannot use `runner` or `hashFiles`, so a step exports
+      # the name.
       - name: Restore why3find results from main
         env:
           GH_TOKEN: ${{ github.token }}
@@ -104,10 +113,10 @@ jobs:
           test -n "$want" && test "$want" = "$have"
       - name: Prove spike
         working-directory: spikes/lattice
-        run: nix develop ../.. -c cargo creusot --span-mode relative
+        run: nix develop ../.. -c cargo creusot --span-mode relative --why3find-arg=--time "--why3find-arg=$PROVER_TIME"
       - name: Prove kernel
         working-directory: crates/shguard-kernel
-        run: nix develop ../.. -c cargo creusot --span-mode relative
+        run: nix develop ../.. -c cargo creusot --span-mode relative --why3find-arg=--time "--why3find-arg=$PROVER_TIME"
       # The shfmt and bash 5 oracles live in the devShell, so the ignored
       # differential tests run here rather than in the `rust` job.
       - name: Differential tests
