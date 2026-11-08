@@ -140,6 +140,7 @@ fn guidance<'a>(reason: &Reason, script: &Script, loaded: &'a Loaded) -> Option<
 /// starts with. Only the literal words at the start of the command are
 /// compared; the first word with an opaque part ends the comparison.
 fn hint_for<'a>(script: &Script, addr: Addr, hints: &'a [Hint]) -> Option<&'a str> {
+    // Verdict addresses are always `valid_addr`, so simple_at's extra word bound never drops a hint.
     let simple = simple_at(script, addr)?;
     let mut words: Vec<Vec<u8>> = Vec::new();
     for w in simple.words() {
@@ -256,6 +257,8 @@ short = "a"
         }
         let other = br#"{"tool_name":"Read"}"#;
         assert_eq!(decision(&d(&deny, other)), None);
+        assert_eq!(decision(&d(&deny, b"junk")), Some("deny"));
+        assert_eq!(decision(&d(&ask, b"junk")), Some("ask"));
     }
 
     fn reason(v: &Value) -> &str {
