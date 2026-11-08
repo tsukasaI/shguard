@@ -15,9 +15,10 @@
 //!   because of a tilde-leading word or an opaque inline value in option
 //!   position.
 //!
-//! Run it with `cargo test -p shguard --test acceptance_report -- --nocapture`.
-//! Set `SHGUARD_BLESS_BASELINE=1` to rewrite the baseline from the current
-//! catalog.
+//! It is `#[ignore]`d so a normal test run never rewrites a tracked file. Run
+//! it with `cargo test -p shguard --test acceptance_report -- --ignored --nocapture`.
+//! Set `SHGUARD_BLESS_BASELINE=1` as well to rewrite the baseline from the
+//! current catalog.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -186,6 +187,7 @@ fn decision_label(v: &Verdict) -> &'static str {
 }
 
 #[test]
+#[ignore = "report: run with --ignored --nocapture"]
 fn soft_report() {
     let l = embedded();
 

@@ -248,8 +248,11 @@ fn init_needs_a_place_for_the_config() {
         .env_remove("SHGUARD_CONFIG");
     let out = spawn(cmd, b"");
     assert_ne!(out.status.code(), Some(0), "{out:?}");
+    let home = ok(tempfile::tempdir());
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_shguard"));
-    cmd.arg("init").env("SHGUARD_CONFIG", "relative.toml");
+    cmd.arg("init")
+        .env("HOME", home.path())
+        .env("SHGUARD_CONFIG", "relative.toml");
     let out = spawn(cmd, b"");
     assert_ne!(out.status.code(), Some(0), "{out:?}");
 }

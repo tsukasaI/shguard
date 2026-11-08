@@ -539,33 +539,44 @@ impl Corpus {
     }
 }
 
-/// Runs `program args` with `input` on stdin and returns its output. Panics
-/// when the program cannot be started: a missing tool is a failure.
-fn run(program: &str, args: &[&str], input: &str) -> std::process::Output {
+/// Runs the tool at the absolute path `program` with `input` on stdin, in a
+/// cleared environment with a temporary `HOME` and working directory, and
+/// returns its output. Panics when the program cannot be started: a missing
+/// tool is a failure.
+fn run(program: &Path, args: &[&str], input: &str) -> std::process::Output {
+    let home = tempfile::tempdir().expect("temporary HOME");
+    let cwd = tempfile::tempdir().expect("temporary working directory");
     let mut command = Command::new(program);
-    command.args(args);
-    run_command(command, program, input)
+    command
+        .args(args)
+        .env_clear()
+        .env("HOME", home.path())
+        .current_dir(cwd.path());
+    run_command(command, &program.to_string_lossy(), input)
 }
 
-/// The bash the oracles use: `SHGUARD_DIFF_BASH`, else `bash`, resolved to a
-/// path through the test process's own `PATH`. A relative name must be
-/// resolved before a test builds a sandbox environment, because the sandbox
-/// `PATH` is empty.
-fn bash_program() -> PathBuf {
-    let name = std::env::var("SHGUARD_DIFF_BASH").unwrap_or_else(|_| "bash".to_string());
+/// `name` as an absolute path through the test process's own `PATH`; a name
+/// with a `/` is taken as given. It must be resolved before the tool runs,
+/// because the tool's own environment is cleared and has no `PATH`.
+fn tool_program(name: &str) -> PathBuf {
     if name.contains('/') {
         return PathBuf::from(name);
     }
     let paths = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&paths)
-        .map(|dir| dir.join(&name))
+        .map(|dir| dir.join(name))
         .find(|candidate| candidate.is_file())
         .unwrap_or_else(|| panic!("{name} not found on PATH (use `nix develop`)"))
 }
 
+/// The bash the oracles use: `SHGUARD_DIFF_BASH`, else `bash`.
+fn bash_program() -> PathBuf {
+    tool_program(&std::env::var("SHGUARD_DIFF_BASH").unwrap_or_else(|_| "bash".to_string()))
+}
+
 fn require_bash5(program: &Path) {
-    let program = program.to_str().expect("bash path is UTF-8");
     let output = run(program, &["-c", "echo \"${BASH_VERSINFO[0]}\""], "");
+    let program = program.display();
     assert!(output.status.success(), "{program} -c failed");
     let major: u32 = String::from_utf8_lossy(&output.stdout)
         .trim()
