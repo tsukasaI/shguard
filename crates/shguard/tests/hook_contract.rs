@@ -385,8 +385,11 @@ fn empty_home_counts_as_unset() {
 }
 
 fn cli(args: &[&str]) -> Output {
+    let home = ok(tempfile::tempdir());
     let mut cmd = binary();
-    cmd.args(args);
+    cmd.args(args)
+        .env("HOME", home.path())
+        .env_remove("SHGUARD_CONFIG");
     spawn(cmd, b"")
 }
 

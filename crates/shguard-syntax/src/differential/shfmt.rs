@@ -8,7 +8,7 @@
 
 use super::{
     AndOrS, CPart, Conn, Shape, SimpleS, canon, corpus, fd_digits, is_name, redir_dev_null,
-    redir_dup, run, unescape_double, unescape_unquoted,
+    redir_dup, run, tool_program, unescape_double, unescape_unquoted,
 };
 use serde_json::Value;
 use shguard_kernel::ast::Redir;
@@ -418,7 +418,7 @@ fn and_or(stmt: &Value, out: &mut Vec<(Option<Conn>, Vec<SimpleS>)>) -> Result<(
 }
 
 fn shape(input: &str) -> Result<Shape, String> {
-    let output = run("shfmt", &["-ln", "bash", "--to-json"], input);
+    let output = run(&tool_program("shfmt"), &["-ln", "bash", "--to-json"], input);
     if !output.status.success() {
         return Err(format!(
             "shfmt exited with {}: {}",
