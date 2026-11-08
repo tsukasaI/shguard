@@ -9,7 +9,7 @@
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
@@ -96,8 +96,10 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 /// Runs `write` on a helper thread and waits at most `wait`. An open that
 /// blocks (a FIFO with no reader, a hung network mount) would otherwise keep
 /// the hook from exiting until Claude Code's timeout, which discards the
-/// answer already written. The helper is left behind when the wait expires;
-/// returning from `main` ends it.
+/// answer already written.
+///
+/// The helper thread is detached: after `TimedOut`, `write` may still run to
+/// completion. Use only in a process that exits soon after.
 ///
 /// # Errors
 ///
@@ -113,10 +115,13 @@ where
         .spawn(move || drop(tx.send(write())))?;
     match rx.recv_timeout(wait) {
         Ok(result) => result,
-        Err(_) => Err(io::Error::new(
+        Err(RecvTimeoutError::Timeout) => Err(io::Error::new(
             io::ErrorKind::TimedOut,
             "the log did not open or write in time",
         )),
+        Err(RecvTimeoutError::Disconnected) => {
+            Err(io::Error::other("the log writer stopped without a result"))
+        }
     }
 }
 
@@ -242,11 +247,71 @@ mod tests {
     fn log_bounded_times_out_on_a_writer_that_blocks() {
         let (release, blocked) = mpsc::channel::<()>();
         let result = log_bounded(Duration::from_millis(20), move || {
-            let _released = blocked.recv();
+            let _released = blocked.recv_timeout(Duration::from_secs(30));
             Ok(())
         });
         assert_eq!(kind(result), Some(io::ErrorKind::TimedOut));
         drop(release);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_not_created_through() {
+        let dir = ok(tempfile::tempdir());
+        let target = dir.path().join("absent-target");
+        let log = dir.path().join("log.jsonl");
+        ok(std::os::unix::fs::symlink(&target, &log));
+        assert_eq!(
+            kind(append(&log, b"x\n")),
+            Some(io::ErrorKind::InvalidInput)
+        );
+        assert!(!target.exists(), "the symlink was followed and created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_at_the_path_is_refused_without_writing() {
+        let dir = ok(tempfile::tempdir());
+        let log = dir.path().join("log.jsonl");
+        let made = std::process::Command::new("mkfifo").arg(&log).status();
+        assert!(matches!(made, Ok(s) if s.success()), "mkfifo: {made:?}");
+        let reader = {
+            let log = log.clone();
+            thread::spawn(move || fs::read(log))
+        };
+        let result = log_bounded(Duration::from_secs(30), move || append(&log, b"x\n"));
+        assert_eq!(kind(result), Some(io::ErrorKind::InvalidInput));
+        let Ok(read) = reader.join() else {
+            panic!("the reader thread panicked");
+        };
+        assert_eq!(ok(read).len(), 0);
+    }
+
+    #[test]
+    fn entries_append_one_line_each_and_skip_no_decision() {
+        let dir = ok(tempfile::tempdir());
+        let log = dir.path().join("decisions.jsonl");
+        let answers = [
+            (Some("ls -la"), Response::Allow(String::new())),
+            (Some("rm -rf /"), Response::Deny(String::new())),
+            (None, Response::NoDecision),
+            (Some("unknowntool x"), Response::Ask(String::new())),
+        ];
+        for (command, response) in &answers {
+            let line = entry(1, *command, response).as_ref().and_then(line);
+            if let Some(line) = line {
+                ok(append(&log, &line));
+            }
+        }
+        let text = ok(fs::read_to_string(&log));
+        let decisions: Vec<Value> = text
+            .lines()
+            .map(|l| ok(serde_json::from_str::<Value>(l)))
+            .collect();
+        assert_eq!(decisions.len(), 3);
+        assert_eq!(decisions[0]["decision"], "allow");
+        assert_eq!(decisions[1]["decision"], "deny");
+        assert_eq!(decisions[2]["decision"], "ask");
     }
 
     #[test]

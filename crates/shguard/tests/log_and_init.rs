@@ -5,11 +5,9 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use serde_json::Value;
-use shguard::decision_log;
-use shguard::hook::Response;
 
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
     match r {
@@ -24,7 +22,7 @@ fn bash(command: &str) -> Vec<u8> {
         .into_bytes()
 }
 
-fn spawn(mut cmd: Command, stdin: &[u8]) -> Output {
+fn start(mut cmd: Command, stdin: &[u8]) -> Child {
     let mut child = ok(cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -33,7 +31,11 @@ fn spawn(mut cmd: Command, stdin: &[u8]) -> Output {
     if let Some(mut pipe) = child.stdin.take() {
         drop(pipe.write_all(stdin));
     }
-    ok(child.wait_with_output())
+    child
+}
+
+fn spawn(cmd: Command, stdin: &[u8]) -> Output {
+    ok(start(cmd, stdin).wait_with_output())
 }
 
 /// The hook with `SHGUARD_CONFIG` naming `config`, which holds `text`.
@@ -66,6 +68,10 @@ fn a_bash_call_adds_a_log_line() {
     let log = dir.path().join("decisions.jsonl");
     let config = dir.path().join("config.toml");
     let text = format!("decision_log = {:?}\n", log.display().to_string());
+    // A non-Bash tool gets no decision and no log file.
+    let out = hook(dir.path(), &config, &text, br#"{"tool_name":"Read"}"#);
+    assert_eq!(decision(&out), None);
+    assert!(!log.exists());
     let out = hook(dir.path(), &config, &text, &bash("rm -rf /"));
     assert_eq!(decision(&out).as_deref(), Some("deny"));
     let lines = log_lines(&log);
@@ -73,31 +79,6 @@ fn a_bash_call_adds_a_log_line() {
     assert_eq!(lines[0]["decision"], "deny");
     assert_eq!(lines[0]["command"], "rm -rf /");
     assert!(lines[0]["ts"].is_u64());
-}
-
-#[test]
-fn the_log_gets_one_line_per_decision_and_none_for_other_tools() {
-    let dir = ok(tempfile::tempdir());
-    let log = dir.path().join("decisions.jsonl");
-    let answers = [
-        (Some("ls -la"), Response::Allow(String::new())),
-        (Some("rm -rf /"), Response::Deny(String::new())),
-        (None, Response::NoDecision),
-        (Some("unknowntool x"), Response::Ask(String::new())),
-    ];
-    for (command, response) in &answers {
-        let line = decision_log::entry(1, *command, response)
-            .as_ref()
-            .and_then(decision_log::line);
-        if let Some(line) = line {
-            ok(decision_log::append(&log, &line));
-        }
-    }
-    let lines = log_lines(&log);
-    assert_eq!(lines.len(), 3);
-    assert_eq!(lines[0]["decision"], "allow");
-    assert_eq!(lines[1]["decision"], "deny");
-    assert_eq!(lines[2]["decision"], "ask");
 }
 
 #[test]
@@ -137,20 +118,18 @@ fn a_fifo_at_the_log_path_does_not_hold_the_answer() {
     assert!(matches!(made, Ok(s) if s.success()), "mkfifo: {made:?}");
     let text = format!("decision_log = {:?}\n", log.display().to_string());
     ok(std::fs::write(&config, text));
-    let mut child = ok(Command::new(env!("CARGO_BIN_EXE_shguard"))
-        .env("HOME", dir.path())
-        .env("SHGUARD_CONFIG", &config)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn());
-    if let Some(mut pipe) = child.stdin.take() {
-        drop(pipe.write_all(&bash("rm -rf /")));
-    }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_shguard"));
+    cmd.env("HOME", dir.path()).env("SHGUARD_CONFIG", &config);
+    let mut child = start(cmd, &bash("rm -rf /"));
     let mut polls = 0_u32;
     let status = loop {
-        if let Some(status) = ok(child.try_wait()) {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(e) => {
+                drop(child.kill());
+                panic!("try_wait failed: {e:?}");
+            }
         }
         polls += 1;
         if polls > 600 {
