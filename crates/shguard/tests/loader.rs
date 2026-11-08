@@ -60,6 +60,15 @@ fn toml_error() {
 }
 
 #[test]
+fn toml_error_is_not_in_the_source_chain() {
+    let errs = errors("[[row]\n");
+    assert!(
+        std::error::Error::source(&errs[0]).is_none(),
+        "the TOML error is already in Display, so a chain walker would print it twice"
+    );
+}
+
+#[test]
 fn toml_error_in_one_file_does_not_hide_others() {
     let dup = row("\"ls\"", "");
     let both = format!("{dup}{dup}");

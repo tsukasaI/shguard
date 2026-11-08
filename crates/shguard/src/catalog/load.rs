@@ -343,9 +343,9 @@ pub struct ParsedFile(FileDto);
 pub fn parse_file(name: &str, text: &str) -> Result<ParsedFile, LoadError> {
     toml::from_str::<FileDto>(text)
         .map(ParsedFile)
-        .map_err(|source| LoadError::Toml {
+        .map_err(|error| LoadError::Toml {
             file: name.to_owned(),
-            source,
+            error,
         })
 }
 
@@ -387,10 +387,10 @@ pub fn parse_config(name: &str, text: &str) -> Result<(ConfigHead, ParsedFile), 
                 file: name.to_owned(),
             });
         }
-        Err(source) => {
+        Err(error) => {
             return Err(LoadError::Toml {
                 file: name.to_owned(),
-                source,
+                error,
             });
         }
     };
