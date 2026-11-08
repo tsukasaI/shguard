@@ -980,6 +980,55 @@ fn check_subcommand_status() {
     // `hook_contract.rs`.
 }
 
+fn run_check_config(args: &[&std::path::Path], home: &std::path::Path) -> Option<i32> {
+    let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
+        .args(["check", "--config"])
+        .args(args)
+        .env("HOME", home)
+        .env_remove("SHGUARD_CONFIG")
+        .output();
+    match out {
+        Ok(o) => o.status.code(),
+        Err(e) => panic!("cannot run shguard: {e}"),
+    }
+}
+
+#[test]
+fn check_config_loads_like_the_hook() {
+    let dir = tempfile::tempdir().unwrap();
+    let ok = dir.path().join("ok.toml");
+    std::fs::write(
+        &ok,
+        "ask_outcome = \"ask\"\n[[rule]]\nid = \"distrust\"\nkey = [\"rm\"]\noutcome = \"ask\"\n",
+    )
+    .unwrap();
+    let dup = dir.path().join("dup.toml");
+    std::fs::write(&dup, row("\"ls\"", "")).unwrap();
+    assert_eq!(run_check_config(&[&ok], dir.path()), Some(0));
+    assert_eq!(run_check_config(&[&dup], dir.path()), Some(1));
+    // The catalog mode does not accept `ask_outcome`.
+    assert_eq!(run_check(&[&ok]), Some(1));
+    // An explicit path must exist.
+    assert_eq!(
+        run_check_config(&[&dir.path().join("missing.toml")], dir.path()),
+        Some(1)
+    );
+}
+
+#[test]
+fn check_config_without_a_path_uses_the_default_location() {
+    let home = tempfile::tempdir().unwrap();
+    // No file at the default path: embedded catalog only, as in the hook.
+    assert_eq!(run_check_config(&[], home.path()), Some(0));
+    let config_dir = home.path().join(".config").join("shguard");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.toml");
+    std::fs::write(&config, row("\"ls\"", "")).unwrap();
+    assert_eq!(run_check_config(&[], home.path()), Some(1));
+    std::fs::write(&config, "ask_outcome = \"ask\"\n").unwrap();
+    assert_eq!(run_check_config(&[], home.path()), Some(0));
+}
+
 /// #1112: rule reasons and hints.
 #[test]
 fn reason_and_hint_texts_are_checked() {
