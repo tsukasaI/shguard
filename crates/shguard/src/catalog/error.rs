@@ -12,10 +12,12 @@ use thiserror::Error;
 pub enum LoadError {
     /// The file is not valid TOML, or does not match the schema (unknown
     /// field, bad enum string, missing required field).
-    #[error("{file:?}: {source}")]
+    #[error("{file:?}: {error}")]
     Toml {
         file: String,
-        source: toml::de::Error,
+        // not `source`: thiserror would also return it from `Error::source()`,
+        // and a chain-walking reporter would print it twice
+        error: toml::de::Error,
     },
     /// A row has no `source`, or an empty one.
     #[error("{file:?}: row {row:?}: missing or empty `source`")]
