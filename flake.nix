@@ -43,7 +43,7 @@
           # `cc`-crate build scripts. Not plain `CC`: cc-wrapper's setup hook
           # overwrites it.
           env."CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_LINKER" = "${pkgs.stdenv.cc}/bin/cc";
-          env."CC_${builtins.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.rust.rustcTarget}" = "${pkgs.stdenv.cc}/bin/cc";
+          env."CC_${builtins.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.rust.cargoShortTarget}" = "${pkgs.stdenv.cc}/bin/cc";
           packages = [
             # Stable toolchain for production code, fmt and clippy.
             pkgs.cargo
