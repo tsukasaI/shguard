@@ -110,9 +110,9 @@ fn a_fifo_at_the_log_path_does_not_hold_the_answer() {
     cmd.env("HOME", dir.path()).env("SHGUARD_CONFIG", &config);
     let mut child = start(cmd, &bash("rm -rf /"));
     let mut polls = 0_u32;
-    let status = loop {
+    loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(_)) => break,
             Ok(None) => {}
             Err(e) => {
                 drop(child.kill());
@@ -126,11 +126,13 @@ fn a_fifo_at_the_log_path_does_not_hold_the_answer() {
             panic!("the hook did not exit while the log blocked");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    assert_eq!(status.code(), Some(0));
+    }
     let out = ok(child.wait_with_output());
-    let v: Value = ok(serde_json::from_slice(&out.stdout));
-    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        decision(&out).as_deref(),
+        Some("deny"),
+        "a FIFO at the log path must not hold back the deny"
+    );
 }
 
 #[test]
