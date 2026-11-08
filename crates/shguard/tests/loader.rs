@@ -247,6 +247,12 @@ fn denylisted_head() {
         "python3.12",
         "python3.13",
         "python3.14",
+        "python3.10",
+        "python3.9",
+        "python3.15",
+        "Python3",
+        "ENV",
+        "Bash",
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
@@ -367,6 +373,7 @@ fn parent_option_spelling_child_must_take_code() {
         "\"flag\"",
         "{ takes = \"inert\" }",
         "{ optional = \"path\" }",
+        "{ optional = \"code\" }",
     ] {
         let errs = errors(&format!("{}{child}", parent(v)));
         assert!(

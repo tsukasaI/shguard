@@ -95,15 +95,25 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"lua",
     b"osascript",
     b"python2",
-    b"python3.11",
-    b"python3.12",
-    b"python3.13",
-    b"python3.14",
     b"gtimeout",
     b"genv",
     b"gnohup",
     b"gnice",
 ];
+
+/// Whether `head` is an [`INEXPRESSIBLE_HEADS`] entry, compared in ASCII
+/// lower case, or a versioned `python` (`python3.10`).
+///
+/// Not an exact byte match: the default macOS filesystem is case-insensitive,
+/// so `ENV` and `Python3` reach the same binary, and the version suffix of
+/// `pythonX.Y` is open-ended.
+fn is_inexpressible(head: &[u8]) -> bool {
+    let lower = head.to_ascii_lowercase();
+    let versioned_python = lower
+        .strip_prefix(b"python")
+        .is_some_and(|v| !v.is_empty() && v.iter().all(|b| b.is_ascii_digit() || *b == b'.'));
+    versioned_python || INEXPRESSIBLE_HEADS.contains(&lower.as_slice())
+}
 
 /// Command heads that run code only through a known set of options (#1111).
 /// A row for one of them, or for a key under it, may cover commands, but
@@ -684,12 +694,7 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             row: label.clone(),
         });
     }
-    if key_valid
-        && !dto.runs_code
-        && key
-            .first()
-            .is_some_and(|h| INEXPRESSIBLE_HEADS.contains(&h.as_slice()))
-    {
+    if key_valid && !dto.runs_code && key.first().is_some_and(|h| is_inexpressible(h)) {
         errs.push(LoadError::DenylistedHead {
             file: file.to_owned(),
             row: label.clone(),
@@ -874,12 +879,7 @@ fn check_code_child(child: &Entry, entries: &[Entry], errs: &mut Vec<LoadError>)
     for parent in entries.iter().filter(|e| e.key == parent_key) {
         let Some(prow) = &parent.row else { continue };
         for opt in prow.grammar().opts() {
-            if overlaps(opt.name(), &want)
-                && !matches!(
-                    opt.value(),
-                    OptValue::Takes(Role::Code) | OptValue::Optional(Role::Code)
-                )
-            {
+            if overlaps(opt.name(), &want) && !matches!(opt.value(), OptValue::Takes(Role::Code)) {
                 errs.push(LoadError::ParentOptNotCode {
                     file: parent.file.clone(),
                     row: parent.label.clone(),
