@@ -250,6 +250,8 @@ fn denylisted_head() {
         "python3.10",
         "python3.9",
         "python3.15",
+        "python3.13t",
+        "python3.13-intel64",
         "Python3",
         "ENV",
         "Bash",
