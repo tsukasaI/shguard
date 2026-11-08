@@ -66,7 +66,8 @@ jobs:
           save: ${{ github.event_name == 'push' }}
       # verif/ is not committed (#1005), so CI translates from source. Solver
       # versions are pinned by flake.lock, and why3find.json selects the
-      # provers, tactics and timeouts.
+      # provers and tactics, and its timeouts unless a step below overrides
+      # them.
       #
       # Solver results are reused from why3find's cache (.why3find/). It holds
       # per-prover {status, time} entries keyed by goal digest, so a changed
@@ -102,6 +103,18 @@ jobs:
           have=$(nix develop -c rustc --version | cut -d' ' -f2)
           echo "rust-toolchain.toml: $want, devShell: $have"
           test -n "$want" && test "$want" = "$have"
+      # Not edited in why3find.json itself: local runs keep the 1.0s limit for
+      # fast feedback. A goal near that limit fails intermittently on a slower
+      # runner, so CI raises it to 5.0s per prover (#1018); the cost is that
+      # a goal no prover can close takes up to five times longer to fail. This
+      # runs after the restore step because the artifact name hashes the
+      # committed files, which PR and main runs must agree on.
+      - name: Raise prover time limit
+        run: |
+          for f in why3find.json spikes/lattice/why3find.json; do
+            jq '.time = 5.0' "$f" > "$f.tmp"
+            mv "$f.tmp" "$f"
+          done
       - name: Prove spike
         working-directory: spikes/lattice
         run: nix develop ../.. -c cargo creusot --span-mode relative
