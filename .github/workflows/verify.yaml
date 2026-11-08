@@ -43,6 +43,11 @@ jobs:
       contents: read
       # Read the why3find artifact of main's last green push run (#1052).
       actions: read
+    # Not set in why3find.json: local runs keep 1.0 for fast feedback. A goal
+    # near that limit fails intermittently on noisy shared runners even after
+    # why3find's velocity calibration, so CI raises it (#1018).
+    env:
+      PROVER_TIME: "5"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,8 +71,7 @@ jobs:
           save: ${{ github.event_name == 'push' }}
       # verif/ is not committed (#1005), so CI translates from source. Solver
       # versions are pinned by flake.lock, and why3find.json selects the
-      # provers and tactics, and its timeouts unless a step below overrides
-      # them.
+      # provers, tactics and timeouts.
       #
       # Solver results are reused from why3find's cache (.why3find/). It holds
       # per-prover {status, time} entries keyed by goal digest, so a changed
@@ -79,7 +83,9 @@ jobs:
       # workflow_run, schedule). A missing artifact only means proving from
       # scratch.
       # The artifact name carries the solver and prover setup, so results
-      # from another flake or why3find.json are never mixed in. A job-level
+      # from another flake or why3find.json are never mixed in. The time limit
+      # is left out: why3find re-checks cached results against the current
+      # one. A job-level
       # `env` cannot use `runner` or `hashFiles`, so a step exports it.
       - name: Restore why3find results from main
         env:
@@ -103,24 +109,12 @@ jobs:
           have=$(nix develop -c rustc --version | cut -d' ' -f2)
           echo "rust-toolchain.toml: $want, devShell: $have"
           test -n "$want" && test "$want" = "$have"
-      # Not edited in why3find.json itself: local runs keep the 1.0s limit for
-      # fast feedback. A goal near that limit fails intermittently on a slower
-      # runner, so CI raises it to 5.0s per prover (#1018); the cost is that
-      # a goal no prover can close takes up to five times longer to fail. This
-      # runs after the restore step because the artifact name hashes the
-      # committed files, which PR and main runs must agree on.
-      - name: Raise prover time limit
-        run: |
-          for f in why3find.json spikes/lattice/why3find.json; do
-            jq '.time = 5.0' "$f" > "$f.tmp"
-            mv "$f.tmp" "$f"
-          done
       - name: Prove spike
         working-directory: spikes/lattice
-        run: nix develop ../.. -c cargo creusot --span-mode relative
+        run: nix develop ../.. -c cargo creusot --span-mode relative --why3find-arg=--time "--why3find-arg=$PROVER_TIME"
       - name: Prove kernel
         working-directory: crates/shguard-kernel
-        run: nix develop ../.. -c cargo creusot --span-mode relative
+        run: nix develop ../.. -c cargo creusot --span-mode relative --why3find-arg=--time "--why3find-arg=$PROVER_TIME"
       # The shfmt and bash 5 oracles live in the devShell, so the ignored
       # differential tests run here rather than in the `rust` job.
       - name: Differential tests
