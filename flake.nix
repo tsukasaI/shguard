@@ -38,11 +38,12 @@
       devShells = forAllSystems (system: pkgs: {
         default = pkgs.mkShell {
           # Not PATH order: stdenv adds its own cc after every entry in
-          # `packages`, so the Creusot bundle's gcc-wrapper `cc` would be found
-          # first, both as the linker and as the bare `CC=gcc` that cc-wrapper
-          # exports on linux for `cc`-crate build scripts.
+          # `packages`, so the Creusot bundle's gcc-wrapper (`cc`/`gcc`) is found
+          # first. The linker var covers rustc linking; CC_<target> covers
+          # `cc`-crate build scripts. Not plain `CC`: cc-wrapper's setup hook
+          # overwrites it.
           env."CARGO_TARGET_${pkgs.stdenv.hostPlatform.rust.cargoEnvVarTarget}_LINKER" = "${pkgs.stdenv.cc}/bin/cc";
-          env.CC = "${pkgs.stdenv.cc}/bin/cc";
+          env."CC_${builtins.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.rust.rustcTarget}" = "${pkgs.stdenv.cc}/bin/cc";
           packages = [
             # Stable toolchain for production code, fmt and clippy.
             pkgs.cargo
