@@ -62,7 +62,7 @@ pub enum Response {
 
 /// What a [`Response`] other than [`Response::NoDecision`] says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Decision<'reason> {
+pub(crate) struct WireDecision<'reason> {
     /// The wire word: `allow`, `ask` or `deny`.
     pub word: &'static str,
     /// Why, as written to Claude Code and to the decision log.
@@ -72,21 +72,21 @@ pub struct Decision<'reason> {
 impl Response {
     /// The decision this response carries, or `None` for no decision.
     #[must_use]
-    pub fn decision(&self) -> Option<Decision<'_>> {
+    pub(crate) fn decision(&self) -> Option<WireDecision<'_>> {
         let (word, reason) = match self {
             Self::NoDecision => return None,
             Self::Allow(r) => ("allow", r),
             Self::Ask(r) => ("ask", r),
             Self::Deny(r) => ("deny", r),
         };
-        Some(Decision { word, reason })
+        Some(WireDecision { word, reason })
     }
 }
 
 /// The JSON object written to stdout.
 #[must_use]
 pub fn render(response: &Response) -> Value {
-    let Some(Decision { word, reason }) = response.decision() else {
+    let Some(WireDecision { word, reason }) = response.decision() else {
         return json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse" } });
     };
     json!({
