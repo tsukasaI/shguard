@@ -60,16 +60,24 @@ pub enum Response {
     Deny(String),
 }
 
+impl Response {
+    /// The wire word and the reason, or `None` for no decision.
+    #[must_use]
+    pub fn decision(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Self::NoDecision => None,
+            Self::Allow(r) => Some(("allow", r)),
+            Self::Ask(r) => Some(("ask", r)),
+            Self::Deny(r) => Some(("deny", r)),
+        }
+    }
+}
+
 /// The JSON object written to stdout.
 #[must_use]
 pub fn render(response: &Response) -> Value {
-    let (decision, reason) = match response {
-        Response::NoDecision => {
-            return json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse" } });
-        }
-        Response::Allow(r) => ("allow", r),
-        Response::Ask(r) => ("ask", r),
-        Response::Deny(r) => ("deny", r),
+    let Some((decision, reason)) = response.decision() else {
+        return json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse" } });
     };
     json!({
         "hookSpecificOutput": {

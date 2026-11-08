@@ -310,6 +310,26 @@ fn text_problem(text: &str) -> Option<&'static str> {
     }
 }
 
+/// Checks a rule `reason` or hint `text`; a bad one is recorded in `errs`.
+fn guidance(
+    file: &str,
+    item: String,
+    text: String,
+    errs: &mut Vec<LoadError>,
+) -> Option<GuidanceText> {
+    match GuidanceText::new(text) {
+        Ok(t) => Some(t),
+        Err(why) => {
+            errs.push(LoadError::BadText {
+                file: file.to_owned(),
+                item,
+                why,
+            });
+            None
+        }
+    }
+}
+
 /// A row as seen by the cross-row checks. `row` is `None` when the row
 /// itself failed to build; its key still counts when it is well formed, so
 /// one bad row does not cascade into orphan and dead-rule errors.
@@ -330,6 +350,15 @@ struct Entry {
 /// Every [`LoadError`] found, if there is at least one.
 pub fn load(sources: &[Source<'_>]) -> Result<Loaded, Vec<LoadError>> {
     let mut errs = Vec::new();
+    let files = parse_sources(sources, &mut errs);
+    load_files(files, errs)
+}
+
+/// Parses every source; the ones that fail add their error to `errs`.
+pub(crate) fn parse_sources(
+    sources: &[Source<'_>],
+    errs: &mut Vec<LoadError>,
+) -> Vec<(String, Origin, ParsedFile)> {
     let mut files = Vec::new();
     for src in sources {
         match parse_file(src.name, src.text) {
@@ -337,7 +366,7 @@ pub fn load(sources: &[Source<'_>]) -> Result<Loaded, Vec<LoadError>> {
             Err(e) => errs.push(e),
         }
     }
-    load_files(files, errs)
+    files
 }
 
 /// A catalog file that parsed and matches the schema, but is not yet checked
@@ -351,7 +380,7 @@ pub struct ParsedFile(FileDto);
 ///
 /// [`LoadError::Toml`] if the text is not valid TOML or does not match the
 /// schema.
-pub fn parse_file(name: &str, text: &str) -> Result<ParsedFile, LoadError> {
+fn parse_file(name: &str, text: &str) -> Result<ParsedFile, LoadError> {
     toml::from_str::<FileDto>(text)
         .map(ParsedFile)
         .map_err(|error| LoadError::Toml {
@@ -442,14 +471,13 @@ fn is_legacy(text: &str) -> bool {
 /// # Errors
 ///
 /// Every [`LoadError`] found, if there is at least one.
-pub fn load_files(
+pub(crate) fn load_files(
     files: Vec<(String, Origin, ParsedFile)>,
     mut errs: Vec<LoadError>,
 ) -> Result<Loaded, Vec<LoadError>> {
     let mut entries = Vec::new();
     let mut rule_dtos: Vec<(String, RuleDto)> = Vec::new();
-    let mut hints: Vec<Hint> = Vec::new();
-    let mut origins: Vec<Origin> = Vec::new();
+    let mut hints: Vec<(Hint, Origin)> = Vec::new();
     for (name, origin, ParsedFile(file)) in files {
         for row in file.row {
             entries.push(build_row(&name, row, &mut errs));
@@ -458,22 +486,14 @@ pub fn load_files(
         // A user hint replaces an embedded hint with the same key; two
         // hints of one origin with the same key stay an error.
         for h in file.hint {
-            let pool: Vec<Hint> = hints
+            let pool: Vec<&Hint> = hints
                 .iter()
-                .zip(&origins)
-                .filter(|(_, o)| match origin {
-                    Origin::Embedded => true,
-                    Origin::User => **o == Origin::User,
-                })
-                .map(|(h, _)| h.clone())
+                .filter(|(_, o)| origin == Origin::Embedded || *o == Origin::User)
+                .map(|(h, _)| h)
                 .collect();
             if let Some(hint) = build_hint(&name, h, &pool, &mut errs) {
-                if let Some(i) = hints.iter().position(|x| x.key == hint.key) {
-                    hints.remove(i);
-                    origins.remove(i);
-                }
-                hints.push(hint);
-                origins.push(origin);
+                hints.retain(|(x, _)| x.key != hint.key);
+                hints.push((hint, origin));
             }
         }
     }
@@ -515,18 +535,10 @@ pub fn load_files(
             }
         };
         let name = dto.id.clone();
-        let reason = match dto.reason.clone().map(GuidanceText::new) {
-            Some(Ok(t)) => Some(t),
-            Some(Err(why)) => {
-                errs.push(LoadError::BadText {
-                    file: file.to_owned(),
-                    item: format!("rule {name:?}"),
-                    why,
-                });
-                None
-            }
-            None => None,
-        };
+        let reason = dto
+            .reason
+            .clone()
+            .and_then(|t| guidance(file, format!("rule {name:?}"), t, &mut errs));
         if let Some(rule) = build_rule(file, id, dto, &entries, &mut errs) {
             rules.push(rule);
         }
@@ -542,7 +554,7 @@ pub fn load_files(
         rules,
         rule_ids,
         rule_reasons,
-        hints,
+        hints: hints.into_iter().map(|(h, _)| h).collect(),
     })
 }
 
@@ -551,7 +563,7 @@ pub fn load_files(
 fn build_hint(
     file: &str,
     dto: HintDto,
-    before: &[Hint],
+    before: &[&Hint],
     errs: &mut Vec<LoadError>,
 ) -> Option<Hint> {
     let label = dto.key.join(" ");
@@ -576,17 +588,7 @@ fn build_hint(
         });
         ok = false;
     }
-    let text = match GuidanceText::new(dto.text) {
-        Ok(t) => Some(t),
-        Err(why) => {
-            errs.push(LoadError::BadText {
-                file: file.to_owned(),
-                item: format!("hint {label:?}"),
-                why,
-            });
-            None
-        }
-    };
+    let text = guidance(file, format!("hint {label:?}"), dto.text, errs);
     text.filter(|_| ok).map(|text| Hint { key, text })
 }
 

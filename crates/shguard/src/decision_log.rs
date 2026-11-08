@@ -14,12 +14,7 @@ use crate::hook::Response;
 /// answer; `command` is the Bash command, if the input had one.
 #[must_use]
 pub fn entry(unix_secs: u64, command: Option<&str>, response: &Response) -> Option<Value> {
-    let (decision, reason) = match response {
-        Response::NoDecision => return None,
-        Response::Allow(r) => ("allow", r),
-        Response::Ask(r) => ("ask", r),
-        Response::Deny(r) => ("deny", r),
-    };
+    let (decision, reason) = response.decision()?;
     Some(json!({
         "ts": unix_secs,
         "decision": decision,
