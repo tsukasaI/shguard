@@ -7,22 +7,17 @@
 
 use serde_json::{Value, json};
 
-use crate::hook::Response;
+use crate::hook::{Response, WireDecision};
 
 /// The log line for one answer, or `None` when there is nothing to log
 /// (a non-Bash tool gets no decision). `unix_secs` is the time of the
 /// answer; `command` is the Bash command, if the input had one.
 #[must_use]
 pub fn entry(unix_secs: u64, command: Option<&str>, response: &Response) -> Option<Value> {
-    let (decision, reason) = match response {
-        Response::NoDecision => return None,
-        Response::Allow(r) => ("allow", r),
-        Response::Ask(r) => ("ask", r),
-        Response::Deny(r) => ("deny", r),
-    };
+    let WireDecision { word, reason } = response.decision()?;
     Some(json!({
         "ts": unix_secs,
-        "decision": decision,
+        "decision": word,
         "reason": reason,
         "command": command,
     }))

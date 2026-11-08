@@ -32,7 +32,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub use crate::catalog::AskOutcome;
-use crate::catalog::{LoadError, Loaded, Origin, Source, load_files, parse_config, parse_file};
+use crate::catalog::load::{load_files, parse_sources};
+use crate::catalog::{LoadError, Loaded, Origin, Source, parse_config};
 
 /// What the hook runs with.
 #[derive(Debug)]
@@ -94,13 +95,7 @@ pub fn settings(
     config: Option<(&str, &str)>,
 ) -> Result<Settings, Vec<LoadError>> {
     let mut errs = Vec::new();
-    let mut files = Vec::new();
-    for src in embedded {
-        match parse_file(src.name, src.text) {
-            Ok(f) => files.push((src.name.to_owned(), src.origin, f)),
-            Err(e) => errs.push(e),
-        }
-    }
+    let mut files = parse_sources(embedded, &mut errs);
     let mut ask_outcome = AskOutcome::default();
     let mut decision_log = None;
     if let Some((name, text)) = config {

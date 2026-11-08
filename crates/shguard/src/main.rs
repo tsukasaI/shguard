@@ -26,15 +26,19 @@ usage: shguard                          run as a Claude Code PreToolUse hook (JS
 /// wrongly. Claude Code treats 2 as blocking.
 const EXIT_BLOCK: u8 = 2;
 
+/// Why a [`Location::Relative`] path is refused.
+const RELATIVE_PATH_MESSAGE: &str = "SHGUARD_CONFIG must be an absolute path";
+
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let location = locate(std::env::var_os("SHGUARD_CONFIG"), std::env::var_os("HOME"));
     match args.split_first() {
-        None => hook(),
+        None => hook(location),
         Some((cmd, rest)) if cmd == "check" && !rest.is_empty() => {
             let paths: Vec<PathBuf> = rest.iter().map(PathBuf::from).collect();
             check(&paths, &mut std::io::stderr().lock())
         }
-        Some((cmd, [])) if cmd == "init" => init_config(),
+        Some((cmd, [])) if cmd == "init" => init_config(location),
         Some((flag, [])) if flag == "--help" || flag == "-h" => {
             drop(std::io::stdout().lock().write_all(USAGE.as_bytes()));
             ExitCode::SUCCESS
@@ -58,7 +62,7 @@ fn usage_error() -> ExitCode {
 
 /// Hook mode: exit 0 once the answer is written and flushed, 2 if it cannot
 /// be written.
-fn hook() -> ExitCode {
+fn hook(location: Location) -> ExitCode {
     if std::io::stdin().is_terminal() {
         return usage_error();
     }
@@ -83,7 +87,7 @@ fn hook() -> ExitCode {
         // Whatever was read is cut off mid-stream; answer as for bad input.
         input.clear();
     }
-    let loaded = load_settings();
+    let loaded = load_settings(location);
     let (command, response) = answer(&input, loaded.as_ref().map_err(Vec::as_slice));
     let mut out = std::io::stdout().lock();
     match out
@@ -198,14 +202,14 @@ fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
 
 /// `shguard init`: writes the config to where the hook will look for it,
 /// never over an existing file, and prints the settings.json hook entry.
-fn init_config() -> ExitCode {
+fn init_config(location: Location) -> ExitCode {
     let mut err = std::io::stderr().lock();
-    let path = match locate(std::env::var_os("SHGUARD_CONFIG"), std::env::var_os("HOME")) {
+    let path = match location {
         Location::Default(p) | Location::Explicit(p) => p,
         Location::Relative(p) => {
             drop(writeln!(
                 err,
-                "shguard init: SHGUARD_CONFIG must be an absolute path: {}",
+                "shguard init: {RELATIVE_PATH_MESSAGE}: {}",
                 p.display()
             ));
             return ExitCode::FAILURE;
@@ -260,24 +264,23 @@ fn init_config() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Reads the config named by the environment and merges it with the embedded
-/// catalog. Only a missing file at the default path means "no config".
-fn load_settings() -> Result<Settings, Vec<LoadError>> {
-    let (path, optional) =
-        match locate(std::env::var_os("SHGUARD_CONFIG"), std::env::var_os("HOME")) {
-            Location::Nowhere => return settings(EMBEDDED, None),
-            Location::Default(p) => (p, true),
-            Location::Explicit(p) => (p, false),
-            Location::Relative(p) => {
-                return Err(vec![LoadError::Read {
-                    file: p.to_string_lossy().into_owned(),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "SHGUARD_CONFIG must be an absolute path",
-                    ),
-                }]);
-            }
-        };
+/// Reads the config at `location` and merges it with the embedded catalog.
+/// Only a missing file at the default path means "no config".
+fn load_settings(location: Location) -> Result<Settings, Vec<LoadError>> {
+    let (path, optional) = match location {
+        Location::Nowhere => return settings(EMBEDDED, None),
+        Location::Default(p) => (p, true),
+        Location::Explicit(p) => (p, false),
+        Location::Relative(p) => {
+            return Err(vec![LoadError::Read {
+                file: p.to_string_lossy().into_owned(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    RELATIVE_PATH_MESSAGE,
+                ),
+            }]);
+        }
+    };
     let name = path.to_string_lossy().into_owned();
     match std::fs::read_to_string(&path) {
         Ok(text) => settings(EMBEDDED, Some((&name, &text))),
