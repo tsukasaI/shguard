@@ -60,29 +60,39 @@ pub enum Response {
     Deny(String),
 }
 
+/// What a [`Response`] other than [`Response::NoDecision`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Decision<'reason> {
+    /// The wire word: `allow`, `ask` or `deny`.
+    pub word: &'static str,
+    /// Why, as written to Claude Code and to the decision log.
+    pub reason: &'reason str,
+}
+
 impl Response {
-    /// The wire word and the reason, or `None` for no decision.
+    /// The decision this response carries, or `None` for no decision.
     #[must_use]
-    pub fn decision(&self) -> Option<(&'static str, &str)> {
-        match self {
-            Self::NoDecision => None,
-            Self::Allow(r) => Some(("allow", r)),
-            Self::Ask(r) => Some(("ask", r)),
-            Self::Deny(r) => Some(("deny", r)),
-        }
+    pub fn decision(&self) -> Option<Decision<'_>> {
+        let (word, reason) = match self {
+            Self::NoDecision => return None,
+            Self::Allow(r) => ("allow", r),
+            Self::Ask(r) => ("ask", r),
+            Self::Deny(r) => ("deny", r),
+        };
+        Some(Decision { word, reason })
     }
 }
 
 /// The JSON object written to stdout.
 #[must_use]
 pub fn render(response: &Response) -> Value {
-    let Some((decision, reason)) = response.decision() else {
+    let Some(Decision { word, reason }) = response.decision() else {
         return json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse" } });
     };
     json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
-            "permissionDecision": decision,
+            "permissionDecision": word,
             "permissionDecisionReason": reason,
         }
     })

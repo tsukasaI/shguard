@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shguard::catalog::{EMBEDDED, LoadError, Origin, Source, load};
-use shguard::config::{Location, RELATIVE_PATH_MESSAGE, Settings, locate, settings};
+use shguard::config::{Location, Settings, locate, settings};
 use shguard::hook::{Response, panic_output, render, to_bytes};
 use shguard::respond::{INPUT_CAP, answer};
 use shguard::{decision_log, init};
@@ -25,6 +25,9 @@ usage: shguard                          run as a Claude Code PreToolUse hook (JS
 /// Exit status when the hook cannot write its answer, or when it is called
 /// wrongly. Claude Code treats 2 as blocking.
 const EXIT_BLOCK: u8 = 2;
+
+/// Why a [`Location::Relative`] path is refused.
+const RELATIVE_PATH_MESSAGE: &str = "SHGUARD_CONFIG must be an absolute path";
 
 fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
@@ -261,8 +264,8 @@ fn init_config(location: Location) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Reads the config named by the environment and merges it with the embedded
-/// catalog. Only a missing file at the default path means "no config".
+/// Reads the config at `location` and merges it with the embedded catalog.
+/// Only a missing file at the default path means "no config".
 fn load_settings(location: Location) -> Result<Settings, Vec<LoadError>> {
     let (path, optional) = match location {
         Location::Nowhere => return settings(EMBEDDED, None),

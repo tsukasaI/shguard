@@ -10,7 +10,7 @@
 mod dto;
 mod embedded;
 mod error;
-pub(crate) mod load;
+mod load;
 
 pub use dto::AskOutcome;
 pub use embedded::EMBEDDED;
@@ -19,3 +19,4 @@ pub use load::{
     ConfigHead, GuidanceText, Hint, Loaded, Origin, ParsedFile, Source, TEXT_CAP, load,
     parse_config,
 };
+pub(crate) use load::{load_files, parse_sources};
