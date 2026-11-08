@@ -19,7 +19,8 @@
 //! appears as arguments of the inner bash.
 //!
 //! Every spawned bash gets a cleared environment, an empty `PATH` directory,
-//! a temporary `HOME` and working directory, and the `run_command` timeout.
+//! a temporary `HOME` and working directory, `LC_ALL=C`, and the
+//! `run_command` timeout.
 //! Variables the input references get an adversarial value, which proves that
 //! `"$X"` stays one word and is not expanded again.
 
@@ -137,6 +138,7 @@ impl Sandbox {
             .env_clear()
             .env("PATH", self.path_dir.path())
             .env("HOME", self.home_dir.path())
+            .env("LC_ALL", "C")
             .envs(vars.iter().map(|(k, v)| (k, v)))
             .current_dir(self.cwd_dir.path());
         let output = run_command(command, bash, "");
