@@ -551,21 +551,34 @@ fn run(program: &Path, args: &[&str], input: &str) -> std::process::Output {
         .args(args)
         .env_clear()
         .env("HOME", home.path())
+        // Not the inherited locale: our parser is byte-oriented.
+        .env("LC_ALL", "C")
         .current_dir(cwd.path());
     run_command(command, &program.to_string_lossy(), input)
 }
 
-/// `name` as an absolute path through the test process's own `PATH`; a name
-/// with a `/` is taken as given. It must be resolved before the tool runs,
-/// because the tool's own environment is cleared and has no `PATH`.
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && path
+            .metadata()
+            .is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0)
+}
+
+/// `name` as an absolute path to an executable file: a name with a `/` is made
+/// absolute, any other is searched in the absolute entries of the test
+/// process's own `PATH`. It must be resolved before the tool runs, because the
+/// tool's own environment is cleared and has no `PATH`.
 fn tool_program(name: &str) -> PathBuf {
     if name.contains('/') {
-        return PathBuf::from(name);
+        return std::path::absolute(name)
+            .unwrap_or_else(|err| panic!("cannot make {name} absolute: {err}"));
     }
     let paths = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&paths)
+        .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
         .unwrap_or_else(|| panic!("{name} not found on PATH (use `nix develop`)"))
 }
 
