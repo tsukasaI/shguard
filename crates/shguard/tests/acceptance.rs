@@ -2,7 +2,14 @@
 //! Only the `command` field of a row is read; the old engine's fields are
 //! not expectations.
 
-use shguard::catalog::{EMBEDDED, Loaded, load};
+#[expect(
+    dead_code,
+    reason = "each test crate uses only part of the shared helpers"
+)]
+mod common;
+
+use common::embedded;
+use shguard::catalog::Loaded;
 use shguard_kernel::decision::Decision;
 
 /// Guardfall commands that the catalog is meant to Allow, by exact text. Each
@@ -37,13 +44,6 @@ const GUARDFALL_ALLOWED: &[&str] = &[
     "rm -f 'notes(1).txt'",
     "rm -f file",
 ];
-
-fn embedded() -> Loaded {
-    match load(EMBEDDED) {
-        Ok(l) => l,
-        Err(e) => panic!("the embedded catalog does not load: {e:?}"),
-    }
-}
 
 /// The `command` of every row of a corpus file.
 fn commands(name: &str) -> Vec<String> {

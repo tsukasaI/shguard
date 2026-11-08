@@ -22,7 +22,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use shguard::catalog::{EMBEDDED, Loaded, load};
+#[expect(
+    dead_code,
+    reason = "each test crate uses only part of the shared helpers"
+)]
+mod common;
+
+use common::embedded;
+use shguard::catalog::Loaded;
 use shguard_kernel::ast::{Opaque, Part};
 use shguard_kernel::decide::{Verdict, decide};
 use shguard_kernel::verdict::{Reason, UnknownKind, simple_at};
@@ -31,13 +38,6 @@ use shguard_kernel::verdict::{Reason, UnknownKind, simple_at};
 const DECIDED: &[&str] = &["benign_corpus.jsonl", "fuzz.jsonl", "guardfall.jsonl"];
 
 const BASELINE: &str = "baseline/old_ask_new_allow.jsonl";
-
-fn embedded() -> Loaded {
-    match load(EMBEDDED) {
-        Ok(l) => l,
-        Err(e) => panic!("the embedded catalog does not load: {e:?}"),
-    }
-}
 
 fn path(name: &str) -> String {
     format!("{}/../../acceptance/{name}", env!("CARGO_MANIFEST_DIR"))

@@ -5,11 +5,17 @@
 //! adds through the config use tool names the embedded catalog does not have
 //! (`mytool`, `mydel`).
 
-use std::fmt::Debug;
-use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Output, Stdio};
+#[expect(
+    dead_code,
+    reason = "each test crate uses only part of the shared helpers"
+)]
+mod common;
 
+use std::fmt::Debug;
+use std::path::Path;
+use std::process::{Command, Output};
+
+use common::{answer, bash, decision, spawn};
 use serde_json::Value;
 
 /// How the config is found.
@@ -48,32 +54,6 @@ short = "r"
 short = "f"
 "#;
 
-fn bash(command: &str) -> Vec<u8> {
-    serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": command } })
-        .to_string()
-        .into_bytes()
-}
-
-fn spawn(mut cmd: Command, stdin: &[u8]) -> Output {
-    let Ok(mut child) = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    else {
-        panic!("cannot run shguard");
-    };
-    if let Some(mut pipe) = child.stdin.take() {
-        // The hook stops reading at its cap, so a large write may hit a
-        // closed pipe; that is not a failure.
-        drop(pipe.write_all(stdin));
-    }
-    match child.wait_with_output() {
-        Ok(o) => o,
-        Err(e) => panic!("cannot wait for shguard: {e}"),
-    }
-}
-
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_shguard"))
 }
@@ -104,27 +84,6 @@ fn run(stdin: &[u8], config: &Config<'_>) -> Output {
         }
     }
     spawn(cmd, stdin)
-}
-
-/// The JSON the hook wrote, after checking the status is 0.
-fn answer(out: &Output) -> Value {
-    assert_eq!(out.status.code(), Some(0), "{out:?}");
-    let v: Value = ok(serde_json::from_slice(&out.stdout));
-    assert_eq!(
-        v.get("hookSpecificOutput")
-            .and_then(|o| o.get("hookEventName"))
-            .and_then(Value::as_str),
-        Some("PreToolUse")
-    );
-    v
-}
-
-fn decision(out: &Output) -> Option<String> {
-    answer(out)
-        .get("hookSpecificOutput")
-        .and_then(|o| o.get("permissionDecision"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
 }
 
 fn reason(out: &Output) -> String {

@@ -1,8 +1,15 @@
 //! Tests of the catalog loader: one rejection per check, the shape of a valid
 //! load, end-to-end decisions, and the `check` subcommand.
 
+#[expect(
+    dead_code,
+    reason = "each test crate uses only part of the shared helpers"
+)]
+mod common;
+
 use std::process::Command;
 
+use common::decide;
 use shguard::catalog::{GuidanceText, LoadError, Loaded, Origin, Source, load};
 use shguard_kernel::ast::{Opaque, Part};
 use shguard_kernel::catalog::{
@@ -42,13 +49,6 @@ fn row(key: &str, extra: &str) -> String {
 
 fn rule(extra: &str) -> String {
     format!("[[rule]]\nid = \"r\"\nkey = [\"rm\"]\noutcome = \"block\"\n{extra}\n")
-}
-
-fn decision(l: &Loaded, cmd: &str) -> Decision {
-    let Ok(script) = shguard_syntax::parse(cmd.as_bytes()) else {
-        panic!("`{cmd}` is outside the subset");
-    };
-    shguard_kernel::decide::decide(&l.catalog, &l.rules, script).decision()
 }
 
 #[test]
@@ -342,7 +342,7 @@ fn code_option_heads_load_without_their_code_options() {
     let l = loaded(&fd(
         "short = \"x\"\nlong = \"exec\"\nvalue = { takes = \"code\" }",
     ));
-    assert_eq!(decision(&l, "fd ts src"), Decision::Allow);
+    assert_eq!(decide(&l, "fd ts src"), Decision::Allow);
     for cmd in [
         "fd -x rm",
         "fd --exec rm",
@@ -350,7 +350,7 @@ fn code_option_heads_load_without_their_code_options() {
         "fd -l",
         "fd -Hl foo",
     ] {
-        assert_eq!(decision(&l, cmd), Decision::Ask, "{cmd}");
+        assert_eq!(decide(&l, cmd), Decision::Ask, "{cmd}");
     }
     // A runs_code row may list them freely.
     assert!(
@@ -627,10 +627,10 @@ fn component_target_decisions() {
         "rm -- ~/.ssh",
         "rm sub/.env.local",
     ] {
-        assert_eq!(decision(&l, cmd), Decision::Block, "{cmd}");
+        assert_eq!(decide(&l, cmd), Decision::Block, "{cmd}");
     }
     for cmd in ["rm .sshx", "rm x.ssh", "rm sub/.env", "rm a.env.x"] {
-        assert_eq!(decision(&l, cmd), Decision::Allow, "{cmd}");
+        assert_eq!(decide(&l, cmd), Decision::Allow, "{cmd}");
     }
 }
 
@@ -650,10 +650,10 @@ fn under_target_decisions() {
         "rm /dev/sda",
         "rm //dev",
     ] {
-        assert_eq!(decision(&l, cmd), Decision::Block, "{cmd}");
+        assert_eq!(decide(&l, cmd), Decision::Block, "{cmd}");
     }
     for cmd in ["rm .github", "rm .gitignore", "rm /devops"] {
-        assert_eq!(decision(&l, cmd), Decision::Allow, "{cmd}");
+        assert_eq!(decide(&l, cmd), Decision::Allow, "{cmd}");
     }
 }
 
@@ -677,9 +677,9 @@ fn cwd_sensitive_row_is_asked_after_cd() {
         row("\"git\"", "cwd_sensitive = true\npositionals = []"),
     );
     let l = loaded(&text);
-    assert_eq!(decision(&l, "git"), Decision::Allow);
-    assert_eq!(decision(&l, "cd /x && git"), Decision::Ask);
-    assert_eq!(decision(&l, "cd /x; git"), Decision::Ask);
+    assert_eq!(decide(&l, "git"), Decision::Allow);
+    assert_eq!(decide(&l, "cd /x && git"), Decision::Ask);
+    assert_eq!(decide(&l, "cd /x; git"), Decision::Ask);
 }
 
 #[test]
@@ -696,9 +696,9 @@ fn child_of_cwd_sensitive_row_must_be_cwd_sensitive() {
         row("\"git\", \"status\"", "cwd_sensitive = true")
     );
     let l = loaded(&ok);
-    assert_eq!(decision(&l, "git status"), Decision::Allow);
-    assert_eq!(decision(&l, "cd /x && git status"), Decision::Ask);
-    assert_eq!(decision(&l, "cd /x | git status"), Decision::Ask);
+    assert_eq!(decide(&l, "git status"), Decision::Allow);
+    assert_eq!(decide(&l, "cd /x && git status"), Decision::Ask);
+    assert_eq!(decide(&l, "cd /x | git status"), Decision::Ask);
 
     // Every level is checked against its own parent.
     let mid = row("\"git\", \"remote\"", "cwd_sensitive = true");
@@ -869,13 +869,13 @@ fn end_to_end_decisions() {
         row("\"tar\"", "runs_code = true"),
     );
     let l = loaded(&format!("{base}{}", date("")));
-    assert_eq!(decision(&l, "ls -la"), Decision::Allow);
-    assert_eq!(decision(&l, "rm -rf /"), Decision::Block);
-    assert_eq!(decision(&l, "pylang -c x"), Decision::Ask);
-    assert_eq!(decision(&l, "tar xf a"), Decision::Ask);
-    assert_eq!(decision(&l, "date +%s"), Decision::Ask);
+    assert_eq!(decide(&l, "ls -la"), Decision::Allow);
+    assert_eq!(decide(&l, "rm -rf /"), Decision::Block);
+    assert_eq!(decide(&l, "pylang -c x"), Decision::Ask);
+    assert_eq!(decide(&l, "tar xf a"), Decision::Ask);
+    assert_eq!(decide(&l, "date +%s"), Decision::Ask);
     let l = loaded(&format!("{base}{}", date("plus_words = \"operand\"")));
-    assert_eq!(decision(&l, "date +%s"), Decision::Allow);
+    assert_eq!(decide(&l, "date +%s"), Decision::Allow);
 }
 
 #[test]
@@ -950,9 +950,9 @@ fn rule_with_only_a_key_hits_every_command_under_it() {
         "{}[[rule]]\nid = \"distrust\"\nkey = [\"rm\"]\noutcome = \"ask\"\n",
         row("\"rm\"", "rest = \"path\"\n[[row.opt]]\nshort = \"f\"\n")
     ));
-    assert_eq!(decision(&l, "rm x"), Decision::Ask);
-    assert_eq!(decision(&l, "rm -f x"), Decision::Ask);
-    assert_eq!(decision(&l, "rm"), Decision::Ask);
+    assert_eq!(decide(&l, "rm x"), Decision::Ask);
+    assert_eq!(decide(&l, "rm -f x"), Decision::Ask);
+    assert_eq!(decide(&l, "rm"), Decision::Ask);
 }
 
 fn run_check(args: &[&std::path::Path]) -> Option<i32> {
