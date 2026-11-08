@@ -102,16 +102,17 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
 ];
 
 /// Whether `head` is an [`INEXPRESSIBLE_HEADS`] entry, compared in ASCII
-/// lower case, or a versioned `python` (`python3.10`).
+/// lower case, or `python` followed by a digit (`python3.10`).
 ///
 /// Not an exact byte match: the default macOS filesystem is case-insensitive,
-/// so `ENV` and `Python3` reach the same binary, and the version suffix of
-/// `pythonX.Y` is open-ended.
+/// so `ENV` and `Python3` reach the same binary, and the suffix of
+/// `pythonX.Y` is open-ended (`python3.13t`, `python3.13-intel64`). Because
+/// only `head` is lowercased, every list entry must already be lowercase.
 fn is_inexpressible(head: &[u8]) -> bool {
     let lower = head.to_ascii_lowercase();
     let versioned_python = lower
         .strip_prefix(b"python")
-        .is_some_and(|v| !v.is_empty() && v.iter().all(|b| b.is_ascii_digit() || *b == b'.'));
+        .is_some_and(|v| v.first().is_some_and(u8::is_ascii_digit));
     versioned_python || INEXPRESSIBLE_HEADS.contains(&lower.as_slice())
 }
 
@@ -1148,4 +1149,20 @@ fn build_rule(
             OutcomeDto::Block => Outcome::Block,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn denylist_entries_are_ascii_lowercase() {
+        for h in INEXPRESSIBLE_HEADS {
+            assert!(
+                h.is_ascii() && h.to_ascii_lowercase() == *h,
+                "{}",
+                String::from_utf8_lossy(h)
+            );
+        }
+    }
 }
