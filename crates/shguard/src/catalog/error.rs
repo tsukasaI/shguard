@@ -14,7 +14,7 @@ pub enum LoadError {
         file: String,
         // not `source`: thiserror would also return it from `Error::source()`,
         // and a chain-walking reporter would print it twice
-        /// The parser's message, with its line and column.
+        /// The parser's error; its `Display` gives the line and column when toml knows the span.
         error: toml::de::Error,
     },
     /// A row has no `source`, or an empty one.
@@ -68,7 +68,7 @@ pub enum LoadError {
         file: String,
         /// Key of the row, segments joined with spaces.
         row: String,
-        /// The option name that occurs twice, as written in the file.
+        /// The option name that occurs twice, spelled as on argv (`-x` or `--name`).
         name: String,
     },
     /// A row with a longer key has no row for the key minus its last
@@ -91,7 +91,7 @@ pub enum LoadError {
     /// A row under a `cwd_sensitive` parent row does not set `cwd_sensitive`.
     #[error("{file:?}: row {row:?}: the parent row is `cwd_sensitive`, so this row must be too")]
     CwdSensitiveParent {
-        /// Name of the file, as passed to the loader.
+        /// Name of the file holding the child row.
         file: String,
         /// Key of the child row that lacks `cwd_sensitive`, segments joined
         /// with spaces.
@@ -142,7 +142,7 @@ pub enum LoadError {
         opt: String,
     },
     /// A row or rule key segment starts with `-` or `+`, and the key is not
-    /// that of a `runs_code` row. `item` is the quoted row key or rule id.
+    /// that of a `runs_code` row.
     #[error("{file:?}: {item}: key segment starts with `-` or `+`")]
     OptionLikeKey {
         /// Name of the file, as passed to the loader.
@@ -172,7 +172,7 @@ pub enum LoadError {
     Read {
         /// Name of the file that could not be read.
         file: String,
-        /// The I/O error from opening or reading it.
+        /// The I/O error, or why the path was refused before reading.
         source: std::io::Error,
     },
     /// A rule `id` is empty or only whitespace.
@@ -193,7 +193,7 @@ pub enum LoadError {
     /// Two rules share an id.
     #[error("{file:?}: rule {rule:?}: duplicate id")]
     DuplicateRuleId {
-        /// Name of the file, as passed to the loader.
+        /// Name of the file holding the later rule with this id.
         file: String,
         /// The `id` that occurs twice.
         rule: String,
@@ -331,8 +331,7 @@ pub enum LoadError {
     },
     /// A rule `reason` or a hint `text` is empty, longer than 300 bytes
     /// (`TEXT_CAP`), or holds a control, line separator, invisible or format
-    /// character. `item` is the quoted rule id or
-    /// hint key.
+    /// character.
     #[error("{file:?}: {item}: {why}")]
     BadText {
         /// Name of the file, as passed to the loader.
@@ -350,15 +349,15 @@ pub enum LoadError {
     BadHintKey {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// The rejected hint key, as written in the file.
+        /// Key of the hint, segments joined with spaces.
         hint: String,
     },
     /// Two hints share a key.
     #[error("{file:?}: hint {hint:?}: duplicate key")]
     DuplicateHint {
-        /// Name of the file, as passed to the loader.
+        /// Name of the file holding the later hint with this key.
         file: String,
-        /// The hint key that occurs twice.
+        /// Key shared by both hints, segments joined with spaces.
         hint: String,
     },
     /// More rules than a rule id can number.
@@ -366,7 +365,7 @@ pub enum LoadError {
     TooManyRules {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// `id` of the first rule past the limit.
+        /// `id` of a rule past the limit; each one gets its own error.
         rule: String,
     },
 }
