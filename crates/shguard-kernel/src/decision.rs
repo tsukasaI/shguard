@@ -52,37 +52,37 @@ pub fn join_l(a: Decision, b: Decision) -> Decision {
 #[ensures(rank(a) == rank(b) ==> a == b)]
 pub fn lemma_rank_injective(a: Decision, b: Decision) {}
 
-/// `join` is commutative.
+/// `join_l` is commutative.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(a, b) == join_l(b, a))]
 pub fn lemma_join_comm(a: Decision, b: Decision) {}
 
-/// `join` is associative.
+/// `join_l` is associative.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(join_l(a, b), c) == join_l(a, join_l(b, c)))]
 pub fn lemma_join_assoc(a: Decision, b: Decision, c: Decision) {}
 
-/// `join` is idempotent.
+/// `join_l` is idempotent.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(a, a) == a)]
 pub fn lemma_join_idem(a: Decision) {}
 
-/// `Allow` is the identity of `join`.
+/// `Allow` is the identity of `join_l`.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(Decision::Allow, a) == a)]
 pub fn lemma_allow_identity(a: Decision) {}
 
-/// `Block` absorbs everything under `join`.
+/// `Block` absorbs everything under `join_l`.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(Decision::Block, a) == Decision::Block)]
 pub fn lemma_block_absorbs(a: Decision) {}
 
-/// `join` never lowers its left argument.
+/// `join_l` never lowers its left argument.
 #[cfg(creusot)]
 #[logic]
 #[ensures(le(a, join_l(a, b)))]
@@ -106,13 +106,13 @@ pub fn lemma_le_trans(a: Decision, b: Decision, c: Decision) {}
 #[ensures(le(a, b) && le(b, a) ==> a == b)]
 pub fn lemma_le_antisym(a: Decision, b: Decision) {}
 
-/// `join` is the least upper bound: any common upper bound dominates it.
+/// `join_l` is the least upper bound: any common upper bound dominates it.
 #[cfg(creusot)]
 #[logic]
 #[ensures(le(a, c) && le(b, c) ==> le(join_l(a, b), c))]
 pub fn lemma_join_lub(a: Decision, b: Decision, c: Decision) {}
 
-/// `join` is monotone in the left argument; the right follows by
+/// `join_l` is monotone in the left argument; the right follows by
 /// `lemma_join_comm`.
 #[cfg(creusot)]
 #[logic]
