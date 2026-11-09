@@ -102,7 +102,8 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
 ];
 
 /// Whether `head` is an [`INEXPRESSIBLE_HEADS`] entry, compared in ASCII
-/// lower case, or `python` followed by a digit (`python3.10`).
+/// lower case, or `python` followed by a digit (`python3.10`) or by the
+/// framework GUI build's `w` (`pythonw`, `pythonw3.12`).
 ///
 /// Not an exact byte match: the default macOS filesystem is case-insensitive,
 /// so `ENV` and `Python3` reach the same binary, and the suffix of
@@ -110,9 +111,9 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
 /// only `head` is lowercased, every list entry must already be lowercase.
 fn is_inexpressible(head: &[u8]) -> bool {
     let lower = head.to_ascii_lowercase();
-    let versioned_python = lower
-        .strip_prefix(b"python")
-        .is_some_and(|v| v.first().is_some_and(u8::is_ascii_digit));
+    let versioned_python = lower.strip_prefix(b"python").is_some_and(|suffix| {
+        matches!(suffix, [b'w'] | [b'w', b'0'..=b'9', ..] | [b'0'..=b'9', ..])
+    });
     versioned_python || INEXPRESSIBLE_HEADS.contains(&lower.as_slice())
 }
 
