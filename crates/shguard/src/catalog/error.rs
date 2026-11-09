@@ -168,12 +168,13 @@ pub enum LoadError {
         file: String,
     },
     /// A file could not be read.
-    #[error("{file:?}: {source}")]
+    #[error("{file:?}: {error}")]
     Read {
         /// Name of the file that could not be read.
         file: String,
+        // not `source`: same reason as `Toml`'s `error` field (#1135)
         /// The I/O error, or why the path was refused before reading.
-        source: std::io::Error,
+        error: std::io::Error,
     },
     /// A rule `id` is empty or only whitespace.
     #[error("{file:?}: a rule has an empty `id`")]
