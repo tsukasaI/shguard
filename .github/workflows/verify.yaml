@@ -26,7 +26,12 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
-      - run: cargo test -p shguard --locked --test acceptance_report -- --ignored
+      # soft_report is #[ignore]d so a normal run never blesses the baseline;
+      # smoke-run it here (#1153). CI must never set the bless variable.
+      - name: Acceptance soft report
+        run: cargo test -p shguard --locked --test acceptance_report -- --ignored --nocapture
+      - name: The soft report wrote nothing
+        run: git diff --exit-code -- acceptance/
       # The spike has its own lockfile. A nix-form one, with no source or
       # checksum for creusot-std, must not land there either (#1020).
       - name: Spike lockfile is the registry form
