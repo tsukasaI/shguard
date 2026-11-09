@@ -59,7 +59,9 @@ pub fn append(path: &Path, line: &[u8]) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // O_NONBLOCK: a FIFO with no reader fails with ENXIO instead of blocking.
+        // O_NONBLOCK stays on the fd: clearing it needs fcntl (unsafe, forbidden
+        // here) and a regular file ignores it; a FIFO with no reader fails the
+        // open with ENXIO instead of blocking.
         options
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
@@ -69,8 +71,9 @@ pub fn append(path: &Path, line: &[u8]) -> io::Result<()> {
     if !opened.is_file() {
         return Err(refuse("the path is not a regular file"));
     }
-    // A symlink swapped in between the check above and the open would have
-    // been followed: the path must still name the file that was opened.
+    // O_NOFOLLOW refuses a swapped-in symlink; a regular file or hard link
+    // swapped in between the check above and the open would still open: the
+    // path must still name the file that was opened.
     let at_path = fs::symlink_metadata(path)?;
     if at_path.file_type().is_symlink() || !same_file(&opened, &at_path) {
         return Err(refuse("the path changed while the log was opened"));
@@ -91,7 +94,10 @@ fn refuse_open_error(e: io::Error) -> io::Error {
     #[cfg(unix)]
     {
         if e.raw_os_error() == Some(libc::ELOOP) {
-            return io::Error::new(io::ErrorKind::InvalidInput, "the path is a symlink");
+            return io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path is or passes through a symlink",
+            );
         }
         if e.raw_os_error() == Some(libc::ENXIO) {
             return io::Error::new(
@@ -118,7 +124,7 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 }
 
 /// Runs `write` on a helper thread and waits at most `wait`. An open that
-/// blocks (a FIFO with no reader, a hung network mount) would otherwise keep
+/// blocks (a hung network mount; off unix, a FIFO with no reader) would otherwise keep
 /// the hook from exiting until Claude Code's timeout, which discards the
 /// answer already written.
 ///
@@ -303,6 +309,15 @@ mod tests {
             kind(append(&log, b"x\n")),
             Some(io::ErrorKind::InvalidInput)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_errors_for_a_symlink_or_a_fifo_are_refusals() {
+        let kind_of = |errno| refuse_open_error(io::Error::from_raw_os_error(errno)).kind();
+        assert_eq!(kind_of(libc::ELOOP), io::ErrorKind::InvalidInput);
+        assert_eq!(kind_of(libc::ENXIO), io::ErrorKind::InvalidInput);
+        assert_eq!(kind_of(libc::EACCES), io::ErrorKind::PermissionDenied);
     }
 
     #[test]
