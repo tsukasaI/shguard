@@ -118,7 +118,9 @@ pub enum LoadError {
     /// A row head holds a non-ASCII byte (`baſh`). The head checks compare in
     /// ASCII case only, and a filesystem that folds Unicode could reach an
     /// interpreter through a non-ASCII spelling, so the loader fails closed.
-    #[error("{file:?}: row \"{row}\": head {head} has a non-ASCII byte; name the command in ASCII")]
+    #[error(
+        "{file:?}: row \"{row}\": head \"{head}\" has a non-ASCII byte; name the command in ASCII"
+    )]
     NonAsciiHead {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -126,7 +128,7 @@ pub enum LoadError {
         /// character escaped like `head`.
         row: String,
         /// The head with every non-ASCII character escaped (`ba\u{17f}h`), so
-        /// the message stays ASCII.
+        /// the head prints in ASCII.
         head: String,
     },
     /// A row for a head that runs code through known options (`fd -x`)
