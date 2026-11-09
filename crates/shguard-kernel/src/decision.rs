@@ -1,8 +1,8 @@
-//! The decision lattice `Allow < Ask < Block`, with `join` as its maximum
+//! The decision lattice `Allow < Ask < Block`, with `join_l` as its maximum
 //! (theorem T1).
 //!
-//! The lattice laws are proved on the logic mirror `join_l`; `join` is tied
-//! to it by its contract.
+//! The lattice laws are proved on the logic function `join_l`; there is no
+//! program-side join.
 
 // Under cfg(creusot) these Clone/PartialEq derives shadow std's; that is
 // behaviour-equivalent for a fieldless enum. Re-check if `Decision` gains fields.
@@ -39,25 +39,11 @@ pub fn le(a: Decision, b: Decision) -> bool {
     rank(a) <= rank(b)
 }
 
-/// Logical join, so lemmas can talk about `join` without calling a program
-/// function.
+/// The stricter of two decisions.
 #[cfg(creusot)]
 #[logic(open)]
 pub fn join_l(a: Decision, b: Decision) -> Decision {
     if rank(a) >= rank(b) { a } else { b }
-}
-
-/// The stricter of two decisions.
-#[cfg_attr(creusot, check(ghost))]
-#[cfg_attr(creusot, ensures(rank(result) == rank(a).max(rank(b))))]
-#[cfg_attr(creusot, ensures(result == join_l(a, b)))]
-#[must_use]
-pub fn join(a: Decision, b: Decision) -> Decision {
-    match (a, b) {
-        (Decision::Block, _) | (_, Decision::Block) => Decision::Block,
-        (Decision::Ask, _) | (_, Decision::Ask) => Decision::Ask,
-        (Decision::Allow, Decision::Allow) => Decision::Allow,
-    }
 }
 
 /// `rank` is injective, so equal ranks mean equal decisions.
@@ -66,37 +52,37 @@ pub fn join(a: Decision, b: Decision) -> Decision {
 #[ensures(rank(a) == rank(b) ==> a == b)]
 pub fn lemma_rank_injective(a: Decision, b: Decision) {}
 
-/// `join` is commutative.
+/// `join_l` is commutative.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(a, b) == join_l(b, a))]
 pub fn lemma_join_comm(a: Decision, b: Decision) {}
 
-/// `join` is associative.
+/// `join_l` is associative.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(join_l(a, b), c) == join_l(a, join_l(b, c)))]
 pub fn lemma_join_assoc(a: Decision, b: Decision, c: Decision) {}
 
-/// `join` is idempotent.
+/// `join_l` is idempotent.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(a, a) == a)]
 pub fn lemma_join_idem(a: Decision) {}
 
-/// `Allow` is the identity of `join`.
+/// `Allow` is the identity of `join_l`.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(Decision::Allow, a) == a)]
 pub fn lemma_allow_identity(a: Decision) {}
 
-/// `Block` absorbs everything under `join`.
+/// `Block` absorbs everything under `join_l`.
 #[cfg(creusot)]
 #[logic]
 #[ensures(join_l(Decision::Block, a) == Decision::Block)]
 pub fn lemma_block_absorbs(a: Decision) {}
 
-/// `join` never lowers its left argument.
+/// `join_l` never lowers its left argument.
 #[cfg(creusot)]
 #[logic]
 #[ensures(le(a, join_l(a, b)))]
@@ -120,39 +106,15 @@ pub fn lemma_le_trans(a: Decision, b: Decision, c: Decision) {}
 #[ensures(le(a, b) && le(b, a) ==> a == b)]
 pub fn lemma_le_antisym(a: Decision, b: Decision) {}
 
-/// `join` is the least upper bound: any common upper bound dominates it.
+/// `join_l` is the least upper bound: any common upper bound dominates it.
 #[cfg(creusot)]
 #[logic]
 #[ensures(le(a, c) && le(b, c) ==> le(join_l(a, b), c))]
 pub fn lemma_join_lub(a: Decision, b: Decision, c: Decision) {}
 
-/// `join` is monotone in the left argument; the right follows by
+/// `join_l` is monotone in the left argument; the right follows by
 /// `lemma_join_comm`.
 #[cfg(creusot)]
 #[logic]
 #[ensures(le(a, a2) ==> le(join_l(a, b), join_l(a2, b)))]
 pub fn lemma_join_monotone(a: Decision, a2: Decision, b: Decision) {}
-
-#[cfg(test)]
-mod tests {
-    use super::{Decision, join};
-
-    #[test]
-    fn join_table() {
-        use Decision::{Allow, Ask, Block};
-        let table = [
-            (Allow, Allow, Allow),
-            (Allow, Ask, Ask),
-            (Allow, Block, Block),
-            (Ask, Allow, Ask),
-            (Ask, Ask, Ask),
-            (Ask, Block, Block),
-            (Block, Allow, Block),
-            (Block, Ask, Block),
-            (Block, Block, Block),
-        ];
-        for (a, b, want) in table {
-            assert_eq!(join(a, b), want, "join({a:?}, {b:?})");
-        }
-    }
-}

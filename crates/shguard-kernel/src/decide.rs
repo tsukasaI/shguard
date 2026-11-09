@@ -975,6 +975,10 @@ pub fn lemma_upto_ends(cat: Catalog, rules: Seq<Rule>, sc: Script) {}
 pub struct Allowed {
     _sealed: (),
     /// The witness `decide` obtained; it owns the script.
+    #[cfg_attr(
+        not(any(creusot, test)),
+        expect(dead_code, reason = "held for the proof invariant; no program reader")
+    )]
     pub(crate) witness: Witness,
     /// The rules the script was checked against (ghost).
     #[cfg(creusot)]
@@ -990,24 +994,6 @@ impl Invariant for Allowed {
                 && no_hits(*self.witness.cat, *self.rules, self.witness.script)
                 && no_path_fail(*self.witness.cat, self.witness.script)
         }
-    }
-}
-
-impl Allowed {
-    /// The allowed script.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(*result == self.witness.script))]
-    #[must_use]
-    pub fn script(&self) -> &Script {
-        self.witness.script()
-    }
-
-    /// The coverage witness.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(*result == self.witness))]
-    #[must_use]
-    pub fn witness(&self) -> &Witness {
-        &self.witness
     }
 }
 
@@ -1053,17 +1039,6 @@ impl Verdict {
             Verdict::Allow(_) => Decision::Allow,
             Verdict::Ask(_, _) => Decision::Ask,
             Verdict::Block(_, _) => Decision::Block,
-        }
-    }
-
-    /// The script the verdict is about.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(*result == verdict_script(*self)))]
-    #[must_use]
-    pub fn script(&self) -> &Script {
-        match self {
-            Verdict::Allow(a) => a.script(),
-            Verdict::Ask(s, _) | Verdict::Block(s, _) => s,
         }
     }
 }
@@ -2020,10 +1995,17 @@ mod tests {
         )
     }
 
+    fn script_of(v: &Verdict) -> &Script {
+        match v {
+            Verdict::Allow(a) => &a.witness.script,
+            Verdict::Ask(s, _) | Verdict::Block(s, _) => s,
+        }
+    }
+
     fn check_with(rules: &[Rule], sc: Script, want: Decision) {
         let v: Verdict = decide(&catalog(), rules, sc.clone());
         assert_eq!(v.decision(), want, "{sc:?}");
-        assert_eq!(*v.script(), sc, "the verdict owns the input script");
+        assert_eq!(*script_of(&v), sc, "the verdict owns the input script");
     }
 
     fn check(sc: Script, want: Decision) {
@@ -2215,14 +2197,14 @@ mod tests {
         let Verdict::Allow(a) = decide(&catalog(), &rules(), sc.clone()) else {
             panic!("allow");
         };
-        assert_eq!(*a.script(), sc);
-        assert_eq!(*a.witness().script(), sc);
+        assert_eq!(a.witness.script, sc);
+        assert_eq!(*a.witness.script(), sc);
     }
 
     fn check_in(cat: &Catalog, rules: &[Rule], sc: Script, want: Decision) {
         let v = decide(cat, rules, sc.clone());
         assert_eq!(v.decision(), want, "{sc:?}");
-        assert_eq!(*v.script(), sc, "the verdict owns the input script");
+        assert_eq!(*script_of(&v), sc, "the verdict owns the input script");
     }
 
     fn tilde_word(rest: &str) -> Word {
