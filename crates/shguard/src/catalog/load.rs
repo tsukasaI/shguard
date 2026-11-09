@@ -862,16 +862,18 @@ fn spelling(s: &[u8]) -> Option<OptName> {
 }
 
 fn check_rows(entries: &[Entry], errs: &mut Vec<LoadError>) {
-    let mut first: HashMap<&[Vec<u8>], &str> = HashMap::new();
+    // Keys compare ASCII case-insensitively, so `FD` cannot shadow `fd` (#1168).
+    let mut first: HashMap<Vec<Vec<u8>>, &str> = HashMap::new();
     for e in entries.iter().filter(|e| !e.key.is_empty()) {
-        if let Some(&first_file) = first.get(e.key.as_slice()) {
+        let folded: Vec<Vec<u8>> = e.key.iter().map(|w| w.to_ascii_lowercase()).collect();
+        if let Some(&first_file) = first.get(&folded) {
             errs.push(LoadError::DuplicateRow {
                 file: e.file.clone(),
                 row: e.label.clone(),
                 first_file: first_file.to_owned(),
             });
         } else {
-            first.insert(e.key.as_slice(), e.file.as_str());
+            first.insert(folded, e.file.as_str());
             check_code_child(e, entries, errs);
             check_cwd_child(e, entries, errs);
         }
