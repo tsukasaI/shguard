@@ -2198,7 +2198,6 @@ mod tests {
         let Verdict::Allow(a) = decide(&catalog(), &rules(), sc.clone()) else {
             panic!("allow");
         };
-        assert_eq!(a.witness.script, sc);
         assert_eq!(*a.witness.script(), sc);
     }
 
