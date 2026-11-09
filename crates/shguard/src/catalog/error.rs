@@ -172,6 +172,7 @@ pub enum LoadError {
     Read {
         /// Name of the file that could not be read.
         file: String,
+        // not `source`: same reason as `Toml`'s `error` field (#1135)
         /// The I/O error, or why the path was refused before reading.
         error: std::io::Error,
     },
