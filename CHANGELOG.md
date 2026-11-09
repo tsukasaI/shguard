@@ -9,9 +9,9 @@
 
 ### Changed
 
-- `shguard check -foo.toml` used to read that file and now exits 2, so write
-  `./-foo.toml`. Any first catalog path given to `shguard check` that starts
-  with `-` is a usage error, so write it `./-name` (#1124).
+- `shguard check` exits 2 (usage error) when its first catalog path starts
+  with `-`, so write such a path `./-name`: `shguard check -foo.toml`, which
+  0.11.1 read as a file, must now be `shguard check ./-foo.toml` (#1124).
 - The loader refuses more user rows that 0.11.1 accepted. A head that can
   never get a covering row (an interpreter, shell, wrapper, remote session
   or tool whose options the grammar cannot express, as the README lists)
