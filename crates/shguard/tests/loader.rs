@@ -1008,9 +1008,15 @@ fn rule_with_only_a_key_hits_every_command_under_it() {
 }
 
 fn run_check(args: &[&std::path::Path]) -> Option<i32> {
+    let home = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => panic!("cannot create tempdir: {e}"),
+    };
     let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
         .arg("check")
         .args(args)
+        .env("HOME", home.path())
+        .env_remove("SHGUARD_CONFIG")
         .output();
     match out {
         Ok(o) => o.status.code(),
@@ -1133,6 +1139,13 @@ fn check_usage_and_location_edge_cases() {
     // An explicit path does not look at SHGUARD_CONFIG.
     assert_eq!(
         run_with_env(&[check, flag, ok.as_os_str()], home, Some("rel.toml")),
+        Some(0)
+    );
+    // Catalog mode does not look at SHGUARD_CONFIG either.
+    let catalog = dir.path().join("ls.toml");
+    std::fs::write(&catalog, row("\"ls\"", "")).unwrap();
+    assert_eq!(
+        run_with_env(&[check, catalog.as_os_str()], home, Some("rel.toml")),
         Some(0)
     );
 }
