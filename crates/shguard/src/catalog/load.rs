@@ -729,10 +729,11 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             row: label.clone(),
         });
     }
-    if key.first().is_some_and(|h| !h.is_ascii()) {
+    if let Some(h) = dto.key.first().filter(|h| !h.is_ascii()) {
         errs.push(LoadError::NonAsciiHead {
             file: file.to_owned(),
-            row: label.clone(),
+            row: label.escape_default().to_string(),
+            head: h.escape_default().to_string(),
         });
     }
     if dto.changes_cwd && dto.cwd_sensitive {

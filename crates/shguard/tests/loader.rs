@@ -402,6 +402,17 @@ fn non_ascii_head() {
             );
         }
     }
+    let t = row("\"baſh\"", "");
+    let msgs: Vec<String> = errors(&t)
+        .iter()
+        .filter(|e| matches!(e, LoadError::NonAsciiHead { .. }))
+        .map(ToString::to_string)
+        .collect();
+    assert!(!msgs.is_empty(), "no NonAsciiHead error");
+    for msg in &msgs {
+        assert!(msg.is_ascii(), "{msg}");
+        assert!(msg.contains("\\u{17f}"), "{msg}");
+    }
 }
 
 #[test]
