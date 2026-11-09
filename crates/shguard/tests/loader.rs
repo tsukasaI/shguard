@@ -184,6 +184,53 @@ fn case_variant_duplicate_row() {
 }
 
 #[test]
+fn case_variant_duplicate_row_against_embedded_and_later_segments() {
+    let git = row("\"git\"", "");
+    let git_status = row("\"git\", \"status\"", "");
+    let embedded_git = format!("{git}{git_status}");
+    let user_status = row("\"git\", \"Status\"", "");
+    let errs = load(&[
+        Source {
+            origin: Origin::Embedded,
+            name: "embedded.toml",
+            text: &embedded_git,
+        },
+        Source {
+            origin: Origin::User,
+            name: "user.toml",
+            text: &user_status,
+        },
+    ])
+    .unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::DuplicateRow { file, .. } if file == "user.toml")),
+        "{errs:?}"
+    );
+
+    let fd = row("\"fd\"", "");
+    let user_fd = row("\"FD\"", "");
+    let errs = load(&[
+        Source {
+            origin: Origin::Embedded,
+            name: "embedded.toml",
+            text: &fd,
+        },
+        Source {
+            origin: Origin::User,
+            name: "user.toml",
+            text: &user_fd,
+        },
+    ])
+    .unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::DuplicateRow { file, .. } if file == "user.toml")),
+        "{errs:?}"
+    );
+}
+
+#[test]
 fn duplicate_option_names() {
     let cases = [
         "[[row.opt]]\nshort = \"a\"\n[[row.opt]]\nshort = \"a\"\n",
