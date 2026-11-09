@@ -1030,7 +1030,10 @@ pub fn verdict_script(v: Verdict) -> Script {
 }
 
 impl Verdict {
-    /// The decision.
+    /// The decision, without the payload.
+    ///
+    /// The integration tests read a verdict through this accessor. It is kept
+    /// as a deliberate exception to #1129.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(result == verdict_decision(*self)))]
     #[must_use]
