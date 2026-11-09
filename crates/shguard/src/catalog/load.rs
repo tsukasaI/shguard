@@ -108,6 +108,9 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"gnice",
 ];
 
+/// Interpreters whose binaries carry a version suffix (`ruby3.1`).
+const VERSIONED_INTERPRETERS: &[&[u8]] = &[b"python", b"perl", b"ruby", b"php", b"lua"];
+
 /// Whether `head` is an [`INEXPRESSIBLE_HEADS`] entry, compared in ASCII
 /// lower case, or an interpreter name from [`VERSIONED_INTERPRETERS`]
 /// followed by a digit (`python3.10`, `perl5.30`, `lua5.4`), or `python`
@@ -129,9 +132,6 @@ fn is_inexpressible(head: &[u8]) -> bool {
         .is_some_and(|suffix| matches!(suffix, [] | [b'0'..=b'9', ..]));
     versioned || versioned_pythonw || INEXPRESSIBLE_HEADS.contains(&lower.as_slice())
 }
-
-/// Interpreters whose binaries carry a version suffix (`ruby3.1`).
-const VERSIONED_INTERPRETERS: &[&[u8]] = &[b"python", b"perl", b"ruby", b"php", b"lua"];
 
 /// Command heads that run code only through a known set of options (#1111).
 /// A row for one of them, or for a key under it, may cover commands, but
@@ -1179,7 +1179,7 @@ mod tests {
 
     #[test]
     fn denylist_entries_are_ascii_lowercase() {
-        for h in INEXPRESSIBLE_HEADS {
+        for h in INEXPRESSIBLE_HEADS.iter().chain(VERSIONED_INTERPRETERS) {
             assert!(
                 h.is_ascii() && h.to_ascii_lowercase() == *h,
                 "{}",
