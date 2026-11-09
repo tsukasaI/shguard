@@ -1008,9 +1008,15 @@ fn rule_with_only_a_key_hits_every_command_under_it() {
 }
 
 fn run_check(args: &[&std::path::Path]) -> Option<i32> {
+    let home = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => panic!("cannot create tempdir: {e}"),
+    };
     let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
         .arg("check")
         .args(args)
+        .env("HOME", home.path())
+        .env_remove("SHGUARD_CONFIG")
         .output();
     match out {
         Ok(o) => o.status.code(),
