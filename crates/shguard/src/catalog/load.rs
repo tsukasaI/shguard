@@ -109,11 +109,14 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
 ];
 
 /// Interpreters whose binaries carry a version suffix (`ruby3.1`).
-const VERSIONED_INTERPRETERS: &[&[u8]] = &[b"python", b"perl", b"ruby", b"php", b"lua"];
+const VERSIONED_INTERPRETERS: &[&[u8]] = &[
+    b"python", b"perl", b"ruby", b"php", b"lua", b"luajit", b"pwsh",
+];
 
 /// Whether `head` is an [`INEXPRESSIBLE_HEADS`] entry, compared in ASCII
 /// lower case, or an interpreter name from [`VERSIONED_INTERPRETERS`]
-/// followed by a digit (`python3.10`, `perl5.30`, `lua5.4`), or `python`
+/// followed by a digit, or by `-` and a digit (`python3.10`, `perl5.30`,
+/// `python-3.10`, `luajit-2.1.0-beta3`), or `python`
 /// followed by the framework GUI build's `w` (`pythonw`, `pythonw3.12`).
 ///
 /// Not an exact byte match: the default macOS filesystem is case-insensitive,
@@ -125,7 +128,7 @@ fn is_inexpressible(head: &[u8]) -> bool {
     let versioned = VERSIONED_INTERPRETERS.iter().any(|name| {
         lower
             .strip_prefix(*name)
-            .is_some_and(|suffix| matches!(suffix, [b'0'..=b'9', ..]))
+            .is_some_and(|suffix| matches!(suffix, [b'0'..=b'9', ..] | [b'-', b'0'..=b'9', ..]))
     });
     let versioned_pythonw = lower
         .strip_prefix(b"pythonw")

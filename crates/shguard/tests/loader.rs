@@ -269,6 +269,9 @@ fn denylisted_head() {
         "tclsh",
         "expect",
         "pwsh",
+        "python-3.10",
+        "ruby-3.1",
+        "luajit-2.1.0-beta3",
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
@@ -284,6 +287,10 @@ fn denylisted_head() {
     }
     // A versioned interpreter needs a digit right after its name.
     for head in ["perlx", "phpize", "rubygems"] {
+        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+    }
+    // A hyphen after a versioned interpreter's name must be followed by a digit.
+    for head in ["php-config", "perl-rename", "ruby-build", "pwsh-preview"] {
         assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
     }
 }
