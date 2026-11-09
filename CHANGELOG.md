@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `shguard check --config [<path>]` checks a config file as the hook loads
+  it. Any first catalog path given to `shguard check` that starts with `-`
+  is now a usage error (exit 2), so such a path must be written `./-name`
+  (#1124).
+
 ## 0.11.1 - 2026-11-02
 
 ### Added
