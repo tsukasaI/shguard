@@ -69,6 +69,18 @@ fn toml_error_is_not_in_the_source_chain() {
 }
 
 #[test]
+fn read_error_is_not_in_the_source_chain() {
+    let err = LoadError::Read {
+        file: "t.toml".to_owned(),
+        error: std::io::Error::other("e"),
+    };
+    assert!(
+        std::error::Error::source(&err).is_none(),
+        "the I/O error is already in Display, so a chain walker would print it twice"
+    );
+}
+
+#[test]
 fn toml_error_in_one_file_does_not_hide_others() {
     let dup = row("\"ls\"", "");
     let both = format!("{dup}{dup}");
