@@ -271,8 +271,9 @@ fn note_embedded_only(location: &Location, err: &mut impl Write) {
     }
 }
 
-/// `shguard check --config`: loads the config exactly as the hook does and
-/// prints each problem on its own line.
+/// `shguard check --config`: loads the config as the hook does and prints each
+/// problem on its own line. `decision_log` is checked only for being absolute:
+/// a path the hook cannot write passes and fails only when the hook writes it.
 fn check_config(location: Location, err: &mut impl Write) -> ExitCode {
     match load_settings(location) {
         Ok(_) => ExitCode::SUCCESS,
