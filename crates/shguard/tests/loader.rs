@@ -267,6 +267,10 @@ fn denylisted_head() {
         let ok = row(&format!("\"{head}\""), "runs_code = true");
         assert!(load_one(&ok).is_ok(), "{head}");
     }
+    // Only `w` alone or before a digit is denylisted.
+    for head in ["pythonwx", "pythonic"] {
+        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+    }
 }
 
 #[test]
