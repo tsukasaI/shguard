@@ -158,6 +158,32 @@ fn duplicate_row_key_across_files() {
 }
 
 #[test]
+fn case_variant_duplicate_row() {
+    for variant in ["FD", "Fd"] {
+        let lower = row("\"fd\"", "");
+        let upper = row(&format!("\"{variant}\""), "");
+        let errs = load(&[
+            Source {
+                origin: Origin::User,
+                name: "a.toml",
+                text: &lower,
+            },
+            Source {
+                origin: Origin::User,
+                name: "b.toml",
+                text: &upper,
+            },
+        ])
+        .unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, LoadError::DuplicateRow { .. })),
+            "{variant}: {errs:?}"
+        );
+    }
+}
+
+#[test]
 fn duplicate_option_names() {
     let cases = [
         "[[row.opt]]\nshort = \"a\"\n[[row.opt]]\nshort = \"a\"\n",

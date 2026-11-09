@@ -140,7 +140,8 @@ leaves those options out or declares that they take a `code` value
 (`value = { takes = "code" }`). The embedded `fd-ask-broad` rule (fd from
 `/` or a home directory is Ask) is keyed `fd` only; a user `fdfind` row
 needs its own rule with `key = ["fdfind"]`. `fd` already has an embedded
-row, and a second row with the same key is a load error, so user rows are
+row, and a second row with the same key is a load error (the duplicate
+check ignores ASCII case, so `FD` collides with `fd`), so user rows are
 for `fdfind`, `split` and `gsplit`.
 
 ### Rows the catalog leaves out
