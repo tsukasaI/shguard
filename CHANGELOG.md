@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `shguard check --config [<path>]` checks a config file as the hook loads
+  it. Any first catalog path given to `shguard check` that starts with `-`
+  is now a usage error (exit 2), so such a path must be written `./-name`
+  (#1124).
+
+### Changed
+
+- The loader refuses more user rows that 0.11.1 accepted. A head that can
+  never get a covering row (an interpreter, shell, wrapper, remote session
+  or tool whose options the grammar cannot express, as the README lists)
+  under another ASCII case (`Python3`, `ENV`, `SSH`), or a versioned
+  `python` spelling (`python3.10`, and any `python` followed by a digit), is
+  now treated like `python3` and `env`: the row must set `runs_code`. A
+  parent option that spells a `runs_code` child's key and whose value is
+  `{ optional = "code" }` is also refused; it must be `{ takes = "code" }`,
+  since only that makes the option run its value. Such a config fails to
+  load, so the hook denies every Bash call until the row is fixed (#1125).
+
 ## 0.11.1 - 2026-11-02
 
 ### Added
