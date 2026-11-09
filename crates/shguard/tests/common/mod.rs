@@ -48,6 +48,9 @@ pub fn bash(command: &str) -> Vec<u8> {
         .into_bytes()
 }
 
+/// Runs `cmd` with `stdin` and collects its output. It does not isolate the
+/// child from the developer's environment: the caller must set `HOME` and
+/// set or remove `SHGUARD_CONFIG`.
 pub fn spawn(mut cmd: Command, stdin: &[u8]) -> Output {
     let Ok(mut child) = cmd
         .stdin(Stdio::piped())
