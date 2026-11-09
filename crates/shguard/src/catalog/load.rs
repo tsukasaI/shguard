@@ -729,6 +729,12 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             row: label.clone(),
         });
     }
+    if key.first().is_some_and(|h| !h.is_ascii()) {
+        errs.push(LoadError::NonAsciiHead {
+            file: file.to_owned(),
+            row: label.clone(),
+        });
+    }
     if dto.changes_cwd && dto.cwd_sensitive {
         errs.push(LoadError::ConflictingCwd {
             file: file.to_owned(),
