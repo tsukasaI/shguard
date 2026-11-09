@@ -288,6 +288,23 @@ fn a_path_head_is_a_load_error() {
 }
 
 #[test]
+fn non_ascii_head() {
+    // Unconditional: `runs_code` does not excuse a head the ASCII-only head
+    // checks cannot see through.
+    for head in ["baſh", "pythön", "ｆｄ"] {
+        for extra in ["", "runs_code = true"] {
+            let t = row(&format!("\"{head}\""), extra);
+            assert!(
+                errors(&t)
+                    .iter()
+                    .any(|e| matches!(e, LoadError::NonAsciiHead { .. })),
+                "{head} {extra}"
+            );
+        }
+    }
+}
+
+#[test]
 fn code_option_heads_load_without_their_code_options() {
     for head in ["fd", "split", "gsplit"] {
         let t = row(&format!("\"{head}\""), "rest = \"path\"");

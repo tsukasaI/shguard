@@ -115,6 +115,16 @@ pub enum LoadError {
         /// Key of the row, segments joined with spaces.
         row: String,
     },
+    /// A row head holds a non-ASCII byte (`baſh`). The head checks compare in
+    /// ASCII case only, and a filesystem that folds Unicode could reach an
+    /// interpreter through a non-ASCII spelling, so the loader fails closed.
+    #[error("{file:?}: row {row:?}: head has a non-ASCII byte; name the command in ASCII")]
+    NonAsciiHead {
+        /// Name of the file, as passed to the loader.
+        file: String,
+        /// Key of the row, segments joined with spaces.
+        row: String,
+    },
     /// A row for a head that runs code through known options (`fd -x`)
     /// lists one of them, or an abbreviation of one, without a
     /// `takes = "code"` value (#1111).
