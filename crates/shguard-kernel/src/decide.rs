@@ -1030,7 +1030,8 @@ pub fn verdict_script(v: Verdict) -> Script {
 }
 
 impl Verdict {
-    /// The decision.
+    /// The decision alone; the integration tests read a verdict through this,
+    /// so it is kept as an exception to #1129.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(result == verdict_decision(*self)))]
     #[must_use]
