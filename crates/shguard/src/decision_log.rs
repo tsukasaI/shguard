@@ -57,8 +57,14 @@ pub fn append(path: &Path, line: &[u8]) -> io::Result<()> {
     let mut options = fs::OpenOptions::new();
     options.append(true).create(true);
     #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let mut file = options.open(path)?;
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK: a FIFO with no reader fails with ENXIO instead of blocking.
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path).map_err(refuse_open_error)?;
     let opened = file.metadata()?;
     if !opened.is_file() {
         return Err(refuse("the path is not a regular file"));
@@ -77,6 +83,24 @@ pub fn append(path: &Path, line: &[u8]) -> io::Result<()> {
         }
     }
     file.write_all(line)
+}
+
+/// ELOOP (a symlink swapped in after the check) and ENXIO (a FIFO with no
+/// reader) become the same refusal as the checks in [`append`].
+fn refuse_open_error(e: io::Error) -> io::Error {
+    #[cfg(unix)]
+    {
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            return io::Error::new(io::ErrorKind::InvalidInput, "the path is a symlink");
+        }
+        if e.raw_os_error() == Some(libc::ENXIO) {
+            return io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path is not a regular file",
+            );
+        }
+    }
+    e
 }
 
 /// The opened file is the file at the path and has no other name: a hard
@@ -275,17 +299,10 @@ mod tests {
         let log = dir.path().join("log.jsonl");
         let made = std::process::Command::new("mkfifo").arg(&log).status();
         assert!(matches!(made, Ok(s) if s.success()), "mkfifo: {made:?}");
-        let (sent, received) = mpsc::channel();
-        {
-            let log = log.clone();
-            thread::spawn(move || drop(sent.send(fs::read(log))));
-        }
-        let result = log_bounded(Duration::from_secs(30), move || append(&log, b"x\n"));
-        assert_eq!(kind(result), Some(io::ErrorKind::InvalidInput));
-        let Ok(read) = received.recv_timeout(Duration::from_secs(30)) else {
-            panic!("the FIFO reader did not finish: append refused without opening the FIFO");
-        };
-        assert_eq!(ok(read).len(), 0);
+        assert_eq!(
+            kind(append(&log, b"x\n")),
+            Some(io::ErrorKind::InvalidInput)
+        );
     }
 
     #[test]
