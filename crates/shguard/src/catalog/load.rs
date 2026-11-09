@@ -93,6 +93,13 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"bun",
     b"php",
     b"lua",
+    b"pypy",
+    b"pypy3",
+    b"ipython",
+    b"luajit",
+    b"tclsh",
+    b"expect",
+    b"pwsh",
     b"osascript",
     b"python2",
     b"gtimeout",
@@ -102,20 +109,29 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
 ];
 
 /// Whether `head` is an [`INEXPRESSIBLE_HEADS`] entry, compared in ASCII
-/// lower case, or `python` followed by a digit (`python3.10`) or by the
-/// framework GUI build's `w` (`pythonw`, `pythonw3.12`).
+/// lower case, or an interpreter name from [`VERSIONED_INTERPRETERS`]
+/// followed by a digit (`python3.10`, `perl5.30`, `lua5.4`), or `python`
+/// followed by the framework GUI build's `w` (`pythonw`, `pythonw3.12`).
 ///
 /// Not an exact byte match: the default macOS filesystem is case-insensitive,
-/// so `ENV` and `Python3` reach the same binary, and the suffix of
-/// `pythonX.Y` is open-ended (`python3.13t`, `python3.13-intel64`). Because
-/// only `head` is lowercased, every list entry must already be lowercase.
+/// so `ENV` and `Python3` reach the same binary, and the version suffix is
+/// open-ended (`python3.13t`, `python3.13-intel64`). Because only `head` is
+/// lowercased, every list entry must already be lowercase.
 fn is_inexpressible(head: &[u8]) -> bool {
     let lower = head.to_ascii_lowercase();
-    let versioned_python = lower.strip_prefix(b"python").is_some_and(|suffix| {
-        matches!(suffix, [b'w'] | [b'w', b'0'..=b'9', ..] | [b'0'..=b'9', ..])
+    let versioned = VERSIONED_INTERPRETERS.iter().any(|name| {
+        lower
+            .strip_prefix(*name)
+            .is_some_and(|suffix| matches!(suffix, [b'0'..=b'9', ..]))
     });
-    versioned_python || INEXPRESSIBLE_HEADS.contains(&lower.as_slice())
+    let versioned_pythonw = lower
+        .strip_prefix(b"pythonw")
+        .is_some_and(|suffix| matches!(suffix, [] | [b'0'..=b'9', ..]));
+    versioned || versioned_pythonw || INEXPRESSIBLE_HEADS.contains(&lower.as_slice())
 }
+
+/// Interpreters whose binaries carry a version suffix (`ruby3.1`).
+const VERSIONED_INTERPRETERS: &[&[u8]] = &[b"python", b"perl", b"ruby", b"php", b"lua"];
 
 /// Command heads that run code only through a known set of options (#1111).
 /// A row for one of them, or for a key under it, may cover commands, but
