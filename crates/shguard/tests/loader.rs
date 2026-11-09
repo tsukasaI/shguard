@@ -258,6 +258,17 @@ fn denylisted_head() {
         "Pythonw3",
         "ENV",
         "Bash",
+        "perl5.30",
+        "lua5.4",
+        "php8.3",
+        "ruby3.1",
+        "pypy",
+        "pypy3",
+        "ipython",
+        "luajit",
+        "tclsh",
+        "expect",
+        "pwsh",
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
@@ -269,6 +280,10 @@ fn denylisted_head() {
     }
     // Only `w` alone or before a digit is denylisted.
     for head in ["pythonwx", "pythonic"] {
+        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+    }
+    // A versioned interpreter needs a digit right after its name.
+    for head in ["perlx", "phpize", "rubygems"] {
         assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
     }
 }
