@@ -110,7 +110,7 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
 
 /// Interpreters whose binaries carry a version suffix (`ruby3.1`, `python-3.10`).
 const VERSIONED_INTERPRETERS: &[&[u8]] = &[
-    b"python", b"perl", b"ruby", b"php", b"lua", b"luajit", b"pwsh",
+    b"python", b"perl", b"ruby", b"php", b"lua", b"luajit", b"pwsh", b"pypy", b"ipython", b"tclsh",
 ];
 
 /// Whether `head` is an [`INEXPRESSIBLE_HEADS`] entry, compared in ASCII

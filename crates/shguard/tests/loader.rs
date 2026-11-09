@@ -360,6 +360,9 @@ fn denylisted_head() {
         "pwsh-7.4",
         "python-3",
         "Python-3.10",
+        "pypy3.10",
+        "ipython3",
+        "tclsh8.6",
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
