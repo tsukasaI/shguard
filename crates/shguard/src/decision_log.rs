@@ -47,8 +47,9 @@ pub fn line(entry: &Value) -> Option<Vec<u8>> {
 ///
 /// # Errors
 ///
-/// `InvalidInput` when the path is a symlink, is not a regular file, or
-/// changed while it was opened; otherwise the I/O error of the open or write.
+/// `InvalidInput` when the path is a symlink, is not a regular file, changed
+/// while it was opened, or has another hard link; otherwise the I/O error of
+/// the open or write.
 pub fn append(path: &Path, line: &[u8]) -> io::Result<()> {
     let refuse = |why: &str| io::Error::new(io::ErrorKind::InvalidInput, why.to_owned());
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -71,12 +72,22 @@ pub fn append(path: &Path, line: &[u8]) -> io::Result<()> {
     if !opened.is_file() {
         return Err(refuse("the path is not a regular file"));
     }
-    // O_NOFOLLOW refuses a swapped-in symlink; a regular file or hard link
-    // swapped in between the check above and the open would still open: the
-    // path must still name the file that was opened.
+    // O_NOFOLLOW refuses a swapped-in symlink; a regular file swapped in
+    // between the check above and the open would still open: the path must
+    // still name the file that was opened.
     let at_path = fs::symlink_metadata(path)?;
     if at_path.file_type().is_symlink() || !same_file(&opened, &at_path) {
         return Err(refuse("the path changed while the log was opened"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // A second name for the opened inode (`ln ~/.bashrc log.jsonl`) passes
+        // the symlink and identity checks above: the write would land in a
+        // file the user never named.
+        if opened.nlink() != 1 {
+            return Err(refuse("the log file has another hard link"));
+        }
     }
     #[cfg(unix)]
     {
@@ -109,12 +120,11 @@ fn refuse_open_error(e: io::Error) -> io::Error {
     e
 }
 
-/// The opened file is the file at the path and has no other name: a hard
-/// link (`ln ~/.bashrc log.jsonl`) would pass every symlink check.
+/// The opened file is the file at the path: same device and inode.
 #[cfg(unix)]
 fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino() && a.nlink() == 1
+    a.dev() == b.dev() && a.ino() == b.ino()
 }
 
 /// Best effort off unix: no file identity is compared.
@@ -214,18 +224,35 @@ mod tests {
         let dir = ok(tempfile::tempdir());
         let target = dir.path().join("target.txt");
         ok(fs::write(&target, "keep\n"));
+        use std::os::unix::fs::PermissionsExt;
+        ok(fs::set_permissions(
+            &target,
+            fs::Permissions::from_mode(0o644),
+        ));
         let log = dir.path().join("log.jsonl");
         ok(fs::hard_link(&target, &log));
+        let result = append(&log, b"x\n");
         assert_eq!(
-            kind(append(&log, b"x\n")),
+            result.as_ref().err().map(io::Error::kind),
             Some(io::ErrorKind::InvalidInput)
         );
+        assert!(
+            result
+                .as_ref()
+                .err()
+                .is_some_and(|e| e.to_string().contains("another hard link")),
+            "unexpected result: {result:?}"
+        );
         assert_eq!(ok(fs::read_to_string(&target)), "keep\n");
+        assert!(
+            ok(fs::metadata(&target)).permissions().mode() & 0o777 == 0o644,
+            "a refused log must not be chmod'ed"
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn same_file_needs_the_same_inode_and_one_name() {
+    fn same_file_needs_the_same_inode() {
         let dir = ok(tempfile::tempdir());
         let a = dir.path().join("a");
         let b = dir.path().join("b");
@@ -235,10 +262,10 @@ mod tests {
         assert!(same_file(&ma, &ma));
         // The swapped-in file (TOCTOU) is a different inode.
         assert!(!same_file(&ma, &mb));
-        // A second name for the same inode is refused.
+        // A second name for the same inode is `append`'s nlink check, not this.
         ok(fs::hard_link(&a, dir.path().join("c")));
         let linked = ok(fs::metadata(&a));
-        assert!(!same_file(&linked, &linked));
+        assert!(same_file(&linked, &linked));
     }
 
     #[cfg(unix)]
