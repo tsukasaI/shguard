@@ -26,6 +26,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
+      - run: cargo test -p shguard --locked --test acceptance_report -- --ignored
       # The spike has its own lockfile. A nix-form one, with no source or
       # checksum for creusot-std, must not land there either (#1020).
       - name: Spike lockfile is the registry form
