@@ -2,36 +2,14 @@
 //! embedded files with no user config and pins only the decision of a
 //! command, never a message or a rule id.
 
-use shguard::catalog::{EMBEDDED, Loaded, load};
+#[expect(
+    dead_code,
+    reason = "each test crate uses only part of the shared helpers"
+)]
+mod common;
+
+use common::{assert_allow, assert_not_allow, decide, embedded};
 use shguard_kernel::decision::Decision;
-
-fn embedded() -> Loaded {
-    match load(EMBEDDED) {
-        Ok(l) => l,
-        Err(e) => panic!("the embedded catalog does not load: {e:?}"),
-    }
-}
-
-fn decide(l: &Loaded, cmd: &str) -> Decision {
-    let Ok(script) = shguard_syntax::parse(cmd.as_bytes()) else {
-        panic!("`{cmd}` is outside the subset");
-    };
-    shguard_kernel::decide::decide(&l.catalog, &l.rules, script).decision()
-}
-
-fn assert_allow(cmds: &[&str]) {
-    let l = embedded();
-    for cmd in cmds {
-        assert_eq!(decide(&l, cmd), Decision::Allow, "`{cmd}`");
-    }
-}
-
-fn assert_not_allow(cmds: &[&str]) {
-    let l = embedded();
-    for cmd in cmds {
-        assert_ne!(decide(&l, cmd), Decision::Allow, "`{cmd}`");
-    }
-}
 
 #[test]
 fn every_gh_row_has_an_allowed_command() {

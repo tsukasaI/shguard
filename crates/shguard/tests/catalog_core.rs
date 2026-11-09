@@ -2,36 +2,14 @@
 //! embedded files with no user config and pins only the decision of a
 //! command, never a message or a rule id.
 
-use shguard::catalog::{EMBEDDED, Loaded, load};
+#[expect(
+    dead_code,
+    reason = "each test crate uses only part of the shared helpers"
+)]
+mod common;
+
+use common::{assert_all, assert_not_allow};
 use shguard_kernel::decision::Decision;
-
-fn embedded() -> Loaded {
-    match load(EMBEDDED) {
-        Ok(l) => l,
-        Err(e) => panic!("the embedded catalog does not load: {e:?}"),
-    }
-}
-
-fn decide(l: &Loaded, cmd: &str) -> Decision {
-    let Ok(script) = shguard_syntax::parse(cmd.as_bytes()) else {
-        panic!("`{cmd}` is outside the subset");
-    };
-    shguard_kernel::decide::decide(&l.catalog, &l.rules, script).decision()
-}
-
-fn assert_all(cmds: &[&str], want: Decision) {
-    let l = embedded();
-    for cmd in cmds {
-        assert_eq!(decide(&l, cmd), want, "`{cmd}`");
-    }
-}
-
-fn assert_not_allow(cmds: &[&str]) {
-    let l = embedded();
-    for cmd in cmds {
-        assert_ne!(decide(&l, cmd), Decision::Allow, "`{cmd}`");
-    }
-}
 
 #[test]
 fn every_row_has_an_allowed_command() {
@@ -405,18 +383,6 @@ fn unknown_heads_are_asked_even_when_they_wrap_a_blocked_command() {
 }
 
 #[test]
-fn unnormalized_relative_leads_are_not_allowed() {
-    assert_not_allow(&[
-        "cp x .//.git/hooks/y",
-        "mkdir .//.git/hooks",
-        "rm -rf ././.git",
-        "cp x ././.claude/settings.json",
-        "rm -rf .//",
-        "rm -rf ././",
-    ]);
-}
-
-#[test]
 fn unnormalized_relative_leads_hit_the_block_targets() {
     assert_all(
         &[
@@ -438,7 +404,6 @@ fn unnormalized_relative_leads_hit_the_block_targets() {
 
 #[test]
 fn case_variants_of_blocked_paths_are_not_allowed() {
-    assert_not_allow(&["rm -rf .GIT", "cp x .GIT/hooks/pre-commit"]);
     assert_all(
         &[
             "rm -rf .GIT",

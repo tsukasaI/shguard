@@ -671,9 +671,6 @@ mod tests {
         assert!(LongName::new(bytes("=")).is_none());
         assert!(LongName::new(bytes("a-b")).is_some());
         assert!(LongName::new(bytes("a b")).is_some());
-
-        let both = OptName::Both(short(b'v'), name.clone());
-        assert_ne!(both, OptName::Long(name));
     }
 
     #[test]

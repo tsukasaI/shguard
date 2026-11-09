@@ -3,10 +3,17 @@
 //! directories, so the user's own files are never read or written. Only
 //! decisions and file shapes are pinned, never message text.
 
+#[expect(
+    dead_code,
+    reason = "each test crate uses only part of the shared helpers"
+)]
+mod common;
+
 use std::io::Write;
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 
+use common::{bash, decision, spawn};
 use serde_json::Value;
 
 fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
@@ -14,12 +21,6 @@ fn ok<T, E: std::fmt::Debug>(r: Result<T, E>) -> T {
         Ok(v) => v,
         Err(e) => panic!("{e:?}"),
     }
-}
-
-fn bash(command: &str) -> Vec<u8> {
-    serde_json::json!({ "tool_name": "Bash", "tool_input": { "command": command } })
-        .to_string()
-        .into_bytes()
 }
 
 fn start(mut cmd: Command, stdin: &[u8]) -> Child {
@@ -34,25 +35,12 @@ fn start(mut cmd: Command, stdin: &[u8]) -> Child {
     child
 }
 
-fn spawn(cmd: Command, stdin: &[u8]) -> Output {
-    ok(start(cmd, stdin).wait_with_output())
-}
-
 /// The hook with `SHGUARD_CONFIG` naming `config`, which holds `text`.
 fn hook(home: &Path, config: &Path, text: &str, stdin: &[u8]) -> Output {
     ok(std::fs::write(config, text));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_shguard"));
     cmd.env("HOME", home).env("SHGUARD_CONFIG", config);
     spawn(cmd, stdin)
-}
-
-fn decision(out: &Output) -> Option<String> {
-    assert_eq!(out.status.code(), Some(0), "{out:?}");
-    let v: Value = ok(serde_json::from_slice(&out.stdout));
-    v.get("hookSpecificOutput")
-        .and_then(|o| o.get("permissionDecision"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
 }
 
 fn log_lines(path: &Path) -> Vec<Value> {
@@ -122,9 +110,9 @@ fn a_fifo_at_the_log_path_does_not_hold_the_answer() {
     cmd.env("HOME", dir.path()).env("SHGUARD_CONFIG", &config);
     let mut child = start(cmd, &bash("rm -rf /"));
     let mut polls = 0_u32;
-    let status = loop {
+    loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(_)) => break,
             Ok(None) => {}
             Err(e) => {
                 drop(child.kill());
@@ -138,11 +126,13 @@ fn a_fifo_at_the_log_path_does_not_hold_the_answer() {
             panic!("the hook did not exit while the log blocked");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    assert_eq!(status.code(), Some(0));
+    }
     let out = ok(child.wait_with_output());
-    let v: Value = ok(serde_json::from_slice(&out.stdout));
-    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+    assert_eq!(
+        decision(&out).as_deref(),
+        Some("deny"),
+        "a FIFO at the log path must not hold back the deny"
+    );
 }
 
 #[test]
