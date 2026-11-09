@@ -163,10 +163,8 @@ const CODE_OPTION_HEADS: &[CodeOptions] = &[
 ];
 
 /// The code-running options of the head `head`, if it is in
-/// [`CODE_OPTION_HEADS`], compared ASCII case-insensitively.
-///
-/// Not an exact byte match: the default macOS filesystem is case-insensitive,
-/// so `FD` reaches the `fd` binary.
+/// [`CODE_OPTION_HEADS`], compared ASCII case-insensitively for the reason
+/// given on [`is_inexpressible`].
 fn code_options(head: &[u8]) -> Option<&'static CodeOptions> {
     CODE_OPTION_HEADS
         .iter()
