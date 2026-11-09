@@ -163,9 +163,14 @@ const CODE_OPTION_HEADS: &[CodeOptions] = &[
 ];
 
 /// The code-running options of the head `head`, if it is in
-/// [`CODE_OPTION_HEADS`].
+/// [`CODE_OPTION_HEADS`], compared ASCII case-insensitively.
+///
+/// Not an exact byte match: the default macOS filesystem is case-insensitive,
+/// so `FD` reaches the `fd` binary.
 fn code_options(head: &[u8]) -> Option<&'static CodeOptions> {
-    CODE_OPTION_HEADS.iter().find(|c| c.head == head)
+    CODE_OPTION_HEADS
+        .iter()
+        .find(|c| c.head.eq_ignore_ascii_case(head))
 }
 
 /// The code option of `c` that the row option `name` can be written as, if

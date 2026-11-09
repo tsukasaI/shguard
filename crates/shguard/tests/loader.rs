@@ -324,6 +324,15 @@ fn code_option_heads_load_without_their_code_options() {
         errors(&fdfind)[0],
         LoadError::CodeOptionNotCode { .. }
     ));
+    // The head compares ASCII case-insensitively: macOS reaches fd as `FD`.
+    let upper_fd = row(
+        "\"FD\"",
+        "[[row.opt]]\nshort = \"x\"\nvalue = { takes = \"inert\" }",
+    );
+    assert!(matches!(
+        errors(&upper_fd)[0],
+        LoadError::CodeOptionNotCode { .. }
+    ));
     // split takes abbreviations, so a prefix of `--filter` is refused too.
     for long in ["filter", "fil", "f"] {
         let split = row(
