@@ -236,10 +236,7 @@ fn load_settings(location: Location) -> Result<Settings, Vec<LoadError>> {
         Location::Relative(p) => {
             return Err(vec![LoadError::Read {
                 file: p.to_string_lossy().into_owned(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    RELATIVE_PATH_MESSAGE,
-                ),
+                error: std::io::Error::new(std::io::ErrorKind::InvalidInput, RELATIVE_PATH_MESSAGE),
             }]);
         }
     };
@@ -247,7 +244,7 @@ fn load_settings(location: Location) -> Result<Settings, Vec<LoadError>> {
     match std::fs::read_to_string(&path) {
         Ok(text) => settings(EMBEDDED, Some((&name, &text))),
         Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => settings(EMBEDDED, None),
-        Err(source) => Err(vec![LoadError::Read { file: name, source }]),
+        Err(error) => Err(vec![LoadError::Read { file: name, error }]),
     }
 }
 
