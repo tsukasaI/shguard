@@ -1141,6 +1141,12 @@ fn check_usage_and_location_edge_cases() {
         run_with_env(&[check, flag, ok.as_os_str()], home, Some("rel.toml")),
         Some(0)
     );
+    let catalog = dir.path().join("ls.toml");
+    std::fs::write(&catalog, row("\"ls\"", "")).unwrap();
+    assert_eq!(
+        run_with_env(&[check, catalog.as_os_str()], home, Some("rel.toml")),
+        Some(0)
+    );
 }
 
 /// #1112: rule reasons and hints.
