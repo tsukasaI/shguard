@@ -124,9 +124,9 @@ fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
 }
 
 /// Runs `write` on a helper thread and waits at most `wait`. An open that
-/// blocks (a hung network mount; off unix, a FIFO with no reader) would otherwise keep
-/// the hook from exiting until Claude Code's timeout, which discards the
-/// answer already written.
+/// blocks (a hung network mount; off unix, a FIFO with no reader) would
+/// otherwise keep the hook from exiting until Claude Code's timeout, which
+/// discards the answer already written.
 ///
 /// The helper thread is detached: after `TimedOut`, `write` may still run to
 /// completion. Use only in a process that exits soon after.
