@@ -1141,6 +1141,7 @@ fn check_usage_and_location_edge_cases() {
         run_with_env(&[check, flag, ok.as_os_str()], home, Some("rel.toml")),
         Some(0)
     );
+    // Catalog mode does not look at SHGUARD_CONFIG either.
     let catalog = dir.path().join("ls.toml");
     std::fs::write(&catalog, row("\"ls\"", "")).unwrap();
     assert_eq!(
