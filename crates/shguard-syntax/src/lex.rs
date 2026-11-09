@@ -274,13 +274,13 @@ pub struct Unsupported {
 pub(crate) struct Lexeme {
     /// Byte index in the input where the token starts. For a redirect it is
     /// the start of the whole redirect, descriptor included.
-    pub offset: usize,
+    pub(crate) offset: usize,
     /// Byte index in the input just past the token (exclusive), so
     /// `input[offset..end]` is its exact source text. A word's text spans
     /// its quotes and escapes.
-    pub end: usize,
+    pub(crate) end: usize,
     /// The token.
-    pub token: Token,
+    pub(crate) token: Token,
 }
 
 /// Lexes `input`, or reports the first construct outside the subset.

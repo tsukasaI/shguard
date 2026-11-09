@@ -6,7 +6,7 @@
 //! `cargo test`; the module exists only under `cfg(kani)`, so it indexes
 //! freely because Kani proves every index in bounds.
 //!
-//! Whole-input [`lex`](crate::lex()) and [`parse`](crate::parse) are out of
+//! Whole-input [`lex`](crate::lex::lex()) and [`parse`](crate::parse) are out of
 //! Kani's reach (#1067): even a fixed one-byte symbolic input did not finish
 //! in 20 minutes. Their totality is covered by the proptest and differential
 //! tests instead.

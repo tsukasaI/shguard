@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn grammar_and_catalog_accessors() {
+    fn grammar_and_catalog_fields() {
         let opt = Opt::new(OptName::Short(short(b'C')), OptValue::Takes(Role::Path));
         assert_eq!(*opt.name(), OptName::Short(short(b'C')));
         assert_eq!(opt.value(), OptValue::Takes(Role::Path));
