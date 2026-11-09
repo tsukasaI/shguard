@@ -5,12 +5,13 @@
 ### Added
 
 - `shguard check --config [<path>]` checks a config file as the hook loads
-  it. Any first catalog path given to `shguard check` that starts with `-`
-  is now a usage error (exit 2), so such a path must be written `./-name`
-  (#1124).
+  it (#1124).
 
 ### Changed
 
+- `shguard check -foo.toml` used to read that file and now exits 2, so write
+  `./-foo.toml`. Any first catalog path given to `shguard check` that starts
+  with `-` is a usage error, so write it `./-name` (#1124).
 - The loader refuses more user rows that 0.11.1 accepted. A head that can
   never get a covering row (an interpreter, shell, wrapper, remote session
   or tool whose options the grammar cannot express, as the README lists)
