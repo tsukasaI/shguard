@@ -363,6 +363,16 @@ fn denylisted_head() {
         "pypy3.10",
         "ipython3",
         "tclsh8.6",
+        "jruby",
+        "truffleruby",
+        "irb",
+        "erb",
+        "wish",
+        "elixir",
+        "iex",
+        "groovy",
+        "julia",
+        "rscript",
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
