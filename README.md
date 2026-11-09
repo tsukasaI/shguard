@@ -226,9 +226,9 @@ is read from the current directory, while `SHGUARD_CONFIG` itself must be
 absolute. Without a path it checks the file the hook would read with the same
 `HOME` and `SHGUARD_CONFIG`, and a missing file there is fine (no config,
 embedded catalog only; a line on stderr says so). For `decision_log` it only
-checks that the value parses and is an absolute path; it does not touch the
-file, so a missing directory, a symlink, a hard link or a FIFO at that path
-passes `check --config` and is refused only when the hook writes the log.
+checks that the value parses and is an absolute path, so a path the hook
+cannot write (see [Decision log](#decision-log)) passes `check --config`
+and fails only when the hook writes the log.
 `shguard check <file.toml>...` checks standalone catalog files; write a path
 that starts with `-` as `./-name`. Both exit 0 when everything loads, 1 when
 something does not, and 2 on a usage error.
