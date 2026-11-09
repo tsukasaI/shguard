@@ -48,6 +48,8 @@ pub fn bash(command: &str) -> Vec<u8> {
         .into_bytes()
 }
 
+/// Does not isolate the child from the developer's environment: the caller
+/// must set or remove both `HOME` and `SHGUARD_CONFIG`.
 pub fn spawn(mut cmd: Command, stdin: &[u8]) -> Output {
     let Ok(mut child) = cmd
         .stdin(Stdio::piped())
