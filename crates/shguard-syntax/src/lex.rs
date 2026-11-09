@@ -16,7 +16,7 @@ const MAX_INPUT_LEN: usize = 64 * 1024;
 
 /// A separator or control operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Op {
+pub(crate) enum Op {
     /// `;`
     Semi,
     /// A newline.
@@ -31,7 +31,7 @@ pub enum Op {
 
 /// Whether a literal came from quotes or an escape.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Quoting {
+pub(crate) enum Quoting {
     /// Plain bytes in the source.
     Unquoted,
     /// From `'..'`, `".."` or a backslash escape.
@@ -40,7 +40,7 @@ pub enum Quoting {
 
 /// One piece of a word.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LexPart {
+pub(crate) enum LexPart {
     /// Literal bytes; empty for `''` and `""`.
     Lit {
         /// The bytes after quote removal.
@@ -56,7 +56,7 @@ pub enum LexPart {
 
 /// A word: a first part and the parts after it, so it is never empty.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LexWord {
+pub(crate) struct LexWord {
     first: LexPart,
     rest: Vec<LexPart>,
 }
@@ -64,25 +64,25 @@ pub struct LexWord {
 impl LexWord {
     /// Builds a word from its first part and the parts after it.
     #[must_use]
-    pub fn new(first: LexPart, rest: Vec<LexPart>) -> LexWord {
+    pub(crate) fn new(first: LexPart, rest: Vec<LexPart>) -> LexWord {
         LexWord { first, rest }
     }
 
     /// The first part.
     #[must_use]
-    pub fn first(&self) -> &LexPart {
+    pub(crate) fn first(&self) -> &LexPart {
         &self.first
     }
 
     /// The parts after the first.
     #[must_use]
-    pub fn rest(&self) -> &[LexPart] {
+    pub(crate) fn rest(&self) -> &[LexPart] {
         &self.rest
     }
 
     /// Splits the word into its first part and the parts after it.
     #[must_use]
-    pub fn into_parts(self) -> (LexPart, Vec<LexPart>) {
+    pub(crate) fn into_parts(self) -> (LexPart, Vec<LexPart>) {
         (self.first, self.rest)
     }
 
@@ -101,7 +101,7 @@ impl LexWord {
 /// A redirect the subset accepts: the same closed set as the kernel's
 /// `Redir`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LexRedir {
+pub(crate) enum LexRedir {
     /// `2>&1`.
     ErrToOut,
     /// `>&2` or `1>&2`.
@@ -114,7 +114,7 @@ pub enum LexRedir {
 
 /// A lexed token. Blanks are not tokens.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Token {
+pub(crate) enum Token {
     /// A word.
     Word(LexWord),
     /// A redirect.
@@ -271,7 +271,7 @@ pub struct Unsupported {
 
 /// A token and the byte offset where it starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Lexeme {
+pub(crate) struct Lexeme {
     /// Byte index in the input where the token starts. For a redirect it is
     /// the start of the whole redirect, descriptor included.
     pub offset: usize,
@@ -289,7 +289,7 @@ pub struct Lexeme {
 ///
 /// Returns [`Unsupported`] for the first byte sequence the subset does not
 /// cover.
-pub fn lex(input: &[u8]) -> Result<Vec<Lexeme>, Unsupported> {
+pub(crate) fn lex(input: &[u8]) -> Result<Vec<Lexeme>, Unsupported> {
     if input.len() > MAX_INPUT_LEN {
         return Err(fail(UnsupportedKind::InputTooLarge, 0));
     }

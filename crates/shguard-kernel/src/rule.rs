@@ -11,7 +11,6 @@ use crate::catalog::OptName;
 use crate::catalog::key_ok;
 #[cfg(creusot)]
 use crate::catalog::key_wf;
-use crate::decision::Decision;
 #[cfg(creusot)]
 use creusot_std::prelude::{Clone, PartialEq, *};
 
@@ -109,22 +108,6 @@ impl Pat {
             Some(Pat { parts, kind })
         }
     }
-
-    /// The pattern parts.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.parts@))]
-    #[must_use]
-    pub fn parts(&self) -> &[Part] {
-        &self.parts
-    }
-
-    /// How the pattern is compared.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.kind))]
-    #[must_use]
-    pub fn kind(&self) -> PatKind {
-        self.kind
-    }
 }
 
 /// What a rule does when it hits.
@@ -135,16 +118,6 @@ pub enum Outcome {
     Ask,
     /// Raise the verdict to Block.
     Block,
-}
-
-/// The decision a rule outcome stands for.
-#[cfg(creusot)]
-#[logic(open)]
-pub fn outcome_decision(o: Outcome) -> Decision {
-    match o {
-        Outcome::Ask => Decision::Ask,
-        Outcome::Block => Decision::Block,
-    }
 }
 
 /// A set of alternative option names: the rule entry holds when the command
@@ -187,14 +160,6 @@ impl OptAlts {
         } else {
             Some(OptAlts { names })
         }
-    }
-
-    /// The alternative names.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.names@))]
-    #[must_use]
-    pub fn names(&self) -> &[OptName] {
-        &self.names
     }
 }
 
@@ -248,66 +213,6 @@ impl Rule {
             None
         }
     }
-
-    /// The rule's id.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.id))]
-    #[must_use]
-    pub fn id(&self) -> RuleId {
-        self.id
-    }
-
-    /// What the rule applies to.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.scope))]
-    #[must_use]
-    pub fn scope(&self) -> Scope {
-        self.scope
-    }
-
-    /// The command key the rule matches.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.key@))]
-    #[must_use]
-    pub fn key(&self) -> &[Vec<u8>] {
-        &self.key
-    }
-
-    /// The option entries that must all hold; each holds when any one of its
-    /// alternative names is present.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.opts@))]
-    #[must_use]
-    pub fn opts(&self) -> &[OptAlts] {
-        &self.opts
-    }
-
-    /// The target patterns; empty means any.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.targets@))]
-    #[must_use]
-    pub fn targets(&self) -> &[Pat] {
-        &self.targets
-    }
-
-    /// The rule's outcome.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.outcome))]
-    #[must_use]
-    pub fn outcome(&self) -> Outcome {
-        self.outcome
-    }
-
-    /// The decision this rule raises the verdict to when it hits.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == outcome_decision(self.outcome)))]
-    #[must_use]
-    pub fn decision(&self) -> Decision {
-        match self.outcome {
-            Outcome::Ask => Decision::Ask,
-            Outcome::Block => Decision::Block,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -315,7 +220,6 @@ mod tests {
     use super::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
     use crate::ast::{Opaque, Part};
     use crate::catalog::{OptName, ShortName};
-    use crate::decision::Decision;
 
     fn short(b: u8) -> ShortName {
         ShortName::new(b).expect("printable, not '-'")
@@ -337,7 +241,7 @@ mod tests {
     fn opt_alts_constructor() {
         let a = alts();
         assert_eq!(
-            a.names(),
+            a.names,
             [OptName::Short(short(b'r')), OptName::Short(short(b'R'))]
         );
         assert!(OptAlts::new(Vec::new()).is_none());
@@ -358,31 +262,23 @@ mod tests {
     fn pat_constructor() {
         let parts = vec![Part::Opaque(Opaque::Tilde), Part::Lit(bytes("/.bashrc"))];
         let pat = Pat::new(parts.clone(), PatKind::Exact).expect("non-empty");
-        assert_eq!(pat.parts(), parts);
-        assert_eq!(pat.kind(), PatKind::Exact);
+        assert_eq!(pat.parts, parts);
+        assert_eq!(pat.kind, PatKind::Exact);
         assert!(Pat::new(Vec::new(), PatKind::Prefix).is_none());
     }
 
     #[test]
     fn rule_constructor() {
         let r = rule(vec![bytes("rm")], Outcome::Block).expect("valid key");
-        assert_eq!(r.id(), RuleId(7));
-        assert_eq!(r.scope(), Scope::Simple);
-        assert_eq!(r.key(), [bytes("rm")]);
-        assert_eq!(r.opts(), [alts()]);
-        assert!(r.targets().is_empty());
-        assert_eq!(r.outcome(), Outcome::Block);
+        assert_eq!(r.id, RuleId(7));
+        assert_eq!(r.scope, Scope::Simple);
+        assert_eq!(r.key, [bytes("rm")]);
+        assert_eq!(r.opts, [alts()]);
+        assert!(r.targets.is_empty());
+        assert_eq!(r.outcome, Outcome::Block);
 
         assert!(rule(Vec::new(), Outcome::Ask).is_none());
         assert!(rule(vec![Vec::new()], Outcome::Ask).is_none());
         assert!(rule(vec![bytes("git"), Vec::new()], Outcome::Ask).is_none());
-    }
-
-    #[test]
-    fn rule_decision() {
-        let ask = rule(vec![bytes("rm")], Outcome::Ask).expect("valid key");
-        let block = rule(vec![bytes("rm")], Outcome::Block).expect("valid key");
-        assert_eq!(ask.decision(), Decision::Ask);
-        assert_eq!(block.decision(), Decision::Block);
     }
 }

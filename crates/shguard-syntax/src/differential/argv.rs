@@ -25,7 +25,8 @@
 //! `"$X"` stays one word and is not expanded again.
 
 use super::{Case, bash_program, corpus, is_name, require_bash5, run_command};
-use crate::{Token, lex, parse};
+use crate::lex::{Token, lex};
+use crate::parse;
 use shguard_kernel::ast::{Opaque, Part, Script, Simple, Word};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;

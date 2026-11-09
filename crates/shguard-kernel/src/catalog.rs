@@ -294,8 +294,7 @@ impl Grammar {
     /// - `plus`: how a `+word` is read where options are still read, and
     ///   after the first operand with [`Order::Strict`].
     ///
-    /// The two choices are stored as booleans; the accessors return the enums
-    /// again.
+    /// The two choices are stored as booleans.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(result.opts@ == opts@ && result.positionals@ == positionals@
         && result.rest == rest && result.permute == (order == Order::Permute)
@@ -333,60 +332,6 @@ impl Grammar {
     #[must_use]
     pub fn opts(&self) -> &[Opt] {
         &self.opts
-    }
-
-    /// The roles of the leading operands.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.positionals@))]
-    #[must_use]
-    pub fn positionals(&self) -> &[Role] {
-        &self.positionals
-    }
-
-    /// The role of the operands after the leading ones, if any are allowed.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.rest))]
-    #[must_use]
-    pub fn rest(&self) -> Option<Role> {
-        self.rest
-    }
-
-    /// Whether options may follow operands: [`Order::Permute`] when they may.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(match result {
-        Order::Permute => self.permute,
-        Order::Strict => !self.permute,
-    }))]
-    #[must_use]
-    pub fn permute(&self) -> Order {
-        if self.permute {
-            Order::Permute
-        } else {
-            Order::Strict
-        }
-    }
-
-    /// Whether `--` ends option parsing: [`DashDash::Ends`] when it does.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(match result {
-        DashDash::Ends => self.dashdash,
-        DashDash::Literal => !self.dashdash,
-    }))]
-    #[must_use]
-    pub fn dashdash(&self) -> DashDash {
-        if self.dashdash {
-            DashDash::Ends
-        } else {
-            DashDash::Literal
-        }
-    }
-
-    /// How a `+word` in option position is read.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result == self.plus))]
-    #[must_use]
-    pub fn plus_words(&self) -> PlusWords {
-        self.plus
     }
 }
 
@@ -475,14 +420,6 @@ impl Row {
         }
     }
 
-    /// The key segments.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.key@))]
-    #[must_use]
-    pub fn key(&self) -> &[Vec<u8>] {
-        &self.key
-    }
-
     /// The grammar of the command's own argv.
     #[cfg_attr(creusot, check(terminates))]
     #[cfg_attr(creusot, ensures(*result == self.grammar))]
@@ -566,22 +503,6 @@ impl Global {
             Some(Global { head, grammar })
         }
     }
-
-    /// The command name this grammar belongs to.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.head@))]
-    #[must_use]
-    pub fn head(&self) -> &[u8] {
-        &self.head
-    }
-
-    /// The grammar of the words between key segments.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(*result == self.grammar))]
-    #[must_use]
-    pub fn grammar(&self) -> &Grammar {
-        &self.grammar
-    }
 }
 
 /// The rows and global grammars.
@@ -600,22 +521,6 @@ impl Catalog {
     #[must_use]
     pub fn new(rows: Vec<Row>, globals: Vec<Global>) -> Catalog {
         Catalog { rows, globals }
-    }
-
-    /// The rows.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.rows@))]
-    #[must_use]
-    pub fn rows(&self) -> &[Row] {
-        &self.rows
-    }
-
-    /// The global grammars.
-    #[cfg_attr(creusot, check(terminates))]
-    #[cfg_attr(creusot, ensures(result@ == self.globals@))]
-    #[must_use]
-    pub fn globals(&self) -> &[Global] {
-        &self.globals
     }
 }
 
@@ -692,7 +597,7 @@ mod tests {
             Cwd::Changes,
         )
         .expect("valid key");
-        assert_eq!(row.key(), [bytes("git"), bytes("status")]);
+        assert_eq!(row.key, [bytes("git"), bytes("status")]);
         assert_eq!(*row.grammar(), grammar());
         assert_eq!(row.runs_code(), RunsCode::No);
         assert_eq!(row.cwd(), Cwd::Changes);
@@ -721,8 +626,8 @@ mod tests {
     #[test]
     fn global_constructor() {
         let global = Global::new(bytes("git"), grammar()).expect("valid head");
-        assert_eq!(global.head(), b"git");
-        assert_eq!(*global.grammar(), grammar());
+        assert_eq!(global.head, b"git");
+        assert_eq!(global.grammar, grammar());
         assert!(Global::new(Vec::new(), grammar()).is_none());
     }
 
@@ -741,11 +646,11 @@ mod tests {
             PlusWords::Operand,
         );
         assert_eq!(g.opts(), [opt]);
-        assert_eq!(g.positionals(), [Role::Inert]);
-        assert_eq!(g.rest(), Some(Role::Path));
-        assert_eq!(g.permute(), Order::Permute);
-        assert_eq!(g.dashdash(), DashDash::Literal);
-        assert_eq!(g.plus_words(), PlusWords::Operand);
+        assert_eq!(g.positionals, [Role::Inert]);
+        assert_eq!(g.rest, Some(Role::Path));
+        assert!(g.permute);
+        assert!(!g.dashdash);
+        assert_eq!(g.plus, PlusWords::Operand);
 
         let strict = Grammar::new(
             Vec::new(),
@@ -755,13 +660,13 @@ mod tests {
             DashDash::Ends,
             PlusWords::Reject,
         );
-        assert_eq!(strict.permute(), Order::Strict);
-        assert_eq!(strict.dashdash(), DashDash::Ends);
+        assert!(!strict.permute);
+        assert!(strict.dashdash);
 
         let row = Row::new(vec![bytes("ls")], g, RunsCode::No, Cwd::Keeps).expect("valid key");
         let global = Global::new(bytes("git"), grammar()).expect("valid head");
         let cat = Catalog::new(vec![row.clone()], vec![global.clone()]);
-        assert_eq!(cat.rows(), [row]);
-        assert_eq!(cat.globals(), [global]);
+        assert_eq!(cat.rows, [row]);
+        assert_eq!(cat.globals, [global]);
     }
 }
