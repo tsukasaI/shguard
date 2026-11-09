@@ -11,6 +11,7 @@ use crate::catalog::OptName;
 use crate::catalog::key_ok;
 #[cfg(creusot)]
 use crate::catalog::key_wf;
+use crate::decision::Decision;
 #[cfg(creusot)]
 use creusot_std::prelude::{Clone, PartialEq, *};
 
@@ -120,6 +121,16 @@ pub enum Outcome {
     Block,
 }
 
+/// The decision a rule outcome stands for.
+#[cfg(creusot)]
+#[logic(open)]
+pub fn outcome_decision(o: Outcome) -> Decision {
+    match o {
+        Outcome::Ask => Decision::Ask,
+        Outcome::Block => Decision::Block,
+    }
+}
+
 /// A set of alternative option names: the rule entry holds when the command
 /// uses any one of them (`-r`, `-R` or `--recursive`).
 ///
@@ -213,6 +224,17 @@ impl Rule {
             None
         }
     }
+
+    /// The decision this rule raises the verdict to when it hits.
+    #[cfg_attr(creusot, check(terminates))]
+    #[cfg_attr(creusot, ensures(result == outcome_decision(self.outcome)))]
+    #[must_use]
+    pub fn decision(&self) -> Decision {
+        match self.outcome {
+            Outcome::Ask => Decision::Ask,
+            Outcome::Block => Decision::Block,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -220,6 +242,7 @@ mod tests {
     use super::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
     use crate::ast::{Opaque, Part};
     use crate::catalog::{OptName, ShortName};
+    use crate::decision::Decision;
 
     fn short(b: u8) -> ShortName {
         ShortName::new(b).expect("printable, not '-'")
@@ -280,5 +303,13 @@ mod tests {
         assert!(rule(Vec::new(), Outcome::Ask).is_none());
         assert!(rule(vec![Vec::new()], Outcome::Ask).is_none());
         assert!(rule(vec![bytes("git"), Vec::new()], Outcome::Ask).is_none());
+    }
+
+    #[test]
+    fn rule_decision() {
+        let ask = rule(vec![bytes("rm")], Outcome::Ask).expect("valid key");
+        let block = rule(vec![bytes("rm")], Outcome::Block).expect("valid key");
+        assert_eq!(ask.decision(), Decision::Ask);
+        assert_eq!(block.decision(), Decision::Block);
     }
 }
