@@ -272,6 +272,9 @@ fn denylisted_head() {
         "python-3.10",
         "ruby-3.1",
         "luajit-2.1.0-beta3",
+        "pwsh-7.4",
+        "python-3",
+        "Python-3.10",
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
