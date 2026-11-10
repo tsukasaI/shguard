@@ -140,6 +140,11 @@
 {"command":"unshare -R /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"nsenter -r/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"nsenter --wd=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
-{"command":"cargo clippy --color --fix always","status":"open","source":"cargo clippy --fix"}
-{"command":"cargo clippy -p --fix x","status":"open","source":"cargo clippy --fix"}
-{"command":"cargo clippy --features --fix x","status":"open","source":"cargo clippy --fix"}
+{"command":"cargo clippy --color --fix always","status":"open","source":"#1225"}
+{"command":"cargo clippy -p --fix x","status":"open","source":"#1225"}
+{"command":"cargo clippy --features --fix x","status":"open","source":"#1225"}
+{"command":"cargo check -p --config=term.quiet=true -p x","status":"open","source":"#1225"}
+{"command":"cargo build --bin --config=build.jobs=1 --bin y","status":"open","source":"#1225"}
+{"command":"cargo test -p --config=x -p y","status":"open","source":"#1225"}
+{"command":"cargo doc -p -Zx -p y","status":"open","source":"#1225"}
+{"command":"cargo clippy -p --config=x -p y","status":"open","source":"#1225"}
