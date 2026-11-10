@@ -9,9 +9,12 @@
 
 ### Changed
 
-- `cargo build|check|test|clippy|doc`: option values are read as paths, so a
-  cargo option hidden after `-p`/`--bin`/... (`-p --config=x -p y`) is asked,
-  and a `--fix` anywhere in a `cargo clippy` command is asked (#1225).
+- `cargo build|check|test|clippy|doc`: option values now go through the path
+  checks (a variable, `..` or non-ASCII value is asked). Any `-` value is
+  asked on build, check and doc; on test and clippy a word after
+  `-p`/`--bin`/`--example`/`--test`/`--bench` is read as cargo does, so a
+  hidden option (`-p --config=x -p y`, `-p -m/x/Cargo.toml`) is not allowed.
+  A `--fix` anywhere in a `cargo clippy` command is asked (#1225).
 - `shguard check` exits 2 (usage error) when its first catalog path starts
   with `-`, so write such a path `./-name`: `shguard check -foo.toml`, which
   0.11.1 read as a file, must now be `shguard check ./-foo.toml` (#1124).

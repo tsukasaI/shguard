@@ -148,3 +148,8 @@
 {"command":"cargo test -p --config=x -p y","status":"open","source":"#1225"}
 {"command":"cargo doc -p -Zx -p y","status":"open","source":"#1225"}
 {"command":"cargo clippy -p --config=x -p y","status":"open","source":"#1225"}
+{"command":"cargo test -p -m/x/Cargo.toml -p y","status":"open","source":"#1225"}
+{"command":"cargo test -p -qm/x/Cargo.toml -p y","status":"open","source":"#1225"}
+{"command":"cargo clippy -p -m=/x/Cargo.toml -p y","status":"open","source":"#1225"}
+{"command":"cargo clippy -p -rZx -p y","status":"open","source":"#1225"}
+{"command":"cargo test --bin -m/x/Cargo.toml --bin y","status":"open","source":"#1225"}

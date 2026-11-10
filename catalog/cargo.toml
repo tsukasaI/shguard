@@ -17,13 +17,12 @@
 # `clippy`. All of that is the repo's own config, P3.
 #
 # `-p/--package`, `--bin`, `--example`, `--test` and `--bench` take an
-# optional value in clap. The rows give them `takes` so `-p shguard` is read
-# (`optional` would make it an operand, and so Unknown). cargo still reads a
-# hyphen-leading next word as its own option, even when the option is
-# repeated with a real value (`-p --config=x -p y`), while the kernel reads
-# that word as the value. So these values are `path`, not `inert`, and the
-# rules ask for a hidden option: any `-` word on build, check and doc, and
-# the cargo flags that load config or redirect output on test and clippy.
+# optional value in clap, and cargo reads a hyphen-leading next word as its
+# own option (`-p --config=x -p y`). On build, check and doc these options
+# take the next word (`optional` would make `-p shguard` an operand, and
+# those rows have none), so their values are `path` and any `-` value is
+# asked. On test and clippy they are `optional`: the name after them is a
+# path operand and a hyphen-leading word is read as an option, like clap.
 #
 # `--` ends cargo's options (`dashdash = "ends"`); what follows goes to the
 # child program, so a `--config` after `--` is not cargo's. test, clippy and
@@ -133,18 +132,18 @@ order = "permute"
 dashdash = "ends"
 rest = "path"
 opt = [
-  { short = "p", long = "package", value = { takes = "path" } },
+  { short = "p", long = "package", value = { optional = "path" } },
   { long = "workspace" },
   { long = "exclude", value = { takes = "path" } },
   { long = "lib" },
   { long = "bins" },
-  { long = "bin", value = { takes = "path" } },
+  { long = "bin", value = { optional = "path" } },
   { long = "examples" },
-  { long = "example", value = { takes = "path" } },
+  { long = "example", value = { optional = "path" } },
   { long = "tests" },
-  { long = "test", value = { takes = "path" } },
+  { long = "test", value = { optional = "path" } },
   { long = "benches" },
-  { long = "bench", value = { takes = "path" } },
+  { long = "bench", value = { optional = "path" } },
   { long = "all-targets" },
   { short = "F", long = "features", value = { takes = "path" } },
   { long = "all-features" },
@@ -180,18 +179,18 @@ order = "permute"
 dashdash = "ends"
 rest = "path"
 opt = [
-  { short = "p", long = "package", value = { takes = "path" } },
+  { short = "p", long = "package", value = { optional = "path" } },
   { long = "workspace" },
   { long = "exclude", value = { takes = "path" } },
   { long = "lib" },
   { long = "bins" },
-  { long = "bin", value = { takes = "path" } },
+  { long = "bin", value = { optional = "path" } },
   { long = "examples" },
-  { long = "example", value = { takes = "path" } },
+  { long = "example", value = { optional = "path" } },
   { long = "tests" },
-  { long = "test", value = { takes = "path" } },
+  { long = "test", value = { optional = "path" } },
   { long = "benches" },
-  { long = "bench", value = { takes = "path" } },
+  { long = "bench", value = { optional = "path" } },
   { long = "all-targets" },
   { short = "F", long = "features", value = { takes = "path" } },
   { long = "all-features" },
@@ -298,21 +297,12 @@ targets = [
 id = "cargo-test-ask-nonlocal-target"
 key = ["cargo", "test"]
 outcome = "ask"
-reason = "absolute, `~` and `^` paths, --logfile (it writes a file), and cargo flags that load config or redirect output (--config, -Z, --target, --manifest-path, ...), are asked: the hook cannot tell the project directory from the rest of the disk; use a relative path and drop the flag"
+reason = "absolute, `~` and `^` paths, and --logfile (it writes a file), are asked: the hook cannot tell the project directory from the rest of the disk; use a relative path and drop the flag"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
   { pat = "--logfile", kind = "prefix" },
-  # A cargo flag hidden as the value of -p/--bin/...; see the header.
-  { pat = "--config", kind = "prefix" },
-  { pat = "-Z", kind = "prefix" },
-  { pat = "--target", kind = "prefix" },
-  { pat = "--artifact-dir", kind = "prefix" },
-  { pat = "--lockfile-path", kind = "prefix" },
-  { pat = "--timings", kind = "prefix" },
-  { pat = "-C", kind = "prefix" },
-  { pat = "--manifest-path", kind = "prefix" },
 ]
 
 [[rule]]
@@ -331,7 +321,7 @@ targets = [
 id = "cargo-clippy-ask-nonlocal-target"
 key = ["cargo", "clippy"]
 outcome = "ask"
-reason = "absolute, `~` and `^` paths, --fix, cargo flags that load config or redirect output (--config, --manifest-path, ...), and rustc flags that load code, change the toolchain or write files (-Z, -C, -L, -o, --emit, --print, --extern), are asked; use a relative path and drop the flag"
+reason = "absolute, `~` and `^` paths, --fix, and rustc flags that load code, change the toolchain or write files (-Z, -C, -L, -o, --emit, --print, --extern), are asked; use a relative path and drop the flag"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -351,13 +341,6 @@ targets = [
   { pat = "--pretty", kind = "prefix" },
   { pat = "@", kind = "prefix" },
   { pat = "--fix", kind = "prefix" },
-  # A cargo flag hidden as the value of -p/--bin/...; see the header.
-  { pat = "--config", kind = "prefix" },
-  { pat = "--target-dir", kind = "prefix" },
-  { pat = "--artifact-dir", kind = "prefix" },
-  { pat = "--lockfile-path", kind = "prefix" },
-  { pat = "--timings", kind = "prefix" },
-  { pat = "--manifest-path", kind = "prefix" },
   # rustc reads short-option clusters (getopts): after a flag that takes no
   # value, the rest of the word is the next option, so `-go/tmp/x` is
   # `-g -o /tmp/x`. Ask every word that starts with such a flag (the ASCII
