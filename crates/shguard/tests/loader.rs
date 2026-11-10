@@ -373,6 +373,7 @@ fn denylisted_head() {
         "groovy",
         "julia",
         "rscript",
+        "Rscript",
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
