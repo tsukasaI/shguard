@@ -106,6 +106,17 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"genv",
     b"gnohup",
     b"gnice",
+    // Runtimes, REPLs and template or script engines that run their argument.
+    b"jruby",
+    b"truffleruby",
+    b"irb",
+    b"erb",
+    b"wish",
+    b"elixir",
+    b"iex",
+    b"groovy",
+    b"julia",
+    b"rscript",
 ];
 
 /// Interpreters whose binaries carry a version suffix (`ruby3.1`, `python-3.10`).
