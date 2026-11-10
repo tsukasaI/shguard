@@ -893,9 +893,10 @@ long = "version"
 # tree lists directories. Left out: -L, -P and -I (tree takes the value of -P
 # and -I, and of -L unless digits follow it, from the next word and keeps
 # reading the cluster as options, while the kernel reads the rest of the
-# cluster as the value, so a cluster could hide -o), -o (writes the listing to a file), --fromfile and --fromtabfile (read
-# paths from a file), --gitfile and --infofile (read a named file), -H/-X and
-# the HTML options, -T, -R, --hyperlink, --opt-toggle.
+# cluster as the value, so a cluster could hide -o), -o (writes the listing to
+# a file), --fromfile and --fromtabfile (read paths from a file), --gitfile and
+# --infofile (read a named file), -H/-X and the HTML options, -T, -R,
+# --hyperlink, --opt-toggle.
 [[row]]
 key = ["tree"]
 source = "https://oldmanprogrammer.net/source.php?dir=projects/tree https://github.com/Old-Man-Programmer/tree/blob/master/tree.c"
