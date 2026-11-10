@@ -23,6 +23,11 @@
 # those rows have none), so their values are `path` and any `-` value is
 # asked. On test and clippy they are `optional`: the name after them is a
 # path operand and a hyphen-leading word is read as an option, like clap.
+# The remaining `takes` values on test and clippy (`--exclude`, `-F`,
+# `--profile`, `--manifest-path`, `--message-format`, `--color`, `-j`) are
+# safe only because cargo requires a value for them (it errors on a
+# hyphen-leading word, and `-j` consumes it); an option cargo makes optional
+# must move to `optional`.
 #
 # `--` ends cargo's options (`dashdash = "ends"`); what follows goes to the
 # child program, so a `--config` after `--` is not cargo's. test, clippy and

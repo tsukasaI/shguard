@@ -275,6 +275,8 @@ fn every_cargo_row_has_a_non_allowed_command() {
         "cargo clippy -p -m=/x/Cargo.toml -p y",
         "cargo clippy -p -rZx -p y",
         "cargo test --bin -m/x/Cargo.toml --bin y",
+        "cargo test -p -rZx -p y",
+        "cargo clippy --bin -m/x/Cargo.toml --bin y",
         "cargo clippy --config x",
         "cargo clippy -- -Z unstable-options",
         "cargo clippy -- -C linker=/bin/sh",
