@@ -140,6 +140,7 @@
 {"command":"unshare -R /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"nsenter -r/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"nsenter --wd=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
-{"command":"tree -dLo 1 out.txt","status":"open","source":"tree short cluster"}
-{"command":"tree -Io x out.txt","status":"open","source":"tree short cluster"}
-{"command":"tree -L2o out.txt","status":"open","source":"tree short cluster"}
+{"command":"tree -dLo 1 out.txt","status":"open","source":"#1224"}
+{"command":"tree -Io x out.txt","status":"open","source":"#1224"}
+{"command":"tree -Po x out.txt","status":"open","source":"#1224"}
+{"command":"tree -L2o out.txt","status":"open","source":"#1224"}

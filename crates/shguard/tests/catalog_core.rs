@@ -145,6 +145,7 @@ fn every_row_has_a_non_allowed_command() {
         "tree -o out.txt",
         "tree -dLo 1 out.txt",
         "tree -Io x out.txt",
+        "tree -Po x out.txt",
         "tree -L2o out.txt",
         "tree -L 2",
         "tree --fromfile list.txt",
@@ -152,6 +153,7 @@ fn every_row_has_a_non_allowed_command() {
         "tree --gitfile=x",
         "tree /",
         "tree -L 2 /Users/me",
+        "tree -d /Users/me",
         "eza -R /",
         "eza -T /home/me",
     ]);
