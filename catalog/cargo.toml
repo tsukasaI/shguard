@@ -18,8 +18,9 @@
 #
 # `-p/--package`, `--bin`, `--example`, `--test` and `--bench` take an
 # optional value in clap, but the rows give them `takes`, so the kernel
-# reads the next word as their value even when it starts with `-`. That
-# hides the word from the rules; cargo itself stops with a list of targets
+# reads the next word as their value even when it starts with `-`. An
+# `inert` value is hidden from the rules (the clippy row uses `path`
+# instead, so they see it); cargo itself stops with a list of targets
 # before building when such a value is missing. `optional` would make the
 # common spaced form (`-p shguard`) an operand, and so Unknown.
 #
@@ -165,7 +166,10 @@ opt = [
 ]
 
 # `--fix` is left out (it edits source). The words after `--` go to
-# clippy-driver / rustc, e.g. `-D warnings`.
+# clippy-driver / rustc, e.g. `-D warnings`. Option values are `path`, not
+# `inert`, so the rules see them: cargo-clippy does not parse options, it
+# runs `cargo fix` when a literal `--fix` appears anywhere before `--`, even
+# where this row reads an option value (`--color --fix always`).
 [[row]]
 key = ["cargo", "clippy"]
 source = "https://doc.rust-lang.org/cargo/commands/cargo-clippy.html https://doc.rust-lang.org/clippy/usage.html"
@@ -174,28 +178,28 @@ order = "permute"
 dashdash = "ends"
 rest = "path"
 opt = [
-  { short = "p", long = "package", value = { takes = "inert" } },
+  { short = "p", long = "package", value = { takes = "path" } },
   { long = "workspace" },
-  { long = "exclude", value = { takes = "inert" } },
+  { long = "exclude", value = { takes = "path" } },
   { long = "lib" },
   { long = "bins" },
-  { long = "bin", value = { takes = "inert" } },
+  { long = "bin", value = { takes = "path" } },
   { long = "examples" },
-  { long = "example", value = { takes = "inert" } },
+  { long = "example", value = { takes = "path" } },
   { long = "tests" },
-  { long = "test", value = { takes = "inert" } },
+  { long = "test", value = { takes = "path" } },
   { long = "benches" },
-  { long = "bench", value = { takes = "inert" } },
+  { long = "bench", value = { takes = "path" } },
   { long = "all-targets" },
-  { short = "F", long = "features", value = { takes = "inert" } },
+  { short = "F", long = "features", value = { takes = "path" } },
   { long = "all-features" },
   { long = "no-default-features" },
   { short = "r", long = "release" },
-  { long = "profile", value = { takes = "inert" } },
+  { long = "profile", value = { takes = "path" } },
   { long = "manifest-path", value = { takes = "path" } },
-  { long = "message-format", value = { takes = "inert" } },
-  { long = "color", value = { takes = "inert" } },
-  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "message-format", value = { takes = "path" } },
+  { long = "color", value = { takes = "path" } },
+  { short = "j", long = "jobs", value = { takes = "path" } },
   { long = "locked" },
   { long = "offline" },
   { long = "frozen" },
@@ -313,7 +317,7 @@ targets = [
 id = "cargo-clippy-ask-nonlocal-target"
 key = ["cargo", "clippy"]
 outcome = "ask"
-reason = "absolute, `~` and `^` paths, and rustc flags that load code, change the toolchain or write files (-Z, -C, -L, -o, --emit, --print, --extern), are asked; use a relative path and drop the flag"
+reason = "absolute, `~` and `^` paths, --fix, and rustc flags that load code, change the toolchain or write files (-Z, -C, -L, -o, --emit, --print, --extern), are asked; use a relative path and drop the flag"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -332,6 +336,9 @@ targets = [
   { pat = "--remap-path-prefix", kind = "prefix" },
   { pat = "--pretty", kind = "prefix" },
   { pat = "@", kind = "prefix" },
+  # cargo-clippy finds `--fix` anywhere before `--` (it parses no options) and
+  # runs `cargo fix`, including where the row reads an option value.
+  { pat = "--fix", kind = "prefix" },
   # rustc reads short-option clusters (getopts): after a flag that takes no
   # value, the rest of the word is the next option, so `-go/tmp/x` is
   # `-g -o /tmp/x`. Ask every word that starts with such a flag (the ASCII

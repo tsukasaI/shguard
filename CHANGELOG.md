@@ -9,6 +9,9 @@
 
 ### Changed
 
+- `cargo clippy`: option values are read as paths, and a `--fix` anywhere
+  before `--` is asked, including where it would be read as an option value
+  (`cargo clippy --color --fix always`).
 - `shguard check` exits 2 (usage error) when its first catalog path starts
   with `-`, so write such a path `./-name`: `shguard check -foo.toml`, which
   0.11.1 read as a file, must now be `shguard check ./-foo.toml` (#1124).

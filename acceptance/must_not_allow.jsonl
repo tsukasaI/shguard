@@ -140,3 +140,6 @@
 {"command":"unshare -R /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"nsenter -r/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"nsenter --wd=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"cargo clippy --color --fix always","status":"open","source":"cargo clippy --fix"}
+{"command":"cargo clippy -p --fix x","status":"open","source":"cargo clippy --fix"}
+{"command":"cargo clippy --features --fix x","status":"open","source":"cargo clippy --fix"}
