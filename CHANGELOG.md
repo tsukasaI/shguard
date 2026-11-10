@@ -47,7 +47,7 @@
   that differ only in case, is a load error. Such a config loaded on 0.11.1
   and now fails to load, so the hook denies every Bash call until the row is
   fixed (#1168).
-- The version suffix of an interpreter head may also follow a hyphen
+- The version suffix of an interpreter head may also start with a hyphen
   and a digit (`python-3.10`, `ruby-3.1`, `luajit-2.1.0-beta3`), and
   `luajit` and `pwsh` followed by a digit are versioned spellings too
   (#1178). So are `pypy`, `ipython` and `tclsh` followed by a digit
