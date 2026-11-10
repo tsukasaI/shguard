@@ -15,6 +15,7 @@
   `-p`/`--bin`/`--example`/`--test`/`--bench` is read as cargo does, so a
   hidden option (`-p --config=x -p y`, `-p -m/x/Cargo.toml`) is not allowed.
   A `--fix` anywhere in a `cargo clippy` command is asked (#1225).
+- tree: `-L`, `-P` and `-I` are no longer listed, so they are asked (#1224).
 - `shguard check` exits 2 (usage error) when its first catalog path starts
   with `-`, so write such a path `./-name`: `shguard check -foo.toml`, which
   0.11.1 read as a file, must now be `shguard check ./-foo.toml` (#1124).

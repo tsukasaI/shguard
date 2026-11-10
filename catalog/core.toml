@@ -890,12 +890,11 @@ long = "help"
 short = "v"
 long = "version"
 
-# tree lists directories. A short option's value is the next word after the
-# cluster (`-L 2`, and `-La 2` is `-L 2 -a`), never the rest of the cluster,
-# so the row can read a cluster differently from tree (`a` as the value of
-# `-L`, then `2` as a path); either way tree only lists names, and a path
-# operand gets the stricter checks. Left out: -o (writes the listing to a
-# file), --fromfile and --fromtabfile (read paths from a file), --gitfile and
+# tree lists directories. Left out: -L, -P and -I (tree takes the value of -P
+# and -I, and of -L unless digits follow it, from the next word and keeps
+# reading the cluster as options, while the kernel reads the rest of the
+# cluster as the value, so a cluster could hide -o), -o (writes the listing to
+# a file), --fromfile and --fromtabfile (read paths from a file), --gitfile and
 # --infofile (read a named file), -H/-X and the HTML options, -T, -R,
 # --hyperlink, --opt-toggle.
 [[row]]
@@ -914,15 +913,6 @@ short = "l"
 short = "f"
 [[row.opt]]
 short = "x"
-[[row.opt]]
-short = "L"
-value = { takes = "inert" }
-[[row.opt]]
-short = "P"
-value = { takes = "inert" }
-[[row.opt]]
-short = "I"
-value = { takes = "inert" }
 [[row.opt]]
 short = "s"
 [[row.opt]]

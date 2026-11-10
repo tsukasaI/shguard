@@ -153,3 +153,7 @@
 {"command":"cargo clippy -p -m=/x/Cargo.toml -p y","status":"open","source":"#1225"}
 {"command":"cargo clippy -p -rZx -p y","status":"open","source":"#1225"}
 {"command":"cargo test --bin -m/x/Cargo.toml --bin y","status":"open","source":"#1225"}
+{"command":"tree -dLo 1 out.txt","status":"open","source":"#1224"}
+{"command":"tree -Io x out.txt","status":"open","source":"#1224"}
+{"command":"tree -Po x out.txt","status":"open","source":"#1224"}
+{"command":"tree -L2o out.txt","status":"open","source":"#1224"}
