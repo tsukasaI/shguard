@@ -22,6 +22,43 @@
   `{ optional = "code" }` is also refused; it must be `{ takes = "code" }`,
   since only that makes the option run its value. Such a config fails to
   load, so the hook denies every Bash call until the row is fixed (#1125).
+- A head that has code-running options (`fd` with `-x`, `split` with
+  `--filter`) is now recognised under any ASCII case. A row headed `SPLIT`
+  that lists `--filter` as a plain flag loaded on 0.11.1 and now fails to
+  load with the same error as one headed `split`, so the hook denies every
+  Bash call until the row is fixed (#1138).
+- `pythonw` (the framework GUI build of `python`), and `pythonw` followed by
+  a digit (`pythonw3.12`), are now treated like `python3`: the row must set
+  `runs_code`. A config with such a row and no `runs_code` loaded on 0.11.1
+  and now fails to load, so the hook denies every Bash call until the row is
+  fixed (#1139).
+- `perl`, `ruby`, `php` and `lua` followed by a digit (`ruby3.1`,
+  `perl5.30`) are now treated like the bare name, and `pypy`, `pypy3`,
+  `ipython`, `luajit`, `tclsh`, `expect` and `pwsh` are new interpreter
+  heads: the row must set `runs_code`. A config with such a row and no
+  `runs_code` loaded on 0.11.1 and now fails to load, so the hook denies
+  every Bash call until the row is fixed (#1140).
+- A row head with a non-ASCII byte (`baſh`) is now a load error, even when
+  the row sets `runs_code`. A config that loaded on 0.11.1 with one now
+  fails to load, so the hook denies every Bash call until the row is fixed
+  (#1141).
+- Row keys that differ only in ASCII case now count as duplicates, so a
+  user row keyed `FD` or `Fd` next to the embedded `fd` row, or two user rows
+  that differ only in case, is a load error. Such a config loaded on 0.11.1
+  and now fails to load, so the hook denies every Bash call until the row is
+  fixed (#1168).
+- The version suffix of an interpreter head may also start with a hyphen
+  and a digit (`python-3.10`, `ruby-3.1`, `luajit-2.1.0-beta3`), and
+  `luajit` and `pwsh` followed by a digit are versioned spellings too
+  (#1178). So are `pypy`, `ipython` and `tclsh` followed by a digit
+  (`pypy3.10`, `ipython3`, `tclsh8.6`) (#1177). A row with such a head and
+  no `runs_code` loaded on 0.11.1 and now fails to load, so the hook denies
+  every Bash call until the row is fixed.
+- The heads `jruby`, `truffleruby`, `irb`, `erb`, `wish`, `elixir`, `iex`,
+  `groovy`, `julia` and `Rscript` are now treated like `ruby` and `python3`:
+  the row must set `runs_code`. A config with such a row and no `runs_code`
+  loaded on 0.11.1 and now fails to load, so the hook denies every Bash call
+  until the row is fixed (#1179).
 
 ## 0.11.1 - 2026-11-02
 
