@@ -140,6 +140,21 @@
 {"command":"unshare -R /x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"nsenter -r/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
 {"command":"nsenter --wd=/x upload-tool null","status":"open","source":"#810","config":"resolve_symlinks.toml","cwd":"/dev"}
+{"command":"cargo clippy --color --fix always","status":"open","source":"#1225"}
+{"command":"cargo clippy -p --fix x","status":"open","source":"#1225"}
+{"command":"cargo clippy --features --fix x","status":"open","source":"#1225"}
+{"command":"cargo check -p --config=term.quiet=true -p x","status":"open","source":"#1225"}
+{"command":"cargo build --bin --config=build.jobs=1 --bin y","status":"open","source":"#1225"}
+{"command":"cargo test -p --config=x -p y","status":"open","source":"#1225"}
+{"command":"cargo doc -p -Zx -p y","status":"open","source":"#1225"}
+{"command":"cargo clippy -p --config=x -p y","status":"open","source":"#1225"}
+{"command":"cargo test -p -m/x/Cargo.toml -p y","status":"open","source":"#1225"}
+{"command":"cargo test -p -qm/x/Cargo.toml -p y","status":"open","source":"#1225"}
+{"command":"cargo clippy -p -m=/x/Cargo.toml -p y","status":"open","source":"#1225"}
+{"command":"cargo clippy -p -rZx -p y","status":"open","source":"#1225"}
+{"command":"cargo test --bin -m/x/Cargo.toml --bin y","status":"open","source":"#1225"}
+{"command":"cargo test -p -rZx -p y","status":"open","source":"#1225"}
+{"command":"cargo clippy --bin -m/x/Cargo.toml --bin y","status":"open","source":"#1225"}
 {"command":"tree -dLo 1 out.txt","status":"open","source":"#1224"}
 {"command":"tree -Io x out.txt","status":"open","source":"#1224"}
 {"command":"tree -Po x out.txt","status":"open","source":"#1224"}

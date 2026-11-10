@@ -17,20 +17,27 @@
 # `clippy`. All of that is the repo's own config, P3.
 #
 # `-p/--package`, `--bin`, `--example`, `--test` and `--bench` take an
-# optional value in clap, but the rows give them `takes`, so the kernel
-# reads the next word as their value even when it starts with `-`. That
-# hides the word from the rules; cargo itself stops with a list of targets
-# before building when such a value is missing. `optional` would make the
-# common spaced form (`-p shguard`) an operand, and so Unknown.
+# optional value in clap, and cargo reads a hyphen-leading next word as its
+# own option (`-p --config=x -p y`). On build, check and doc these options
+# take the next word (`optional` would make `-p shguard` an operand, and
+# those rows have none), so their values are `path` and any `-` value is
+# asked. On test and clippy they are `optional`: the name after them is a
+# path operand and a hyphen-leading word is read as an option, like clap.
+# The remaining `takes` values on test and clippy (`--exclude`, `-F`,
+# `--profile`, `--manifest-path`, `--message-format`, `--color`, `-j`) hide
+# no cargo option only because cargo requires a value for them (it errors on
+# a hyphen-leading word, and `-j` consumes it); an option cargo makes
+# optional must move to `optional`.
 #
 # `--` ends cargo's options (`dashdash = "ends"`); what follows goes to the
 # child program, so a `--config` after `--` is not cargo's. test, clippy and
 # fmt: the words after `--` are read as paths, so the rules below can Ask
 # for the flags of the test binary, rustc and rustfmt that load code or
 # write files (`--logfile`, `-Z`, `-C`, `@argfile`, `--print-config`, ...).
-# clippy and fmt also take these words before `--` (cargo passes unknown
-# operands on); they are the same `path` words, so the same rules see them.
-# build, check and doc have no operands, so a word after `--` is Unknown.
+# cargo-clippy also takes these words before `--` and forwards them to
+# `cargo check`; they are the same `path` words, so the same rules see them.
+# cargo fmt rejects operands before `--`. build, check and doc have no
+# operands, so a word after `--` is Unknown.
 #
 # cargo reads `.cargo/config.toml` from the working directory and its
 # parents, and a build runs the package's build.rs, so every row is
@@ -50,28 +57,28 @@ cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 opt = [
-  { short = "p", long = "package", value = { takes = "inert" } },
+  { short = "p", long = "package", value = { takes = "path" } },
   { long = "workspace" },
-  { long = "exclude", value = { takes = "inert" } },
+  { long = "exclude", value = { takes = "path" } },
   { long = "lib" },
   { long = "bins" },
-  { long = "bin", value = { takes = "inert" } },
+  { long = "bin", value = { takes = "path" } },
   { long = "examples" },
-  { long = "example", value = { takes = "inert" } },
+  { long = "example", value = { takes = "path" } },
   { long = "tests" },
-  { long = "test", value = { takes = "inert" } },
+  { long = "test", value = { takes = "path" } },
   { long = "benches" },
-  { long = "bench", value = { takes = "inert" } },
+  { long = "bench", value = { takes = "path" } },
   { long = "all-targets" },
-  { short = "F", long = "features", value = { takes = "inert" } },
+  { short = "F", long = "features", value = { takes = "path" } },
   { long = "all-features" },
   { long = "no-default-features" },
   { short = "r", long = "release" },
-  { long = "profile", value = { takes = "inert" } },
+  { long = "profile", value = { takes = "path" } },
   { long = "manifest-path", value = { takes = "path" } },
-  { long = "message-format", value = { takes = "inert" } },
-  { long = "color", value = { takes = "inert" } },
-  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "message-format", value = { takes = "path" } },
+  { long = "color", value = { takes = "path" } },
+  { short = "j", long = "jobs", value = { takes = "path" } },
   { long = "locked" },
   { long = "offline" },
   { long = "frozen" },
@@ -88,28 +95,28 @@ cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 opt = [
-  { short = "p", long = "package", value = { takes = "inert" } },
+  { short = "p", long = "package", value = { takes = "path" } },
   { long = "workspace" },
-  { long = "exclude", value = { takes = "inert" } },
+  { long = "exclude", value = { takes = "path" } },
   { long = "lib" },
   { long = "bins" },
-  { long = "bin", value = { takes = "inert" } },
+  { long = "bin", value = { takes = "path" } },
   { long = "examples" },
-  { long = "example", value = { takes = "inert" } },
+  { long = "example", value = { takes = "path" } },
   { long = "tests" },
-  { long = "test", value = { takes = "inert" } },
+  { long = "test", value = { takes = "path" } },
   { long = "benches" },
-  { long = "bench", value = { takes = "inert" } },
+  { long = "bench", value = { takes = "path" } },
   { long = "all-targets" },
-  { short = "F", long = "features", value = { takes = "inert" } },
+  { short = "F", long = "features", value = { takes = "path" } },
   { long = "all-features" },
   { long = "no-default-features" },
   { short = "r", long = "release" },
-  { long = "profile", value = { takes = "inert" } },
+  { long = "profile", value = { takes = "path" } },
   { long = "manifest-path", value = { takes = "path" } },
-  { long = "message-format", value = { takes = "inert" } },
-  { long = "color", value = { takes = "inert" } },
-  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "message-format", value = { takes = "path" } },
+  { long = "color", value = { takes = "path" } },
+  { short = "j", long = "jobs", value = { takes = "path" } },
   { long = "locked" },
   { long = "offline" },
   { long = "frozen" },
@@ -130,28 +137,28 @@ order = "permute"
 dashdash = "ends"
 rest = "path"
 opt = [
-  { short = "p", long = "package", value = { takes = "inert" } },
+  { short = "p", long = "package", value = { optional = "path" } },
   { long = "workspace" },
-  { long = "exclude", value = { takes = "inert" } },
+  { long = "exclude", value = { takes = "path" } },
   { long = "lib" },
   { long = "bins" },
-  { long = "bin", value = { takes = "inert" } },
+  { long = "bin", value = { optional = "path" } },
   { long = "examples" },
-  { long = "example", value = { takes = "inert" } },
+  { long = "example", value = { optional = "path" } },
   { long = "tests" },
-  { long = "test", value = { takes = "inert" } },
+  { long = "test", value = { optional = "path" } },
   { long = "benches" },
-  { long = "bench", value = { takes = "inert" } },
+  { long = "bench", value = { optional = "path" } },
   { long = "all-targets" },
-  { short = "F", long = "features", value = { takes = "inert" } },
+  { short = "F", long = "features", value = { takes = "path" } },
   { long = "all-features" },
   { long = "no-default-features" },
   { short = "r", long = "release" },
-  { long = "profile", value = { takes = "inert" } },
+  { long = "profile", value = { takes = "path" } },
   { long = "manifest-path", value = { takes = "path" } },
-  { long = "message-format", value = { takes = "inert" } },
-  { long = "color", value = { takes = "inert" } },
-  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "message-format", value = { takes = "path" } },
+  { long = "color", value = { takes = "path" } },
+  { short = "j", long = "jobs", value = { takes = "path" } },
   { long = "locked" },
   { long = "offline" },
   { long = "frozen" },
@@ -165,7 +172,10 @@ opt = [
 ]
 
 # `--fix` is left out (it edits source). The words after `--` go to
-# clippy-driver / rustc, e.g. `-D warnings`.
+# clippy-driver / rustc, e.g. `-D warnings`. Option values are `path`, not
+# `inert`, so the rules see them: cargo-clippy does not parse options, it
+# runs `cargo fix` when a literal `--fix` appears anywhere before `--`, even
+# where this row reads an option value (`--color --fix always`).
 [[row]]
 key = ["cargo", "clippy"]
 source = "https://doc.rust-lang.org/cargo/commands/cargo-clippy.html https://doc.rust-lang.org/clippy/usage.html"
@@ -174,28 +184,28 @@ order = "permute"
 dashdash = "ends"
 rest = "path"
 opt = [
-  { short = "p", long = "package", value = { takes = "inert" } },
+  { short = "p", long = "package", value = { optional = "path" } },
   { long = "workspace" },
-  { long = "exclude", value = { takes = "inert" } },
+  { long = "exclude", value = { takes = "path" } },
   { long = "lib" },
   { long = "bins" },
-  { long = "bin", value = { takes = "inert" } },
+  { long = "bin", value = { optional = "path" } },
   { long = "examples" },
-  { long = "example", value = { takes = "inert" } },
+  { long = "example", value = { optional = "path" } },
   { long = "tests" },
-  { long = "test", value = { takes = "inert" } },
+  { long = "test", value = { optional = "path" } },
   { long = "benches" },
-  { long = "bench", value = { takes = "inert" } },
+  { long = "bench", value = { optional = "path" } },
   { long = "all-targets" },
-  { short = "F", long = "features", value = { takes = "inert" } },
+  { short = "F", long = "features", value = { takes = "path" } },
   { long = "all-features" },
   { long = "no-default-features" },
   { short = "r", long = "release" },
-  { long = "profile", value = { takes = "inert" } },
+  { long = "profile", value = { takes = "path" } },
   { long = "manifest-path", value = { takes = "path" } },
-  { long = "message-format", value = { takes = "inert" } },
-  { long = "color", value = { takes = "inert" } },
-  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "message-format", value = { takes = "path" } },
+  { long = "color", value = { takes = "path" } },
+  { short = "j", long = "jobs", value = { takes = "path" } },
   { long = "locked" },
   { long = "offline" },
   { long = "frozen" },
@@ -232,23 +242,23 @@ cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 opt = [
-  { short = "p", long = "package", value = { takes = "inert" } },
+  { short = "p", long = "package", value = { takes = "path" } },
   { long = "workspace" },
-  { long = "exclude", value = { takes = "inert" } },
+  { long = "exclude", value = { takes = "path" } },
   { long = "lib" },
   { long = "bins" },
-  { long = "bin", value = { takes = "inert" } },
+  { long = "bin", value = { takes = "path" } },
   { long = "examples" },
-  { long = "example", value = { takes = "inert" } },
-  { short = "F", long = "features", value = { takes = "inert" } },
+  { long = "example", value = { takes = "path" } },
+  { short = "F", long = "features", value = { takes = "path" } },
   { long = "all-features" },
   { long = "no-default-features" },
   { short = "r", long = "release" },
-  { long = "profile", value = { takes = "inert" } },
+  { long = "profile", value = { takes = "path" } },
   { long = "manifest-path", value = { takes = "path" } },
-  { long = "message-format", value = { takes = "inert" } },
-  { long = "color", value = { takes = "inert" } },
-  { short = "j", long = "jobs", value = { takes = "inert" } },
+  { long = "message-format", value = { takes = "path" } },
+  { long = "color", value = { takes = "path" } },
+  { short = "j", long = "jobs", value = { takes = "path" } },
   { long = "locked" },
   { long = "offline" },
   { long = "frozen" },
@@ -268,22 +278,24 @@ opt = [
 id = "cargo-build-ask-nonlocal-target"
 key = ["cargo", "build"]
 outcome = "ask"
-reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
+reason = "absolute, `~`, `^`- and `-`-leading words are asked (zsh reads `^x` as a glob; a `-` word after -p/--bin/... may be a cargo option such as --config): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
+  { pat = "-", kind = "prefix" },
 ]
 
 [[rule]]
 id = "cargo-check-ask-nonlocal-target"
 key = ["cargo", "check"]
 outcome = "ask"
-reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
+reason = "absolute, `~`, `^`- and `-`-leading words are asked (zsh reads `^x` as a glob; a `-` word after -p/--bin/... may be a cargo option such as --config): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
+  { pat = "-", kind = "prefix" },
 ]
 
 [[rule]]
@@ -302,18 +314,19 @@ targets = [
 id = "cargo-doc-ask-nonlocal-target"
 key = ["cargo", "doc"]
 outcome = "ask"
-reason = "absolute, `~` and `^`-leading paths are asked (zsh reads `^x` as a glob): the hook cannot tell the project directory from the rest of the disk; use a relative path"
+reason = "absolute, `~`, `^`- and `-`-leading words are asked (zsh reads `^x` as a glob; a `-` word after -p/--bin/... may be a cargo option such as --config): the hook cannot tell the project directory from the rest of the disk; use a relative path"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
   { pat = "^", kind = "prefix" },
+  { pat = "-", kind = "prefix" },
 ]
 
 [[rule]]
 id = "cargo-clippy-ask-nonlocal-target"
 key = ["cargo", "clippy"]
 outcome = "ask"
-reason = "absolute, `~` and `^` paths, and rustc flags that load code, change the toolchain or write files (-Z, -C, -L, -o, --emit, --print, --extern), are asked; use a relative path and drop the flag"
+reason = "absolute, `~` and `^` paths, --fix, and rustc flags that load code, change the toolchain or write files (-Z, -C, -L, -o, --emit, --print, --extern), are asked; use a relative path and drop the flag"
 targets = [
   { pat = "/", kind = "prefix" },
   { pat = "~", kind = "prefix" },
@@ -332,6 +345,7 @@ targets = [
   { pat = "--remap-path-prefix", kind = "prefix" },
   { pat = "--pretty", kind = "prefix" },
   { pat = "@", kind = "prefix" },
+  { pat = "--fix", kind = "prefix" },
   # rustc reads short-option clusters (getopts): after a flag that takes no
   # value, the rest of the word is the next option, so `-go/tmp/x` is
   # `-g -o /tmp/x`. Ask every word that starts with such a flag (the ASCII
