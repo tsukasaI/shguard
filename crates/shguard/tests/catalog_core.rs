@@ -600,6 +600,8 @@ fn the_longest_key_wins_whatever_the_row_order() {
 fn a_command_with_a_control_byte_covers_no_row() {
     let missing = common::uncovered_row_keys(TWO_ROWS, &["git log && git"], &[]);
     assert_eq!(missing, Ok(vec!["git".to_owned(), "git log".to_owned()]));
+    let missing = common::uncovered_row_keys(TWO_ROWS, &["git status", "git log `x`"], &[]);
+    assert_eq!(missing, Ok(vec!["git log".to_owned()]));
 }
 
 #[test]

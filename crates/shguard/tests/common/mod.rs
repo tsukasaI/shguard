@@ -97,7 +97,7 @@ pub fn uncovered_row_keys(
     for cmd in cmds {
         // A command with a control or redirect byte may run something else
         // after its head, so it proves nothing about the head's row.
-        if cmd.bytes().any(|b| b"|&;<>()\n".contains(&b)) {
+        if cmd.bytes().any(|b| b"|&;<>()\n`".contains(&b)) {
             continue;
         }
         let words: Vec<&str> = cmd.split_whitespace().collect();
