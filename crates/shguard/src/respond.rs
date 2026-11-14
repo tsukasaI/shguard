@@ -21,6 +21,7 @@ use shguard_syntax::parse;
 
 use crate::catalog::{GuidanceText, Hint, LoadError, Loaded};
 use crate::config::{AskOutcome, Settings};
+use crate::decision_class::DecisionClass;
 use crate::hook::{Request, Response, parse_request};
 
 /// The most stdin the hook reads. More is malformed.
@@ -43,13 +44,32 @@ impl AllowKind {
             Self::UserRow => "covered by the catalog through a user [[row]]; no rule hit",
         }
     }
+
+    fn class(self) -> DecisionClass {
+        match self {
+            Self::Catalog => DecisionClass::Allow,
+            Self::UserRow => DecisionClass::AllowUserRow,
+        }
+    }
 }
 
 /// What the flow concluded before `ask_outcome` is applied.
 enum Judged {
     Allow(AllowKind),
-    Ask(String),
-    Deny(String),
+    Ask(String, DecisionClass),
+    Deny(String, DecisionClass),
+}
+
+/// One answer: the Bash command of the stdin (if it had one), the response,
+/// and the class of the decision (`None` when there is no decision).
+#[derive(Debug)]
+pub struct Answered {
+    /// The Bash command, if the input had one.
+    pub command: Option<String>,
+    /// What the hook answers.
+    pub response: Response,
+    /// Why the decision came out as it did.
+    pub class: Option<DecisionClass>,
 }
 
 /// The Bash command of one stdin, if it had one, and the answer to it.
@@ -58,6 +78,15 @@ pub fn answer(
     stdin: &[u8],
     settings: Result<&Settings, &[LoadError]>,
 ) -> (Option<String>, Response) {
+    let Answered {
+        command, response, ..
+    } = answer_classified(stdin, settings);
+    (command, response)
+}
+
+/// Like [`answer`], with the class of the decision.
+#[must_use]
+pub fn answer_classified(stdin: &[u8], settings: Result<&Settings, &[LoadError]>) -> Answered {
     let request = if stdin.len() > INPUT_CAP {
         Request::Malformed("hook input is larger than 1 MiB")
     } else {
@@ -67,28 +96,46 @@ pub fn answer(
         Request::Command(c) => Some(c.clone()),
         Request::NotBash | Request::Malformed(_) => None,
     };
-    (command, response(request, settings))
+    let (response, class) = response(request, settings);
+    Answered {
+        command,
+        response,
+        class,
+    }
 }
 
-fn response(request: Request, settings: Result<&Settings, &[LoadError]>) -> Response {
+fn response(
+    request: Request,
+    settings: Result<&Settings, &[LoadError]>,
+) -> (Response, Option<DecisionClass>) {
     match (request, settings) {
-        (Request::NotBash, Ok(_) | Err(_)) => Response::NoDecision,
-        (Request::Malformed(_) | Request::Command(_), Err(errs)) => {
-            Response::Deny(load_reason(errs))
-        }
-        (Request::Malformed(why), Ok(s)) => settle(Judged::Ask(why.to_owned()), s),
+        (Request::NotBash, Ok(_) | Err(_)) => (Response::NoDecision, None),
+        (Request::Malformed(_) | Request::Command(_), Err(errs)) => (
+            Response::Deny(load_reason(errs)),
+            Some(DecisionClass::LoadError),
+        ),
+        (Request::Malformed(why), Ok(s)) => settle(
+            Judged::Ask(why.to_owned(), DecisionClass::MalformedInput),
+            s,
+        ),
         (Request::Command(command), Ok(s)) => settle(judge(&command, s), s),
     }
 }
 
-fn settle(judged: Judged, settings: &Settings) -> Response {
+fn settle(judged: Judged, settings: &Settings) -> (Response, Option<DecisionClass>) {
     match judged {
-        Judged::Allow(kind) => Response::Allow(kind.reason().to_owned()),
-        Judged::Deny(r) => Response::Deny(r),
-        Judged::Ask(r) => match settings.ask_outcome {
-            AskOutcome::Ask => Response::Ask(r),
-            AskOutcome::Deny => Response::Deny(format!("{r} (ask_outcome = deny)")),
-        },
+        Judged::Allow(kind) => (
+            Response::Allow(kind.reason().to_owned()),
+            Some(kind.class()),
+        ),
+        Judged::Deny(r, class) => (Response::Deny(r), Some(class)),
+        Judged::Ask(r, class) => {
+            let response = match settings.ask_outcome {
+                AskOutcome::Ask => Response::Ask(r),
+                AskOutcome::Deny => Response::Deny(format!("{r} (ask_outcome = deny)")),
+            };
+            (response, Some(class))
+        }
     }
 }
 
@@ -111,11 +158,19 @@ fn load_reason(errs: &[LoadError]) -> String {
 
 fn judge(command: &str, settings: &Settings) -> Judged {
     if command.trim().is_empty() {
-        return Judged::Ask("the command is empty".to_owned());
+        return Judged::Ask(
+            "the command is empty".to_owned(),
+            DecisionClass::EmptyCommand,
+        );
     }
     let script = match parse(command.as_bytes()) {
         Ok(s) => s,
-        Err(u) => return Judged::Ask(format!("outside the supported subset: {u}")),
+        Err(u) => {
+            return Judged::Ask(
+                format!("outside the supported subset: {u}"),
+                DecisionClass::ParseRefusal(u.kind),
+            );
+        }
     };
     let loaded = &settings.loaded;
     // `decide` consumes the script, and `Allowed` exposes none back, so the
@@ -124,8 +179,19 @@ fn judge(command: &str, settings: &Settings) -> Judged {
     let for_embedded = settings.embedded_only.as_ref().map(|e| (e, script.clone()));
     match decide(&loaded.catalog, &loaded.rules, script) {
         Verdict::Allow(_) => Judged::Allow(allow_kind(for_embedded)),
-        Verdict::Ask(script, reason) => Judged::Ask(reason_text(&reason, &script, loaded)),
-        Verdict::Block(script, reason) => Judged::Deny(reason_text(&reason, &script, loaded)),
+        Verdict::Ask(script, reason) => {
+            Judged::Ask(reason_text(&reason, &script, loaded), reason_class(&reason))
+        }
+        Verdict::Block(script, reason) => {
+            Judged::Deny(reason_text(&reason, &script, loaded), reason_class(&reason))
+        }
+    }
+}
+
+fn reason_class(reason: &Reason) -> DecisionClass {
+    match reason {
+        Reason::Unknown(kind, _) => DecisionClass::Unknown(*kind),
+        Reason::Rule(..) => DecisionClass::RuleHit,
     }
 }
 
@@ -404,6 +470,56 @@ short = "a"
         let (none, _) = allow_reason_for("", "ls -l");
         assert_eq!(none, AllowKind::Catalog.reason());
         assert_ne!(AllowKind::UserRow.reason(), AllowKind::Catalog.reason());
+    }
+
+    fn class_of(cfg: &str, stdin: &[u8]) -> Option<&'static str> {
+        let embedded = [Source {
+            origin: Origin::Embedded,
+            name: "t.toml",
+            text: CATALOG,
+        }];
+        let s = match settings(&embedded, Some(("c.toml", cfg))) {
+            Ok(s) => s,
+            Err(e) => panic!("{e:?}"),
+        };
+        answer_classified(stdin, Ok(&s))
+            .class
+            .map(DecisionClass::as_str)
+    }
+
+    #[test]
+    fn the_class_names_each_path_to_an_answer() {
+        let cfg = "[[row]]\nkey = [\"uname\"]\nsource = \"https://example.com\"\n\
+                   order = \"permute\"\ndashdash = \"ends\"\n\
+                   [[rule]]\nid = \"ls-a\"\nkey = [\"ls\"]\nopts = [[\"-a\"]]\noutcome = \"ask\"\n";
+        let c = |cmd: &str| class_of(cfg, &bash(cmd));
+        assert_eq!(c("ls -l"), Some("allow"));
+        assert_eq!(c("uname"), Some("allow_user_row"));
+        assert_eq!(c("ls -a"), Some("rule_hit"));
+        let block =
+            "[[rule]]\nid = \"ls-a\"\nkey = [\"ls\"]\nopts = [[\"-a\"]]\noutcome = \"block\"\n";
+        assert_eq!(class_of(block, &bash("ls -a")), Some("rule_hit"));
+        assert_eq!(c("nothere"), Some("unknown:no_row"));
+        assert_eq!(c("ls -z"), Some("unknown:unknown_option"));
+        assert_eq!(c("echo $(id)"), Some("parse_refusal:unquoted_dollar"));
+        assert_eq!(c("a &"), Some("parse_refusal:background_ampersand"));
+        assert_eq!(c(" \n"), Some("parse_refusal:empty_command"));
+        assert_eq!(
+            class_of(cfg, b"junk"),
+            Some("parse_refusal:malformed_input")
+        );
+        assert_eq!(class_of(cfg, br#"{"tool_name":"Read"}"#), None);
+        // `ask_outcome = deny` changes the answer, not the class.
+        assert_eq!(
+            class_of("ask_outcome = \"deny\"\n", &bash("nothere")),
+            Some("unknown:no_row")
+        );
+        let errs = [LoadError::OptionLikeKey {
+            file: "f".to_owned(),
+            item: "row `x`".to_owned(),
+        }];
+        let loaded = answer_classified(&bash("ls"), Err(&errs));
+        assert_eq!(loaded.class.map(DecisionClass::as_str), Some("load_error"));
     }
 
     #[test]

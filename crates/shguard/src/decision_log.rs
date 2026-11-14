@@ -4,7 +4,9 @@
 //!
 //! A line holds the command text as the hook received it, so the file can
 //! hold secrets that were typed on a command line. It records what shguard
-//! answered; it says nothing about whether a command is harmless.
+//! answered, with a stable `class` name for the path that produced the
+//! answer (see `decision_class`); it says nothing about whether a command is
+//! harmless. `shguard report` counts the classes without printing commands.
 
 use std::fs;
 use std::io::{self, Write};
@@ -15,11 +17,14 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::decision_class::DecisionClass;
 use crate::hook::{Response, WireDecision};
 
-/// The log line for one answer, or `None` when there is nothing to log
-/// (a non-Bash tool gets no decision). `unix_secs` is the time of the
-/// answer; `command` is the Bash command, if the input had one.
+/// The log line for one answer, without a `class` field, or `None` when there
+/// is nothing to log (a non-Bash tool gets no decision). `unix_secs` is the
+/// time of the answer; `command` is the Bash command, if the input had one.
+/// The hook uses [`entry_classified`]; a line without `class` is the shape
+/// older versions wrote.
 #[must_use]
 pub fn entry(unix_secs: u64, command: Option<&str>, response: &Response) -> Option<Value> {
     let WireDecision { word, reason } = response.decision()?;
@@ -29,6 +34,21 @@ pub fn entry(unix_secs: u64, command: Option<&str>, response: &Response) -> Opti
         "reason": reason,
         "command": command,
     }))
+}
+
+/// Like [`entry`], plus the stable `class` name of the decision.
+#[must_use]
+pub fn entry_classified(
+    unix_secs: u64,
+    command: Option<&str>,
+    response: &Response,
+    class: DecisionClass,
+) -> Option<Value> {
+    let mut line = entry(unix_secs, command, response)?;
+    if let Some(fields) = line.as_object_mut() {
+        fields.insert("class".to_owned(), Value::from(class.as_str()));
+    }
+    Some(line)
 }
 
 /// The bytes of one log line, newline-terminated. Serializing a [`Value`]
@@ -393,6 +413,26 @@ mod tests {
             panic!("a Deny is logged");
         };
         assert_eq!(e["decision"], "deny");
+    }
+
+    #[test]
+    fn a_classified_entry_carries_the_class_name() {
+        let class = DecisionClass::Allow;
+        let Some(e) = entry_classified(3, Some("ls"), &Response::Allow(String::new()), class)
+        else {
+            panic!("an Allow is logged");
+        };
+        assert_eq!(e["class"], "allow");
+        assert_eq!(e["decision"], "allow");
+        assert_eq!(e["command"], "ls");
+        assert_eq!(
+            entry_classified(3, None, &Response::NoDecision, class),
+            None
+        );
+        let Some(plain) = entry(3, Some("ls"), &Response::Allow(String::new())) else {
+            panic!("an Allow is logged");
+        };
+        assert!(plain.get("class").is_none());
     }
 
     #[test]

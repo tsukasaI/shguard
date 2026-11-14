@@ -249,13 +249,47 @@ something does not, and 2 on a usage error.
 
 `decision_log` turns on an append-only JSON Lines file, one line per Bash
 decision: `{"ts": <unix seconds>, "decision": "allow"|"ask"|"deny",
-"reason": ..., "command": ...}`. It is off unless set. The path must be
-absolute and its directory must exist; put it where the agent cannot write.
+"reason": ..., "command": ..., "class": ...}`. It is off unless set. The path
+must be absolute and its directory must exist; put it where the agent cannot
+write.
 The file is kept at mode 0600, and the log is not written when the path is a
 symlink, a hard link, or anything but a regular file. **Each line holds the
 command text**, so the file can hold secrets that were typed on a command
 line. The log is written after the answer, with a 500 ms bound; a log that
 cannot be written is reported on stderr and never changes the answer.
+
+`class` names the path that produced the answer, from the type of the reason
+and never from its text. It is not a safety grade. The names are stable:
+
+- `allow`: the embedded catalog covers the command.
+- `allow_user_row`: an Allow that needs a user `[[row]]`.
+- `rule_hit`: a rule hit (an Ask or a deny).
+- `unknown:<kind>`: the catalog does not cover the command. `<kind>` is one of
+  `no_row`, `opaque_command_name`, `unknown_option`, `opaque_option`,
+  `missing_value`, `flag_given_value`, `dash_dash_not_allowed`,
+  `extra_operand`, `option_after_operand`, `plus_word`, `code_role`,
+  `runs_code`, `unknown_subcommand`, `path_opaque`, `path_dot_dot`,
+  `path_non_ascii`, `path_after_cd`, `sensitive_after_cd`.
+- `parse_refusal:<kind>`: the command is outside the parsed subset.
+  `<kind>` is the construct, such as `unquoted_dollar`, `backquote`, `glob`,
+  `input_redirect` or `redirect_target` (the full list is `UnsupportedKind`
+  in `shguard-syntax`, in snake case). Also `parse_refusal:empty_command` and
+  `parse_refusal:malformed_input` (hook input that is not the hook contract).
+- `load_error`: the config or catalog failed to load. The hook denies, and
+  since the log path comes from that config, such a line is not written in
+  practice.
+
+`shguard report [--show-commands] <log>` counts a log by class. It reads the
+file line by line and prints one `<count>\t<class>` line per class, most
+frequent first and by name among equals, the top 20 classes, then
+`<total>\ttotal`, which counts every non-empty line, listed or not. A line
+without `class` (written by an earlier version) counts as `unclassified`. A
+line that is not UTF-8, is not a JSON object, or is longer than 2 MiB counts
+as `invalid`. **The default output has no command text.** `--show-commands`
+also prints, under each listed class, its five most frequent distinct
+commands as `\t<count>\t<command as a JSON string>`; that output can hold
+secrets, like the log. `report` exits 0, 1 for a log it cannot read or a
+report it cannot write, and 2 on a usage error.
 
 ## Migrating from 0.9
 

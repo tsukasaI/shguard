@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- Each decision log line has a stable `class` field (`allow`,
+  `allow_user_row`, `rule_hit`, `unknown:<kind>`, `parse_refusal:<kind>`,
+  `load_error`), and `shguard report [--show-commands] <log>` counts a log by
+  class without printing command text unless asked (#1243).
+
 ### Changed
 
 - A user row for a head that runs other code or has option syntax the
