@@ -23,8 +23,9 @@ jobs:
   # would break.
   check:
     runs-on: ubuntu-latest
-    # Up to 10 minutes of waiting for `verify`'s push run to appear, or 120
-    # once it is queued or running, plus the checks before it.
+    # The wait for verify's push run ends at most 120 minutes after its step
+    # starts (10 if no run exists); the rest is for the checks before it and
+    # the last poll.
     timeout-minutes: 150
     # A job-level `permissions` replaces the workflow-level set, so
     # `contents: read` is repeated; `actions: read` is for the workflow-runs API.
@@ -103,11 +104,11 @@ jobs:
               success) exit 0 ;;
               missing)
                 test "${SECONDS}" -lt "${missing_deadline}" \
-                  || { echo "::error::no verify push run on main exists for this commit after 10 minutes"; exit 1; }
+                  || { echo "::error::no verify push run on main exists for this commit 10 minutes after this step started; if one appears later, re-run this job"; exit 1; }
                 ;;
               pending)
                 test "${SECONDS}" -lt "${run_deadline}" \
-                  || { echo "::error::verify's push run did not finish within 120 minutes"; exit 1; }
+                  || { echo "::error::verify's push run did not finish within 120 minutes of this step starting; re-run this job once that run has succeeded"; exit 1; }
                 ;;
               *) echo "::error::verify push run on main is ${state}; re-run that verify run (gh run rerun <id>), then re-run this job"; exit 1 ;;
             esac
