@@ -131,6 +131,25 @@ pub enum LoadError {
         /// the head prints in ASCII.
         head: String,
     },
+    /// A row key segment after the head holds a non-ASCII byte
+    /// (`["git", "Clippſ"]`). The duplicate-row check folds ASCII case only, so
+    /// a non-ASCII spelling would not collide with `clippy`, and a
+    /// Unicode-folding filesystem could still reach the same external
+    /// subcommand; the loader fails closed. One error is reported per
+    /// offending segment.
+    #[error(
+        "{file:?}: row \"{row}\": key segment \"{segment}\" has a non-ASCII byte; spell the key in ASCII"
+    )]
+    NonAsciiSegment {
+        /// Name of the file, as passed to the loader.
+        file: String,
+        /// Key of the row, segments joined with spaces, with every non-ASCII
+        /// character escaped like `segment`.
+        row: String,
+        /// The segment with every non-ASCII character escaped (`Clipp\u{17f}`),
+        /// so it prints in ASCII.
+        segment: String,
+    },
     /// A row for a head that runs code through known options (`fd -x`)
     /// lists one of them, or an abbreviation of one, without a
     /// `takes = "code"` value (#1111).

@@ -782,6 +782,13 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
             head: h.escape_default().to_string(),
         });
     }
+    for seg in dto.key.iter().skip(1).filter(|s| !s.is_ascii()) {
+        errs.push(LoadError::NonAsciiSegment {
+            file: file.to_owned(),
+            row: label.escape_default().to_string(),
+            segment: seg.escape_default().to_string(),
+        });
+    }
     if dto.changes_cwd && dto.cwd_sensitive {
         errs.push(LoadError::ConflictingCwd {
             file: file.to_owned(),

@@ -530,6 +530,29 @@ fn non_ascii_head() {
 }
 
 #[test]
+fn non_ascii_head_check_covers_later_segments() {
+    // A later segment is rejected like a head, with or without `runs_code`.
+    for extra in ["", "runs_code = true"] {
+        let t = format!(
+            "{}{}",
+            row("\"git\"", ""),
+            row("\"git\", \"Clipp\u{17f}\"", extra)
+        );
+        let errs = errors(&t);
+        let msgs: Vec<String> = errs
+            .iter()
+            .filter(|e| matches!(e, LoadError::NonAsciiSegment { .. }))
+            .map(ToString::to_string)
+            .collect();
+        assert!(!msgs.is_empty(), "no NonAsciiSegment error: {extra}");
+        for msg in &msgs {
+            assert!(msg.is_ascii(), "{msg}");
+            assert!(msg.contains("\\u{17f}"), "{msg}");
+        }
+    }
+}
+
+#[test]
 fn code_option_heads_load_without_their_code_options() {
     for head in ["fd", "split", "gsplit"] {
         let t = row(&format!("\"{head}\""), "rest = \"path\"");
