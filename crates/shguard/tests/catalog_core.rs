@@ -13,6 +13,10 @@ use shguard_kernel::decision::Decision;
 
 #[test]
 fn every_row_has_an_allowed_command() {
+    let assert_all = |cmds: &[&str], want| {
+        common::assert_rows_covered("embedded:core.toml", cmds, &[]);
+        common::assert_all(cmds, want);
+    };
     assert_all(
         &[
             "cd src",
@@ -87,6 +91,10 @@ fn pipelines_of_covered_commands_are_allowed() {
 
 #[test]
 fn every_row_has_a_non_allowed_command() {
+    let assert_not_allow = |cmds: &[&str]| {
+        common::assert_rows_covered("embedded:core.toml", cmds, &[]);
+        common::assert_not_allow(cmds);
+    };
     assert_not_allow(&[
         "cd -e src",
         "cd a b",
@@ -520,4 +528,118 @@ fn project_local_code_running_configs_are_blocked() {
         ],
         Decision::Block,
     );
+}
+
+const TWO_ROWS: &str = r#"
+[[row]]
+key = ["git"]
+[[row]]
+key = ["git", "log"]
+[[rule]]
+id = "not-a-row"
+"#;
+
+#[test]
+fn a_row_without_a_test_command_is_reported() {
+    let missing = common::uncovered_row_keys(TWO_ROWS, &["git status", "git -C x log"], &[]);
+    assert_eq!(missing, Ok(vec!["git log".to_owned()]));
+}
+
+#[test]
+fn a_command_counts_for_the_longest_row_key_it_starts_with() {
+    let missing = common::uncovered_row_keys(TWO_ROWS, &["git log -p"], &[]);
+    assert_eq!(missing, Ok(vec!["git".to_owned()]));
+}
+
+#[test]
+fn an_exempt_row_is_not_reported() {
+    let missing = common::uncovered_row_keys(TWO_ROWS, &["git log"], &[&["git"]]);
+    assert_eq!(missing, Ok(Vec::new()));
+}
+
+#[test]
+fn a_stale_or_unknown_exemption_is_rejected() {
+    assert_eq!(
+        common::uncovered_row_keys(TWO_ROWS, &["git"], &[&["git"]]),
+        Err(common::CoverageError::StaleExempt("git".to_owned()))
+    );
+    assert_eq!(
+        common::uncovered_row_keys(TWO_ROWS, &["git"], &[&["git", "nope"]]),
+        Err(common::CoverageError::UnknownExempt("git nope".to_owned()))
+    );
+}
+
+#[test]
+fn a_text_without_rows_is_rejected() {
+    assert_eq!(
+        common::uncovered_row_keys("[[rule]]\nid = \"x\"\n", &["git"], &[]),
+        Err(common::CoverageError::NoRows)
+    );
+}
+
+#[test]
+#[should_panic(expected = "no embedded catalog file")]
+fn an_unknown_source_name_panics() {
+    common::assert_rows_covered("embedded:nope.toml", &["git"], &[]);
+}
+
+const TWO_ROWS_LONGEST_FIRST: &str = r#"
+[[row]]
+key = ["git", "log"]
+[[row]]
+key = ["git"]
+"#;
+
+#[test]
+fn the_longest_key_wins_whatever_the_row_order() {
+    let missing = common::uncovered_row_keys(TWO_ROWS_LONGEST_FIRST, &["git log -p"], &[]);
+    assert_eq!(missing, Ok(vec!["git".to_owned()]));
+}
+
+#[test]
+fn a_command_with_a_control_byte_covers_no_row() {
+    let missing = common::uncovered_row_keys(TWO_ROWS, &["git log && git"], &[]);
+    assert_eq!(missing, Ok(vec!["git".to_owned(), "git log".to_owned()]));
+    let missing = common::uncovered_row_keys(TWO_ROWS, &["git status", "git log `x`"], &[]);
+    assert_eq!(missing, Ok(vec!["git log".to_owned()]));
+}
+
+#[test]
+fn a_malformed_row_or_text_is_a_bad_toml_error() {
+    for text in [
+        "[[row]]\nsource = \"x\"\n",
+        "[[row]]\nkey = [1]\n",
+        "[[row]\n",
+    ] {
+        assert!(
+            matches!(
+                common::uncovered_row_keys(text, &["git"], &[]),
+                Err(common::CoverageError::BadToml(_))
+            ),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "with no command in this test")]
+fn an_uncovered_embedded_row_fails() {
+    common::assert_rows_covered("embedded:core.toml", &["cd"], &[]);
+}
+
+#[test]
+fn every_embedded_file_has_every_row_tests() {
+    const CHECKED: &[&str] = &[
+        "embedded:core.toml",
+        "embedded:git.toml",
+        "embedded:gh.toml",
+        "embedded:cargo.toml",
+    ];
+    for source in shguard::catalog::EMBEDDED {
+        assert!(
+            CHECKED.contains(&source.name),
+            "`{}` has no every-row tests: add allowed and non-allowed every-row tests that call assert_rows_covered, then list it in CHECKED",
+            source.name
+        );
+    }
 }

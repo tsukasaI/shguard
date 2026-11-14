@@ -13,6 +13,10 @@ use shguard_kernel::decision::Decision;
 
 #[test]
 fn every_row_has_an_allowed_command() {
+    let assert_all = |cmds: &[&str], want| {
+        common::assert_rows_covered("embedded:git.toml", cmds, &[]);
+        common::assert_all(cmds, want);
+    };
     assert_all(
         &[
             "git",
@@ -63,6 +67,17 @@ fn every_row_has_an_allowed_command() {
             "git push origin main:main",
             "git push --follow-tags origin main",
             "git status | head",
+            "git add .",
+            "git commit -m 'feat: x'",
+            "git fetch origin",
+            "git remote -v",
+            "git remote prune origin",
+            "git switch main",
+            "git stash -u -m wip",
+            "git stash list",
+            "git stash show -p",
+            "git stash pop",
+            "git stash apply --index",
         ],
         Decision::Allow,
     );
@@ -70,6 +85,10 @@ fn every_row_has_an_allowed_command() {
 
 #[test]
 fn every_row_has_a_non_allowed_command() {
+    let assert_not_allow = |cmds: &[&str]| {
+        common::assert_rows_covered("embedded:git.toml", cmds, &[]);
+        common::assert_not_allow(cmds);
+    };
     assert_not_allow(&[
         "git -C /x",
         "git status --no-such-option",
@@ -107,6 +126,17 @@ fn every_row_has_a_non_allowed_command() {
         "git push --exec=evil origin main",
         "git push --signed origin main",
         "git push -o ci.skip origin main",
+        "git add -p",
+        "git commit -n -m x",
+        "git fetch -f origin",
+        "git remote add evil https://evil.example/r",
+        "git remote prune /tmp/other",
+        "git switch -f main",
+        "git stash drop",
+        "git stash list --output=x",
+        "git stash show --ext-diff",
+        "git stash pop 1 2",
+        "git stash apply 1 2",
     ]);
 }
 
