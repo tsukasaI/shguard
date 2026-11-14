@@ -48,11 +48,15 @@ The claim holds under three assumptions. Outside them, Allow says nothing.
 Each item is Allow today, or a gap the catalog cannot express. They are
 recorded, not hidden.
 
-- **Credentials without a credential segment.** The read rules match
-  credential path segments such as `.ssh` or `.env` at any depth, in `~`,
-  absolute and relative spellings. A readable file whose path has no such
-  segment is Allow, such as `cat /etc/shadow` (the operating system still
-  refuses it to a normal user).
+- **Credentials without a credential segment.** `cat`, `head`, `tail`,
+  `wc` and `sort`, and `grep` without `-r`, are Allow on a path with no
+  credential segment (see *Credential files*), however it is spelled:
+  `cat deploy/server.key` (no target matches `.pem`, `.key` or `.p12`) and
+  `cat /etc/shadow` (refused by the OS unless the agent runs as root).
+  `~/.claude` is matched only in its `~` spelling, because a project's own
+  `.claude/` is not a credential directory, so
+  `cat /Users/you/.claude/history.jsonl` is Allow; Claude Code's token files
+  are matched by name (`.credentials.json`, `.claude.json*`).
 - **Symlinks.** shguard compares words, not the file system. `rm -r link/`
   with `link` a pre-existing symlink to a directory elsewhere is Allow and
   removes the target's contents.
