@@ -59,8 +59,11 @@ jobs:
       # `verify`'s push runs on main for this SHA count, so a pull_request run
       # attached to the same commit cannot satisfy it. Every matching run must
       # be `success`; a missing, queued or running run is waited for until the
-      # deadline, then fails. Ten consecutive API failures also fail, so a
-      # permanent error is not mistaken for a missing run.
+      # deadline, then fails. A completed run with any other conclusion fails
+      # at once, not waited on. A re-run keeps its run id and reports the
+      # latest attempt, so no newest-run selection is needed. Ten consecutive
+      # API failures also fail, so a permanent error is not mistaken for a
+      # missing run.
       - name: verify's push run on main succeeded on this commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -96,7 +99,7 @@ jobs:
             case "${state}" in
               success) exit 0 ;;
               missing | pending) ;;
-              *) echo "::error::verify run ended as ${state}"; exit 1 ;;
+              *) echo "::error::verify push run on main is ${state}; re-run that verify run (gh run rerun <id>), then re-run this job"; exit 1 ;;
             esac
             test "${SECONDS}" -lt "${deadline}" \
               || { echo "timed out waiting for verify's push run"; exit 1; }
