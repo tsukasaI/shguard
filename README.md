@@ -134,9 +134,9 @@ another command (`env`, `xargs`, `sudo`, `timeout`, ...), remote sessions
 (`ssh`, `docker`, ...) and tools whose option syntax the grammar cannot
 express (`find`, `tar`, `ps`). A user row for one of them that does not set
 `runs_code = true` still loads, and lets shguard Allow the commands it
-covers. That breaks P2 above for the commands under it: the row calls words
-inert that the tool runs, so "no position in it runs code" no longer holds
-there. It also blinds the embedded Block rules to a command wrapped by
+covers. That can break P2 above: wherever the row gives a word that the tool
+runs a role other than `code`, shguard reads it as inert, so "no position in
+it runs code" no longer holds there. It also blinds the embedded Block rules to a command wrapped by
 `env`, `sudo` or `xargs` under such a row, since the rules see the wrapper's
 words, not the wrapped command. The loader warns about such a row:
 `shguard check` and `shguard check --config` print each warning on its own
