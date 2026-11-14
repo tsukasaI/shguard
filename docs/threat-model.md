@@ -48,11 +48,11 @@ The claim holds under three assumptions. Outside them, Allow says nothing.
 Each item is Allow today, or a gap the catalog cannot express. They are
 recorded, not hidden.
 
-- **Credentials by absolute path.** The read rules match home paths written
-  with `~` (`cat ~/.ssh/id_rsa` is Ask). The same file by its absolute path
-  (`cat /home/you/.ssh/id_rsa`) is Allow, and so is any other readable file
-  such as `cat /etc/shadow` (the operating system still refuses it to a
-  normal user).
+- **Credentials without a credential segment.** The read rules match
+  credential path segments such as `.ssh` or `.env` at any depth, in `~`,
+  absolute and relative spellings. A readable file whose path has no such
+  segment is Allow, such as `cat /etc/shadow` (the operating system still
+  refuses it to a normal user).
 - **Symlinks.** shguard compares words, not the file system. `rm -r link/`
   with `link` a pre-existing symlink to a directory elsewhere is Allow and
   removes the target's contents.
