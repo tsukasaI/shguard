@@ -144,9 +144,10 @@ singletons, newtypes and enums instead of flag structs.
   a different or code-running option. A row counts as changed when any field or
   `[[row.opt]]` entry is added, changed or removed (a new row included;
   removing a field falls back to a loader default and can widen Allow);
-  deleting a whole row or editing only `[[rule]]`/`[[hint]]` needs none. Record it in a "P2 audit"
-  section of the PR body (copy it from `.github/pull_request_template.md`;
-  `gh pr create --body-file` does not apply the template): each spelling tried
+  deleting a whole row or editing only `[[rule]]`/`[[hint]]` needs none.
+  Record it in a "P2 audit" section of the PR body (copy it from
+  `.github/pull_request_template.md`; `gh pr create --body-file` does not apply
+  the template): each spelling tried
   (option clusters, abbreviated long options, `--opt=value` vs separate value,
   `--opt=`, `--no-` forms, attached short values like `-ofile`, options after
   operands, `--`, `+word`, case variants, code-running options, ...), the
