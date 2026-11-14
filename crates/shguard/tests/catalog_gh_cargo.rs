@@ -13,6 +13,10 @@ use shguard_kernel::decision::Decision;
 
 #[test]
 fn every_gh_row_has_an_allowed_command() {
+    let assert_allow = |cmds: &[&str]| {
+        common::assert_rows_covered("embedded:gh.toml", cmds, &[]);
+        common::assert_allow(cmds);
+    };
     assert_allow(&[
         "gh",
         "gh pr",
@@ -142,6 +146,10 @@ fn gh_api_methods_bodies_and_hosts_are_not_allowed() {
 
 #[test]
 fn every_gh_row_has_a_non_allowed_command() {
+    let assert_not_allow = |cmds: &[&str]| {
+        common::assert_rows_covered("embedded:gh.toml", cmds, &[]);
+        common::assert_not_allow(cmds);
+    };
     assert_not_allow(&[
         "gh -R x pr view 1",
         "gh --version",
@@ -170,11 +178,16 @@ fn every_gh_row_has_a_non_allowed_command() {
         "gh run rerun 1",
         "gh run watch 1",
         "gh pr checks 1 --watch --bogus",
+        "gh api -X DELETE repos/o/r",
     ]);
 }
 
 #[test]
 fn every_cargo_row_has_an_allowed_command() {
+    let assert_allow = |cmds: &[&str]| {
+        common::assert_rows_covered("embedded:cargo.toml", cmds, &[]);
+        common::assert_allow(cmds);
+    };
     assert_allow(&[
         "cargo",
         "cargo build",
@@ -227,6 +240,10 @@ fn every_cargo_row_has_an_allowed_command() {
 
 #[test]
 fn every_cargo_row_has_a_non_allowed_command() {
+    let assert_not_allow = |cmds: &[&str]| {
+        common::assert_rows_covered("embedded:cargo.toml", cmds, &[]);
+        common::assert_not_allow(cmds);
+    };
     assert_not_allow(&[
         "cargo run",
         "cargo run --release",
