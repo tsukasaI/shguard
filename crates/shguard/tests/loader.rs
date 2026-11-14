@@ -254,6 +254,39 @@ fn case_variant_option_segments_are_distinct_rows() {
 }
 
 #[test]
+fn case_variant_head_of_option_key_still_collides() {
+    let opts = "[[row.opt]]\nshort = \"x\"\nvalue = { takes = \"code\" }";
+    let first = format!(
+        "{}{}",
+        row("\"fd\"", opts),
+        row("\"fd\", \"-x\"", "runs_code = true")
+    );
+    let second = format!(
+        "{}{}",
+        row("\"FD\"", opts),
+        row("\"FD\", \"-x\"", "runs_code = true")
+    );
+    let errs = load(&[
+        Source {
+            origin: Origin::Embedded,
+            name: "embedded.toml",
+            text: &first,
+        },
+        Source {
+            origin: Origin::User,
+            name: "user.toml",
+            text: &second,
+        },
+    ])
+    .unwrap_err();
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::DuplicateRow { file, .. } if file == "user.toml")),
+        "{errs:?}"
+    );
+}
+
+#[test]
 fn duplicate_option_names() {
     let cases = [
         "[[row.opt]]\nshort = \"a\"\n[[row.opt]]\nshort = \"a\"\n",

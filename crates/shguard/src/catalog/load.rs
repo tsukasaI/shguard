@@ -909,9 +909,9 @@ fn spelling(s: &[u8]) -> Option<OptName> {
 }
 
 fn check_rows(entries: &[Entry], errs: &mut Vec<LoadError>) {
-    // Command words compare ASCII case-insensitively, so `FD` cannot shadow
-    // `fd` (#1168). Not option segments: `-x` and `-X` are different options
-    // (#1205).
+    // Segments compare ASCII case-insensitively, so `FD` cannot shadow `fd`
+    // (#1168), except option spellings (`-`/`+` prefix): `-x` and `-X` are
+    // different options (#1205).
     let mut first: HashMap<Vec<Vec<u8>>, &str> = HashMap::new();
     for e in entries.iter().filter(|e| !e.key.is_empty()) {
         let folded: Vec<Vec<u8>> = e
