@@ -243,6 +243,17 @@ fn case_variant_duplicate_row_against_embedded_and_later_segments() {
 }
 
 #[test]
+fn case_variant_option_segments_are_distinct_rows() {
+    let parent = row(
+        "\"fd\"",
+        "[[row.opt]]\nshort = \"x\"\nvalue = { takes = \"code\" }\n[[row.opt]]\nshort = \"X\"\nvalue = { takes = \"code\" }",
+    );
+    let lower = row("\"fd\", \"-x\"", "runs_code = true");
+    let upper = row("\"fd\", \"-X\"", "runs_code = true");
+    assert!(load_one(&format!("{parent}{lower}{upper}")).is_ok());
+}
+
+#[test]
 fn duplicate_option_names() {
     let cases = [
         "[[row.opt]]\nshort = \"a\"\n[[row.opt]]\nshort = \"a\"\n",
