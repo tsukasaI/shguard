@@ -72,8 +72,9 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100" \
               | jq -s '[.[].check_runs[]]'); then
               failures=$((failures + 1))
-              echo "::error::cannot read check runs (attempt ${failures})"
-              test "${failures}" -lt 10 || exit 1
+              echo "::warning::cannot read check runs (attempt ${failures})"
+              test "${failures}" -lt 10 \
+                || { echo "::error::check-runs API failed ${failures} times in a row"; exit 1; }
               sleep 30
               continue
             fi
