@@ -530,7 +530,7 @@ fn non_ascii_head() {
 }
 
 #[test]
-fn non_ascii_head_rule_covers_later_segments() {
+fn non_ascii_head_check_covers_later_segments() {
     // A later segment is rejected like a head, with or without `runs_code`.
     for extra in ["", "runs_code = true"] {
         let t = format!(
