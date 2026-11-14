@@ -374,6 +374,12 @@ fn denylisted_head() {
         "julia",
         "rscript",
         "Rscript",
+        "pythonw-3.12",
+        "pwsh-preview",
+        "pwsh-lts",
+        "wish8.5",
+        "wish8.6",
+        "wish-8.6",
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
@@ -392,7 +398,11 @@ fn denylisted_head() {
         assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
     }
     // A hyphen after a versioned interpreter's name must be followed by a digit.
-    for head in ["php-config", "perl-rename", "ruby-build", "pwsh-preview"] {
+    for head in ["php-config", "perl-rename", "ruby-build"] {
+        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+    }
+    // A hyphen after pythonw, and a longer word after wish, must not be a version.
+    for head in ["pythonw-x", "wishful"] {
         assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
     }
 }
