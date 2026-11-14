@@ -243,6 +243,52 @@ fn case_variant_duplicate_row_against_embedded_and_later_segments() {
 }
 
 #[test]
+fn case_variant_option_segments_are_distinct_rows() {
+    let parent = row(
+        "\"fd\"",
+        "[[row.opt]]\nshort = \"x\"\nvalue = { takes = \"code\" }\n[[row.opt]]\nshort = \"X\"\nvalue = { takes = \"code\" }",
+    );
+    let lower = row("\"fd\", \"-x\"", "runs_code = true");
+    let upper = row("\"fd\", \"-X\"", "runs_code = true");
+    assert!(load_one(&format!("{parent}{lower}{upper}")).is_ok());
+}
+
+#[test]
+fn case_variant_head_of_option_key_still_collides() {
+    let opts = "[[row.opt]]\nshort = \"x\"\nvalue = { takes = \"code\" }";
+    let first = format!(
+        "{}{}",
+        row("\"fd\"", opts),
+        row("\"fd\", \"-x\"", "runs_code = true")
+    );
+    let second = format!(
+        "{}{}",
+        row("\"FD\"", opts),
+        row("\"FD\", \"-x\"", "runs_code = true")
+    );
+    let errs = load(&[
+        Source {
+            origin: Origin::Embedded,
+            name: "embedded.toml",
+            text: &first,
+        },
+        Source {
+            origin: Origin::User,
+            name: "user.toml",
+            text: &second,
+        },
+    ])
+    .unwrap_err();
+    assert!(
+        errs.iter().any(|e| matches!(
+            e,
+            LoadError::DuplicateRow { file, row, .. } if file == "user.toml" && row == "FD -x"
+        )),
+        "{errs:?}"
+    );
+}
+
+#[test]
 fn duplicate_option_names() {
     let cases = [
         "[[row.opt]]\nshort = \"a\"\n[[row.opt]]\nshort = \"a\"\n",

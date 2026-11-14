@@ -909,10 +909,22 @@ fn spelling(s: &[u8]) -> Option<OptName> {
 }
 
 fn check_rows(entries: &[Entry], errs: &mut Vec<LoadError>) {
-    // Keys compare ASCII case-insensitively, so `FD` cannot shadow `fd` (#1168).
+    // Segments compare ASCII case-insensitively, so `FD` cannot shadow `fd`
+    // (#1168), except option spellings (`-`/`+` prefix): `-x` and `-X` are
+    // different options (#1205).
     let mut first: HashMap<Vec<Vec<u8>>, &str> = HashMap::new();
     for e in entries.iter().filter(|e| !e.key.is_empty()) {
-        let folded: Vec<Vec<u8>> = e.key.iter().map(|w| w.to_ascii_lowercase()).collect();
+        let folded: Vec<Vec<u8>> = e
+            .key
+            .iter()
+            .map(|w| {
+                if w.starts_with(b"-") || w.starts_with(b"+") {
+                    w.clone()
+                } else {
+                    w.to_ascii_lowercase()
+                }
+            })
+            .collect();
         if let Some(&first_file) = first.get(&folded) {
             errs.push(LoadError::DuplicateRow {
                 file: e.file.clone(),
