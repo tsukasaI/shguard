@@ -95,7 +95,7 @@ pub fn uncovered_row_keys(
     let keys = row_keys(toml_text)?;
     let mut covered = vec![false; keys.len()];
     for cmd in cmds {
-        // A command with a control or redirect byte may run something else
+        // A command with a control, redirect or substitution byte may run something else
         // after its head, so it proves nothing about the head's row.
         if cmd.bytes().any(|b| b"|&;<>()\n`".contains(&b)) {
             continue;
