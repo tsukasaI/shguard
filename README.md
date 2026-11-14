@@ -135,17 +135,17 @@ another command (`env`, `xargs`, `sudo`, `timeout`, ...), remote sessions
 express (`find`, `tar`, `ps`). A user row for one of them that does not set
 `runs_code = true` still loads, and lets shguard Allow the commands it
 covers. That can break P2 above: wherever the row gives a word that the tool
-runs a role other than `code`, shguard reads it as inert, so "no position in
-it runs code" no longer holds there. It also blinds the embedded Block rules to a command wrapped by
-`env`, `sudo` or `xargs` under such a row, since the rules see the wrapper's
-words, not the wrapped command. The loader warns about such a row:
-`shguard check` and `shguard check --config` print each warning on its own
-line to stderr and still exit 0, and the hook prints none. `runs_code = true`
-keeps every command under the head an Ask. An Allow that only a user
-`[[row]]` gives (the embedded catalog alone would not Allow the command)
-says so in the hook reason, "covered by the catalog through a user [[row]];
-no rule hit", and so does its decision log line. `fd`
-(`fdfind`), `split` and `gsplit` run code only through known options
+runs a role other than `code`, shguard does not treat it as code, so "no
+position in it runs code" no longer holds there. It also blinds the embedded
+Block rules to a command wrapped by `env`, `sudo` or `xargs` under such a
+row, since the rules see the wrapper's words, not the wrapped command. The
+loader warns about such a row: `shguard check` and `shguard check --config`
+print each warning on its own line to stderr and still exit 0, and the hook
+prints none. `runs_code = true` keeps every command under the head an Ask.
+An Allow that only a user `[[row]]` gives (the embedded catalog alone would
+not Allow the command) says so in the hook reason, "covered by the catalog
+through a user [[row]]; no rule hit", and so does its decision log line.
+`fd` (`fdfind`), `split` and `gsplit` run code only through known options
 (`fd -x`/`-X`/`-l`, `split --filter`); a row for them loads only when it
 leaves those options out or declares that they take a `code` value
 (`value = { takes = "code" }`). The embedded `fd-ask-broad` rule (fd from
