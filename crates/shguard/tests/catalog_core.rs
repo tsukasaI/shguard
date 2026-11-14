@@ -582,3 +582,62 @@ fn a_text_without_rows_is_rejected() {
 fn an_unknown_source_name_panics() {
     common::assert_rows_covered("embedded:nope.toml", &["git"], &[]);
 }
+
+const TWO_ROWS_LONGEST_FIRST: &str = r#"
+[[row]]
+key = ["git", "log"]
+[[row]]
+key = ["git"]
+"#;
+
+#[test]
+fn the_longest_key_wins_whatever_the_row_order() {
+    let missing = common::uncovered_row_keys(TWO_ROWS_LONGEST_FIRST, &["git log -p"], &[]);
+    assert_eq!(missing, Ok(vec!["git".to_owned()]));
+}
+
+#[test]
+fn a_command_with_a_control_byte_covers_no_row() {
+    let missing = common::uncovered_row_keys(TWO_ROWS, &["git log && git"], &[]);
+    assert_eq!(missing, Ok(vec!["git".to_owned(), "git log".to_owned()]));
+}
+
+#[test]
+fn a_malformed_row_or_text_is_a_bad_toml_error() {
+    for text in [
+        "[[row]]\nsource = \"x\"\n",
+        "[[row]]\nkey = [1]\n",
+        "[[row]\n",
+    ] {
+        assert!(
+            matches!(
+                common::uncovered_row_keys(text, &["git"], &[]),
+                Err(common::CoverageError::BadToml(_))
+            ),
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+#[should_panic(expected = "with no command in this test")]
+fn an_uncovered_embedded_row_fails() {
+    common::assert_rows_covered("embedded:core.toml", &["cd"], &[]);
+}
+
+#[test]
+fn every_embedded_file_has_every_row_tests() {
+    const CHECKED: &[&str] = &[
+        "embedded:core.toml",
+        "embedded:git.toml",
+        "embedded:gh.toml",
+        "embedded:cargo.toml",
+    ];
+    for source in shguard::catalog::EMBEDDED {
+        assert!(
+            CHECKED.contains(&source.name),
+            "`{}` has no every-row tests: add allowed and non-allowed every-row tests that call assert_rows_covered, then list it in CHECKED",
+            source.name
+        );
+    }
+}

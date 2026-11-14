@@ -84,8 +84,9 @@ fn row_keys(toml_text: &str) -> Result<Vec<Vec<String>>, CoverageError> {
 ///
 /// # Errors
 ///
-/// When the text has no rows, an exempt key is not a row key, or an exempt key
-/// is covered by a command.
+/// When the text is not valid TOML or a `[[row]]` has no string-list `key`,
+/// the text has no rows, an exempt key is not a row key, or an exempt key is
+/// covered by a command.
 pub fn uncovered_row_keys(
     toml_text: &str,
     cmds: &[&str],
@@ -94,6 +95,11 @@ pub fn uncovered_row_keys(
     let keys = row_keys(toml_text)?;
     let mut covered = vec![false; keys.len()];
     for cmd in cmds {
+        // A command with a control or redirect byte may run something else
+        // after its head, so it proves nothing about the head's row.
+        if cmd.bytes().any(|b| b"|&;<>()\n".contains(&b)) {
+            continue;
+        }
         let words: Vec<&str> = cmd.split_whitespace().collect();
         let mut best: Option<(usize, usize)> = None;
         for (i, key) in keys.iter().enumerate() {

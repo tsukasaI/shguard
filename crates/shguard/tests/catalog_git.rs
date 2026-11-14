@@ -133,10 +133,10 @@ fn every_row_has_a_non_allowed_command() {
         "git remote prune /tmp/other",
         "git switch -f main",
         "git stash drop",
-        "git stash list --bogus",
-        "git stash show --bogus",
-        "git stash pop --bogus",
-        "git stash apply --bogus",
+        "git stash list --output=x",
+        "git stash show --ext-diff",
+        "git stash pop 1 2",
+        "git stash apply 1 2",
     ]);
 }
 
