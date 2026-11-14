@@ -130,9 +130,9 @@ const VERSIONED_INTERPRETERS: &[&[u8]] = &[
 /// Whether `head` is an [`INEXPRESSIBLE_HEADS`] entry, compared in ASCII
 /// lower case, or an interpreter name from [`VERSIONED_INTERPRETERS`]
 /// followed by a digit, or by `-` and a digit (`python3.10`, `perl5.30`,
-/// `python-3.10`, `luajit-2.1.0-beta3`), or `python`
-/// followed by the framework GUI build's `w` (`pythonw`, `pythonw3.12`,
-/// `pythonw-3.12`).
+/// `python-3.10`, `luajit-2.1.0-beta3`), or `pythonw`
+/// (the framework GUI build) alone or followed by the same version suffix
+/// (`pythonw3.12`, `pythonw-3.12`).
 ///
 /// Not an exact byte match: the default macOS filesystem is case-insensitive,
 /// so `ENV` and `Python3` reach the same binary, and the version suffix is

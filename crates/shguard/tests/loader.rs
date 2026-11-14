@@ -380,6 +380,9 @@ fn denylisted_head() {
         "wish8.5",
         "wish8.6",
         "wish-8.6",
+        "Pwsh-Preview",
+        "Wish8.6",
+        "Pythonw-3.12",
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
@@ -403,6 +406,10 @@ fn denylisted_head() {
     }
     // A hyphen after pythonw, and a longer word after wish, must not be a version.
     for head in ["pythonw-x", "wishful"] {
+        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+    }
+    // A bare hyphen with no digit after it is not a version either.
+    for head in ["wish-x", "pythonw-"] {
         assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
     }
 }
