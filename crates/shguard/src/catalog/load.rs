@@ -24,10 +24,10 @@ use super::dto::{
 ///
 /// - its option syntax is outside the grammar: dash-less bundles (`tar xf`)
 ///   or single-dash long options (`find -exec`, `ps -ef`, #1039);
-/// - it runs the program or script it is given, or evaluates its argument
-///   (wrappers, shell builtins that run text, interpreters);
+/// - it runs, compiles or evaluates the program or script it is given
+///   (wrappers, shell builtins that run text, interpreters, compilers);
 /// - it opens a connection or a session to another system or a multiplexer
-///   (`ssh`, `docker`, `kubectl`, `tmux`, `socat`);
+///   (`ssh`, `docker`, `podman`, `kubectl`, `tmux`, `screen`, `socat`);
 /// - it changes what later commands do or schedules code (`trap`, `crontab`).
 ///
 /// The `g`-prefixed names are the Homebrew GNU builds of the same tools.
@@ -119,6 +119,34 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"groovy",
     b"julia",
     b"rscript",
+    // More runtimes, REPLs and compilers that run or build their argument (#1218).
+    b"r",
+    b"jirb",
+    b"jrubyc",
+    b"escript",
+    b"erl",
+    b"elixirc",
+    b"mix",
+    b"groovysh",
+    b"groovyconsole",
+    b"tkcon",
+    b"nodejs",
+    b"mawk",
+    b"nawk",
+    // More shells, and busybox, which runs any applet.
+    b"mksh",
+    b"ash",
+    b"yash",
+    b"nu",
+    b"elvish",
+    b"xonsh",
+    b"busybox",
+    // More wrappers that run another command, and container or terminal sessions.
+    b"stdbuf",
+    b"setsid",
+    b"chroot",
+    b"podman",
+    b"screen",
 ];
 
 /// Interpreters whose binaries carry a version suffix (`ruby3.1`, `python-3.10`).
