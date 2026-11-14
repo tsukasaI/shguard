@@ -23,8 +23,10 @@ jobs:
   # would break.
   check:
     runs-on: ubuntu-latest
-    # Up to 60 minutes of waiting for `verify`, plus the checks below.
-    timeout-minutes: 90
+    # The wait for verify's push run ends at most 120 minutes after its step
+    # starts (10 if no run exists); the rest is for the checks before it and
+    # the last poll.
+    timeout-minutes: 150
     # A job-level `permissions` replaces the workflow-level set, so
     # `contents: read` is repeated; `actions: read` is for the workflow-runs API.
     permissions:
@@ -58,8 +60,9 @@ jobs:
       # Last, so a local failure is reported without waiting. Fail closed: only
       # `verify`'s push runs on main for this SHA count, so a pull_request run
       # attached to the same commit cannot satisfy it. Every matching run must
-      # be `success`; a missing, queued or running run is waited for until the
-      # deadline, then fails. A completed run with any other conclusion fails
+      # be `success`; a missing run is waited for 10 minutes and a queued or
+      # running one 120 minutes, both counted from the start of this step, then
+      # it fails. A completed run with any other conclusion fails
       # at once, not waited on. A re-run keeps its run id and reports the
       # latest attempt, so no newest-run selection is needed. Ten consecutive
       # API failures also fail, so a permanent error is not mistaken for a
@@ -69,7 +72,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-          deadline=$((SECONDS + 3600))
+          missing_deadline=$((SECONDS + 600))
+          run_deadline=$((SECONDS + 7200))
           failures=0
           while :; do
             if ! runs=$(gh api --paginate \
@@ -98,11 +102,16 @@ jobs:
             echo "verify push run on main: ${state}"
             case "${state}" in
               success) exit 0 ;;
-              missing | pending) ;;
+              missing)
+                test "${SECONDS}" -lt "${missing_deadline}" \
+                  || { echo "::error::no verify push run on main exists for this commit 10 minutes after this step started; if one appears later, re-run this job"; exit 1; }
+                ;;
+              pending)
+                test "${SECONDS}" -lt "${run_deadline}" \
+                  || { echo "::error::verify's push run did not finish within 120 minutes of this step starting; re-run this job once that run has succeeded"; exit 1; }
+                ;;
               *) echo "::error::verify push run on main is ${state}; re-run that verify run (gh run rerun <id>), then re-run this job"; exit 1 ;;
             esac
-            test "${SECONDS}" -lt "${deadline}" \
-              || { echo "timed out waiting for verify's push run"; exit 1; }
             sleep 30
           done
 
