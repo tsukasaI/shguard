@@ -11,15 +11,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shguard::catalog::{EMBEDDED, LoadError, Origin, Source, load_with_warnings};
 use shguard::config::{Location, Settings, locate, settings};
+use shguard::decision_class::DecisionClass;
 use shguard::hook::{Response, panic_output, render, to_bytes};
-use shguard::respond::{INPUT_CAP, answer};
-use shguard::{decision_log, init};
+use shguard::respond::{Answered, INPUT_CAP, answer_classified};
+use shguard::{decision_log, init, report};
 
 const USAGE: &str = "\
 usage: shguard                          run as a Claude Code PreToolUse hook (JSON on stdin)
        shguard check <catalog.toml>...  check catalog files
        shguard check --config [<path>]  check a config as the hook loads it (default: the hook's path)
        shguard init                     write a config and print the settings.json hook entry
+       shguard report [--show-commands] <log>
+                                        count a decision log by class (no command text unless asked)
        shguard --help | --version
 ";
 
@@ -62,6 +65,13 @@ fn main() -> ExitCode {
             check(&paths, &mut std::io::stderr().lock())
         }
         Some((cmd, [])) if cmd == "init" => init_config(location),
+        Some((cmd, rest)) if cmd == "report" => match rest {
+            [path] if !is_option(path) => report_log(Path::new(path), report::CommandText::Hide),
+            [flag, path] if flag == "--show-commands" && !is_option(path) => {
+                report_log(Path::new(path), report::CommandText::Show)
+            }
+            _ => usage_error(),
+        },
         Some((flag, [])) if flag == "--help" || flag == "-h" => {
             drop(std::io::stdout().lock().write_all(USAGE.as_bytes()));
             ExitCode::SUCCESS
@@ -75,6 +85,34 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(_) => usage_error(),
+    }
+}
+
+fn is_option(arg: &OsString) -> bool {
+    arg.to_string_lossy().starts_with('-')
+}
+
+/// `shguard report`: counts the decision log at `path` by class on stdout.
+/// An unreadable file is reported on stderr and exits 1.
+fn report_log(path: &Path, text: report::CommandText) -> ExitCode {
+    let counted = std::fs::File::open(path)
+        .map(std::io::BufReader::new)
+        .and_then(|log| report::tally(log, text));
+    let written = counted.and_then(|t| {
+        let mut out = std::io::stdout().lock();
+        t.write_to(report::DEFAULT_LIMIT, &mut out)
+            .and_then(|()| out.flush())
+    });
+    match written {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            drop(writeln!(
+                std::io::stderr().lock(),
+                "shguard report: {}: {e}",
+                path.display()
+            ));
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -111,7 +149,11 @@ fn hook(location: Location) -> ExitCode {
         input.clear();
     }
     let loaded = load_settings(location);
-    let (command, response) = answer(&input, loaded.as_ref().map_err(Vec::as_slice));
+    let Answered {
+        command,
+        response,
+        class,
+    } = answer_classified(&input, loaded.as_ref().map_err(Vec::as_slice));
     let mut out = std::io::stdout().lock();
     match out
         .write_all(&to_bytes(&render(&response)))
@@ -124,7 +166,8 @@ fn hook(location: Location) -> ExitCode {
                 decision_log: Some(path),
                 ..
             }) = &loaded
-                && let Err(e) = log_answer(path, command.as_deref(), &response)
+                && let Some(class) = class
+                && let Err(e) = log_answer(path, command.as_deref(), &response, class)
             {
                 drop(writeln!(
                     std::io::stderr().lock(),
@@ -148,11 +191,16 @@ fn hook(location: Location) -> ExitCode {
 const LOG_WAIT: Duration = Duration::from_millis(500);
 
 /// Logs one answer: builds the line, then appends it within [`LOG_WAIT`].
-fn log_answer(path: &Path, command: Option<&str>, response: &Response) -> std::io::Result<()> {
+fn log_answer(
+    path: &Path,
+    command: Option<&str>,
+    response: &Response,
+    class: DecisionClass,
+) -> std::io::Result<()> {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let Some(line) = decision_log::entry(secs, command, response)
+    let Some(line) = decision_log::entry_classified(secs, command, response, class)
         .as_ref()
         .and_then(decision_log::line)
     else {
