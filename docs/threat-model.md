@@ -50,13 +50,14 @@ recorded, not hidden.
 
 - **Credentials without a credential segment.** `cat`, `head`, `tail`,
   `wc` and `sort`, and `grep` without `-r`, are Allow on a path with no
-  credential segment (see *Credential files*), in absolute or relative spelling, or `~` after `--`:
-  `cat deploy/server.key` (no target matches `.pem`, `.key` or `.p12`) and
-  `cat /etc/shadow` (on Linux, refused by the OS unless the agent runs as root).
-  `~/.claude` is matched only in its `~` spelling, because a project's own
-  `.claude/` is not a credential directory, so
-  `cat /Users/you/.claude/history.jsonl` is Allow; Claude Code's token files
-  are matched by name (`.credentials.json`, `.claude.json*`).
+  credential segment (see *Credential files*), in absolute or relative
+  spelling, or `~` after `--`: `cat deploy/server.key` (no target matches
+  `.pem`, `.key` or `.p12`) and `cat /etc/shadow` (on Linux, refused by the
+  OS unless the agent runs as root). `~/.claude` is matched only in its `~`
+  spelling, because a project's own `.claude/` is not a credential
+  directory, so `cat /Users/you/.claude/history.jsonl` is Allow; Claude
+  Code's token files are matched by name (`.credentials.json`,
+  `.claude.json*`).
 - **Symlinks.** shguard compares words, not the file system. `rm -r link/`
   with `link` a pre-existing symlink to a directory elsewhere is Allow and
   removes the target's contents.
