@@ -17,12 +17,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Proofs ran in `verify` on main, and `proofs` is a required check there,
-  # so a tag on a main commit carries them; this job refuses any other commit
-  # and re-checks what a mistagged commit would break.
+  # A tag on a main commit is not proof that `verify` passed on it, so this job
+  # refuses any other commit, waits for the `rust` and `proofs` check runs of
+  # the tagged SHA to succeed (#1223), and re-checks what a mistagged commit
+  # would break.
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Up to 60 minutes of waiting for `verify`, plus the checks below.
+    timeout-minutes: 90
+    # A job-level `permissions` replaces the workflow-level set, so
+    # `contents: read` is repeated; `checks: read` is for the check-runs API.
+    permissions:
+      contents: read
+      checks: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,6 +52,52 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+      # Last, so a local failure is reported without waiting. Fail closed: only
+      # `success` passes; a missing, queued or running run is waited for until
+      # the deadline, then fails. For a re-run, the run with the highest id is
+      # the latest. Ten consecutive API failures also fail, so a permanent
+      # error is not mistaken for a missing run.
+      - name: verify's rust and proofs runs succeeded on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          deadline=$((SECONDS + 3600))
+          failures=0
+          while :; do
+            if ! runs=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100" \
+              | jq -s '[.[].check_runs[]]'); then
+              failures=$((failures + 1))
+              echo "::warning::cannot read check runs (attempt ${failures})"
+              test "${failures}" -lt 10 \
+                || { echo "::error::check-runs API failed ${failures} times in a row"; exit 1; }
+              sleep 30
+              continue
+            fi
+            failures=0
+            pending=0
+            for name in rust proofs; do
+              state=$(jq -r --arg n "${name}" '
+                [.[] | select(.name == $n)]
+                | if length == 0 then "missing"
+                  else max_by(.id) | if .status == "completed" then .conclusion else .status end
+                  end' <<< "${runs}")
+              echo "${name}: ${state}"
+              case "${state}" in
+                success) ;;
+                missing | queued | in_progress | waiting | pending | requested) pending=1 ;;
+                *) echo "check run ${name} ended as ${state}"; exit 1 ;;
+              esac
+            done
+            test "${pending}" -eq 0 && exit 0
+            test "${SECONDS}" -lt "${deadline}" \
+              || { echo "timed out waiting for rust and proofs"; exit 1; }
+            sleep 30
+          done
 
   build:
     needs: check
