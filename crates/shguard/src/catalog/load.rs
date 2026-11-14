@@ -119,6 +119,34 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"groovy",
     b"julia",
     b"rscript",
+    // More runtimes, REPLs and compilers that run or build their argument (#1218).
+    b"r",
+    b"jirb",
+    b"jrubyc",
+    b"escript",
+    b"erl",
+    b"elixirc",
+    b"mix",
+    b"groovysh",
+    b"groovyconsole",
+    b"tkcon",
+    b"nodejs",
+    b"mawk",
+    b"nawk",
+    // More shells, and busybox, which runs any applet.
+    b"mksh",
+    b"ash",
+    b"yash",
+    b"nu",
+    b"elvish",
+    b"xonsh",
+    b"busybox",
+    // More wrappers that run another command, and container or terminal sessions.
+    b"stdbuf",
+    b"setsid",
+    b"chroot",
+    b"podman",
+    b"screen",
 ];
 
 /// Interpreters whose binaries carry a version suffix (`ruby3.1`, `python-3.10`).
