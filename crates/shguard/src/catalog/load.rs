@@ -24,10 +24,10 @@ use super::dto::{
 ///
 /// - its option syntax is outside the grammar: dash-less bundles (`tar xf`)
 ///   or single-dash long options (`find -exec`, `ps -ef`, #1039);
-/// - it runs the program or script it is given, or evaluates its argument
-///   (wrappers, shell builtins that run text, interpreters);
+/// - it runs, compiles or evaluates the program or script it is given
+///   (wrappers, shell builtins that run text, interpreters, compilers);
 /// - it opens a connection or a session to another system or a multiplexer
-///   (`ssh`, `docker`, `kubectl`, `tmux`, `socat`);
+///   (`ssh`, `docker`, `podman`, `kubectl`, `tmux`, `screen`, `socat`);
 /// - it changes what later commands do or schedules code (`trap`, `crontab`).
 ///
 /// The `g`-prefixed names are the Homebrew GNU builds of the same tools.

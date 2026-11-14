@@ -393,6 +393,7 @@ fn denylisted_head() {
         "mix",
         "groovysh",
         "groovyconsole",
+        "groovyConsole",
         "tkcon",
         "nodejs",
         "mawk",
