@@ -49,18 +49,35 @@ jobs:
             || { echo "tag ${GITHUB_REF_NAME} != crate version ${version}"; exit 1; }
       - name: CHANGELOG has a section for the version
         run: grep -qF -- "## ${GITHUB_REF_NAME#v} " CHANGELOG.md
-      # Fail closed: only `success` passes; a missing, queued or running run
-      # is waited for until the deadline, then fails. For a re-run, the run
-      # with the highest id is the latest.
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+      # Last, so a local failure is reported without waiting. Fail closed: only
+      # `success` passes; a missing, queued or running run is waited for until
+      # the deadline, then fails. For a re-run, the run with the highest id is
+      # the latest. Ten consecutive API failures also fail, so a permanent
+      # error is not mistaken for a missing run.
       - name: verify's rust and proofs runs succeeded on this commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -o pipefail
           deadline=$((SECONDS + 3600))
+          failures=0
           while :; do
-            runs=$(gh api --paginate \
+            if ! runs=$(gh api --paginate \
               "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs?per_page=100" \
-              | jq -s '[.[].check_runs[]]') || runs='[]'
+              | jq -s '[.[].check_runs[]]'); then
+              failures=$((failures + 1))
+              echo "::error::cannot read check runs (attempt ${failures})"
+              test "${failures}" -lt 10 || exit 1
+              sleep 30
+              continue
+            fi
+            failures=0
             pending=0
             for name in rust proofs; do
               state=$(jq -r --arg n "${name}" '
@@ -80,12 +97,6 @@ jobs:
               || { echo "timed out waiting for rust and proofs"; exit 1; }
             sleep 30
           done
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          command: check
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - run: cargo test --locked --workspace
 
   build:
     needs: check
