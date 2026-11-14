@@ -249,8 +249,9 @@ something does not, and 2 on a usage error.
 
 `decision_log` turns on an append-only JSON Lines file, one line per Bash
 decision: `{"ts": <unix seconds>, "decision": "allow"|"ask"|"deny",
-"reason": ..., "command": ..., "class": ...}`. It is off unless set. The path must be
-absolute and its directory must exist; put it where the agent cannot write.
+"reason": ..., "command": ..., "class": ...}`. It is off unless set. The path
+must be absolute and its directory must exist; put it where the agent cannot
+write.
 The file is kept at mode 0600, and the log is not written when the path is a
 symlink, a hard link, or anything but a regular file. **Each line holds the
 command text**, so the file can hold secrets that were typed on a command
@@ -281,13 +282,14 @@ and never from its text. It is not a safety grade. The names are stable:
 `shguard report [--show-commands] <log>` counts a log by class. It reads the
 file line by line and prints one `<count>\t<class>` line per class, most
 frequent first and by name among equals, the top 20 classes, then
-`<total>\ttotal` for every line. A line without `class` (written by an
-earlier version) counts as `unclassified`, and a line that is not a JSON
-object counts as `invalid`. **The default output has no command text.**
-`--show-commands` also prints, under each listed class, its five most
-frequent distinct commands as `\t<count>\t<command as a JSON string>`; that
-output can hold secrets, like the log. `report` exits 0, 1 for a file it cannot
-read, and 2 on a usage error.
+`<total>\ttotal`, which counts every non-empty line, listed or not. A line
+without `class` (written by an earlier version) counts as `unclassified`. A
+line that is not UTF-8, is not a JSON object, or is longer than 2 MiB counts
+as `invalid`. **The default output has no command text.** `--show-commands`
+also prints, under each listed class, its five most frequent distinct
+commands as `\t<count>\t<command as a JSON string>`; that output can hold
+secrets, like the log. `report` exits 0, 1 for a log it cannot read or a
+report it cannot write, and 2 on a usage error.
 
 ## Migrating from 0.9
 

@@ -3,7 +3,8 @@
 //! The log is read one line at a time. A line is a JSON object; its `class`
 //! string is the key. A line without a `class` string (written before the
 //! field existed) counts as `unclassified`; a line that is not a JSON object,
-//! or not UTF-8, counts as `invalid`; an empty line is skipped.
+//! or not UTF-8, or longer than [`LINE_CAP`], counts as `invalid`; an empty
+//! line is skipped.
 //!
 //! The output is one `<count>\t<class>` line per listed class, most frequent
 //! first and by class name among equals, then `<total>\ttotal`, which counts
@@ -21,6 +22,10 @@ use serde_json::Value;
 pub const UNCLASSIFIED: &str = "unclassified";
 /// The class counted for a line that is not a JSON object.
 pub const INVALID: &str = "invalid";
+
+/// The longest line that is parsed: above the hook's 1 MiB input cap, so a
+/// line the hook wrote fits. A longer line counts as `invalid`.
+pub const LINE_CAP: usize = 2 * 1024 * 1024;
 
 /// How many classes the report lists unless told otherwise.
 pub const DEFAULT_LIMIT: usize = 20;
@@ -49,13 +54,24 @@ pub struct Tally {
 /// # Errors
 ///
 /// The I/O error of a read.
-pub fn tally(mut log: impl BufRead, text: CommandText) -> io::Result<Tally> {
+pub fn tally(log: impl BufRead, text: CommandText) -> io::Result<Tally> {
+    tally_capped(log, text, LINE_CAP)
+}
+
+fn tally_capped(mut log: impl BufRead, text: CommandText, cap: usize) -> io::Result<Tally> {
     let mut tally = Tally::default();
     let mut raw = Vec::new();
+    let take_len = u64::try_from(cap).map_or(u64::MAX, |c| c.saturating_add(1));
     loop {
         raw.clear();
-        if log.read_until(b'\n', &mut raw)? == 0 {
+        let mut bounded = io::Read::take(&mut log, take_len);
+        if bounded.read_until(b'\n', &mut raw)? == 0 {
             return Ok(tally);
+        }
+        let overlong = raw.len() > cap && raw.last() != Some(&b'\n');
+        if overlong {
+            // The rest of the line is dropped unread into memory.
+            skip_line(&mut log)?;
         }
         let line = raw.trim_ascii();
         if line.is_empty() {
@@ -63,6 +79,7 @@ pub fn tally(mut log: impl BufRead, text: CommandText) -> io::Result<Tally> {
         }
         let object = std::str::from_utf8(line)
             .ok()
+            .filter(|_| !overlong)
             .and_then(|s| serde_json::from_str::<Value>(s).ok())
             .filter(Value::is_object);
         let (class, command) = match &object {
@@ -78,6 +95,22 @@ pub fn tally(mut log: impl BufRead, text: CommandText) -> io::Result<Tally> {
         bump(&mut tally.classes, class);
         if let (CommandText::Show, Some(command)) = (text, command) {
             bump(tally.commands.entry(class.to_owned()).or_default(), command);
+        }
+    }
+}
+
+/// Consumes through the next newline (or the end) without keeping any of it.
+fn skip_line(log: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let buf = log.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(());
+        }
+        let newline = buf.iter().position(|b| *b == b'\n');
+        let used = newline.map_or(buf.len(), |i| i + 1);
+        log.consume(used);
+        if newline.is_some() {
+            return Ok(());
         }
     }
 }
@@ -161,6 +194,21 @@ mod tests {
         let mut out = Vec::new();
         assert!(t.write_to(20, &mut out).is_ok());
         assert_eq!(out, b"1\ta\n1\tinvalid\n2\ttotal\n");
+    }
+
+    #[test]
+    fn an_overlong_line_is_invalid_and_the_next_line_is_still_read() {
+        let log = "{\"class\":\"a\"}\n\
+                   {\"class\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n\
+                   {\"class\":\"b\"}\n\
+                   {\"class\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}";
+        // 14 bytes fit; the long lines (the last has no newline) do not.
+        let Ok(t) = tally_capped(log.as_bytes(), CommandText::Hide, 14) else {
+            panic!("reads");
+        };
+        let mut out = Vec::new();
+        assert!(t.write_to(20, &mut out).is_ok());
+        assert_eq!(out, b"2\tinvalid\n1\ta\n1\tb\n4\ttotal\n");
     }
 
     #[test]

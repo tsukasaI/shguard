@@ -85,6 +85,18 @@ fn show_commands_adds_the_commands_under_their_class() {
 }
 
 #[test]
+fn an_overlong_line_is_invalid_and_later_lines_are_counted() {
+    let dir = ok(tempfile::tempdir());
+    let mut body = String::from("{\"class\":\"a\"}\n{\"class\":\"");
+    body.push_str(&"x".repeat(3 * 1024 * 1024));
+    body.push_str("\"}\n{\"class\":\"a\"}\n");
+    let log = fixture(dir.path(), body.as_bytes());
+    let out = shguard(dir.path(), &["report", &log], b"");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(text(&out.stdout), "2\ta\n1\tinvalid\n3\ttotal\n");
+}
+
+#[test]
 fn only_twenty_classes_are_listed_but_the_total_counts_all() {
     let dir = ok(tempfile::tempdir());
     let mut body = String::new();
@@ -115,6 +127,8 @@ fn a_missing_file_fails_and_a_misused_command_is_a_usage_error() {
         &["report", "--show-commands"],
         &["report", "--bogus", "x"],
         &["report", "a", "b"],
+        &["report", "a", "--show-commands"],
+        &["report", "--show-commands", "a", "b"],
     ] {
         let out = shguard(dir.path(), args, b"");
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");

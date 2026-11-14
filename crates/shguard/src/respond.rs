@@ -496,6 +496,9 @@ short = "a"
         assert_eq!(c("ls -l"), Some("allow"));
         assert_eq!(c("uname"), Some("allow_user_row"));
         assert_eq!(c("ls -a"), Some("rule_hit"));
+        let block =
+            "[[rule]]\nid = \"ls-a\"\nkey = [\"ls\"]\nopts = [[\"-a\"]]\noutcome = \"block\"\n";
+        assert_eq!(class_of(block, &bash("ls -a")), Some("rule_hit"));
         assert_eq!(c("nothere"), Some("unknown:no_row"));
         assert_eq!(c("ls -z"), Some("unknown:unknown_option"));
         assert_eq!(c("echo $(id)"), Some("parse_refusal:unquoted_dollar"));

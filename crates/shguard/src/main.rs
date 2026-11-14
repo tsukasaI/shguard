@@ -93,23 +93,33 @@ fn is_option(arg: &OsString) -> bool {
 }
 
 /// `shguard report`: counts the decision log at `path` by class on stdout.
-/// An unreadable file is reported on stderr and exits 1.
+/// A log it cannot read, or a report it cannot write (a closed pipe), is
+/// reported on stderr and exits 1.
 fn report_log(path: &Path, text: report::CommandText) -> ExitCode {
     let counted = std::fs::File::open(path)
         .map(std::io::BufReader::new)
         .and_then(|log| report::tally(log, text));
-    let written = counted.and_then(|t| {
-        let mut out = std::io::stdout().lock();
-        t.write_to(report::DEFAULT_LIMIT, &mut out)
-            .and_then(|()| out.flush())
-    });
-    match written {
+    let tally = match counted {
+        Ok(t) => t,
+        Err(e) => {
+            drop(writeln!(
+                std::io::stderr().lock(),
+                "shguard report: cannot read {}: {e}",
+                path.display()
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut out = std::io::stdout().lock();
+    match tally
+        .write_to(report::DEFAULT_LIMIT, &mut out)
+        .and_then(|()| out.flush())
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             drop(writeln!(
                 std::io::stderr().lock(),
-                "shguard report: {}: {e}",
-                path.display()
+                "shguard report: cannot write the report: {e}"
             ));
             ExitCode::FAILURE
         }
