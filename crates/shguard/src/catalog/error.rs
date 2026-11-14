@@ -1,6 +1,28 @@
-//! The loader's error type.
+//! The loader's error and warning types.
 
 use thiserror::Error;
+
+/// A finding that does not stop a catalog from loading. The loader returns
+/// warnings beside the catalog and prints nothing; `shguard check` prints
+/// them, and the hook never does.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum LoadWarning {
+    /// A row's head can run other code (an interpreter, shell, wrapper or
+    /// remote session, or a tool whose options the grammar cannot express),
+    /// and the row does not set `runs_code`. The row lets shguard Allow
+    /// commands under that head that it covers, so the user owns what that
+    /// Allow lets through.
+    #[error(
+        "{file:?}: row \"{row}\": head can run other code, and the row does not set `runs_code`, so shguard can Allow commands under it; set `runs_code = true` to keep them an Ask"
+    )]
+    CodeRunningHead {
+        /// Name of the file, as passed to the loader.
+        file: String,
+        /// Key of the row, segments joined with spaces, with every non-ASCII
+        /// character escaped.
+        row: String,
+    },
+}
 
 /// A problem found while loading catalog files. Every variant names the file
 /// and where in it: a row (its key joined with spaces) or a rule (its id).
@@ -95,14 +117,6 @@ pub enum LoadError {
         file: String,
         /// Key of the child row that lacks `cwd_sensitive`, segments joined
         /// with spaces.
-        row: String,
-    },
-    /// A row whose head the grammar cannot express (#1039) does not run code.
-    #[error("{file:?}: row {row:?}: head is not expressible, so the row must set `runs_code`")]
-    DenylistedHead {
-        /// Name of the file, as passed to the loader.
-        file: String,
-        /// Key of the row, segments joined with spaces.
         row: String,
     },
     /// A row head holds a `/` (`/bin/bash`, `/opt/homebrew/bin/fd`). The

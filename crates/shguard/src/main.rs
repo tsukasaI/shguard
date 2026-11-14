@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use shguard::catalog::{EMBEDDED, LoadError, Origin, Source, load};
+use shguard::catalog::{EMBEDDED, LoadError, Origin, Source, load_with_warnings};
 use shguard::config::{Location, Settings, locate, settings};
 use shguard::hook::{Response, panic_output, render, to_bytes};
 use shguard::respond::{INPUT_CAP, answer};
@@ -276,7 +276,12 @@ fn note_embedded_only(location: &Location, err: &mut impl Write) {
 /// a path the hook cannot write passes and fails only when the hook writes it.
 fn check_config(location: Location, err: &mut impl Write) -> ExitCode {
     match load_settings(location) {
-        Ok(_) => ExitCode::SUCCESS,
+        Ok(s) => {
+            for w in &s.warnings {
+                drop(writeln!(err, "warning: {w}"));
+            }
+            ExitCode::SUCCESS
+        }
         Err(errors) => {
             for e in errors {
                 drop(writeln!(err, "{e}"));
@@ -311,11 +316,18 @@ fn check(files: &[PathBuf], err: &mut impl Write) -> ExitCode {
                 text,
             })
             .collect();
-        if let Err(errors) = load(&sources) {
-            for e in errors {
-                drop(writeln!(err, "{e}"));
+        match load_with_warnings(&sources) {
+            Ok(checked) => {
+                for w in &checked.warnings {
+                    drop(writeln!(err, "warning: {w}"));
+                }
             }
-            failed = true;
+            Err(errors) => {
+                for e in errors {
+                    drop(writeln!(err, "{e}"));
+                }
+                failed = true;
+            }
         }
     }
     if failed {

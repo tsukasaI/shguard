@@ -16,7 +16,9 @@
 //! checks as every catalog file, so a duplicate key against an embedded row
 //! is a load error. A longer user key still shadows its parent for the
 //! commands it matches. A user `[[row]]` widens Allow and the user owns
-//! that. Under `ask_outcome = "ask"` an embedded Block holds only for
+//! that; an Allow that only a user row gives says so in the hook reason. A
+//! row for a head that can run other code and does not set `runs_code` loads
+//! with a warning, which `shguard check` prints. Under `ask_outcome = "ask"` an embedded Block holds only for
 //! commands the catalog covers: an unknown option makes the command
 //! uncovered, so it is an Ask. `SHGUARD_CONFIG` must be an absolute path.
 //! `decision_log` must be absolute (the only thing the loader checks) and its
@@ -34,7 +36,7 @@ use std::path::PathBuf;
 
 pub use crate::catalog::AskOutcome;
 use crate::catalog::load::{load_files, parse_sources};
-use crate::catalog::{LoadError, Loaded, Origin, Source, parse_config};
+use crate::catalog::{Checked, LoadError, LoadWarning, Loaded, Origin, Source, parse_config};
 
 /// What the hook runs with.
 #[derive(Debug)]
@@ -45,6 +47,14 @@ pub struct Settings {
     pub decision_log: Option<PathBuf>,
     /// The merged catalog and rules.
     pub loaded: Loaded,
+    /// The embedded rows and rules alone, kept only when the config adds a
+    /// `[[row]]`: without one, `loaded` already is the embedded catalog as
+    /// far as an Allow goes, so the hook needs no second catalog to tell a
+    /// user-row Allow from an embedded one.
+    pub embedded_only: Option<Loaded>,
+    /// What the loader found that does not stop the load. `shguard check`
+    /// prints them; the hook never does.
+    pub warnings: Vec<LoadWarning>,
 }
 
 /// Where the config file is.
@@ -99,21 +109,32 @@ pub fn settings(
     let mut files = parse_sources(embedded, &mut errs);
     let mut ask_outcome = AskOutcome::default();
     let mut decision_log = None;
+    let mut adds_rows = false;
     if let Some((name, text)) = config {
         match parse_config(name, text) {
             Ok((head, f)) => {
                 ask_outcome = head.ask_outcome;
                 decision_log = head.decision_log;
+                adds_rows = f.has_rows();
                 files.push((name.to_owned(), Origin::User, f));
             }
             Err(e) => errs.push(e),
         }
     }
-    let loaded = load_files(files, errs)?;
+    let Checked { loaded, warnings } = load_files(files, errs)?;
+    let embedded_only = if adds_rows {
+        let mut none = Vec::new();
+        let files = parse_sources(embedded, &mut none);
+        Some(load_files(files, none)?.loaded)
+    } else {
+        None
+    };
     Ok(Settings {
         ask_outcome,
         decision_log,
         loaded,
+        embedded_only,
+        warnings,
     })
 }
 

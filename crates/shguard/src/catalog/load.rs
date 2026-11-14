@@ -11,16 +11,16 @@ use shguard_kernel::catalog::{
 };
 use shguard_kernel::rule::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
 
-use super::LoadError;
 use super::dto::{
     AskOutcome, ConfigDto, DashDashDto, FileDto, HintDto, OptDto, OrderDto, OutcomeDto, PatKindDto,
     PlusWordsDto, RoleDto, RowDto, RuleDto, ScopeDto, TargetDto, ValueDto,
 };
+use super::{LoadError, LoadWarning};
 
-/// Command heads that get no coverable row, whatever the user config says.
-/// A row for one of them must set `runs_code`, so it can never cover a
-/// command: such a command is an Ask by Unknown. Each head is here for one
-/// of these reasons:
+/// Command heads that the embedded catalog never gives a coverable row. A
+/// user row for one of them that does not set `runs_code` still loads, with a
+/// [`LoadWarning::CodeRunningHead`]; with `runs_code` it keeps every command
+/// under it an Ask. Each head is here for one of these reasons:
 ///
 /// - its option syntax is outside the grammar: dash-less bundles (`tar xf`)
 ///   or single-dash long options (`find -exec`, `ps -ef`, #1039);
@@ -406,7 +406,17 @@ struct Entry {
     row: Option<Row>,
 }
 
-/// Loads and checks catalog files.
+/// A catalog that loaded, with the warnings found while loading it.
+#[derive(Debug)]
+pub struct Checked {
+    /// The loaded catalog.
+    pub loaded: Loaded,
+    /// What the loader found that does not stop the load, in file order.
+    pub warnings: Vec<LoadWarning>,
+}
+
+/// Loads and checks catalog files, and drops the warnings; see
+/// [`load_with_warnings`].
 ///
 /// A TOML or schema error stops that file only; the rows and rules of the
 /// other files are still merged and checked, and every error is returned.
@@ -415,6 +425,16 @@ struct Entry {
 ///
 /// Every [`LoadError`] found, if there is at least one.
 pub fn load(sources: &[Source<'_>]) -> Result<Loaded, Vec<LoadError>> {
+    load_with_warnings(sources).map(|checked| checked.loaded)
+}
+
+/// Loads and checks catalog files like [`load`], and returns the
+/// [`LoadWarning`]s beside the catalog. The loader prints nothing.
+///
+/// # Errors
+///
+/// Every [`LoadError`] found, if there is at least one.
+pub fn load_with_warnings(sources: &[Source<'_>]) -> Result<Checked, Vec<LoadError>> {
     let mut errs = Vec::new();
     let files = parse_sources(sources, &mut errs);
     load_files(files, errs)
@@ -439,6 +459,13 @@ pub(crate) fn parse_sources(
 /// against the other files.
 #[derive(Debug)]
 pub struct ParsedFile(FileDto);
+
+impl ParsedFile {
+    /// Whether the file has at least one `[[row]]`.
+    pub(crate) fn has_rows(&self) -> bool {
+        !self.0.row.is_empty()
+    }
+}
 
 /// Parses one catalog file.
 ///
@@ -540,13 +567,14 @@ fn is_legacy(text: &str) -> bool {
 pub(crate) fn load_files(
     files: Vec<(String, Origin, ParsedFile)>,
     mut errs: Vec<LoadError>,
-) -> Result<Loaded, Vec<LoadError>> {
+) -> Result<Checked, Vec<LoadError>> {
+    let mut warnings = Vec::new();
     let mut entries = Vec::new();
     let mut rule_dtos: Vec<(String, RuleDto)> = Vec::new();
     let mut hints: Vec<(Hint, Origin)> = Vec::new();
     for (name, origin, ParsedFile(file)) in files {
         for row in file.row {
-            entries.push(build_row(&name, row, &mut errs));
+            entries.push(build_row(&name, row, &mut errs, &mut warnings));
         }
         rule_dtos.extend(file.rule.into_iter().map(|r| (name.clone(), r)));
         // A user hint replaces an embedded hint with the same key; two
@@ -615,12 +643,15 @@ pub(crate) fn load_files(
         return Err(errs);
     }
     let rows = entries.into_iter().filter_map(|e| e.row).collect();
-    Ok(Loaded {
-        catalog: Catalog::new(rows, Vec::new()),
-        rules,
-        rule_ids,
-        rule_reasons,
-        hints: hints.into_iter().map(|(h, _)| h).collect(),
+    Ok(Checked {
+        loaded: Loaded {
+            catalog: Catalog::new(rows, Vec::new()),
+            rules,
+            rule_ids,
+            rule_reasons,
+            hints: hints.into_iter().map(|(h, _)| h).collect(),
+        },
+        warnings,
     })
 }
 
@@ -740,7 +771,12 @@ fn opt_name(file: &str, row: &str, dto: &OptDto, errs: &mut Vec<LoadError>) -> O
     }
 }
 
-fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
+fn build_row(
+    file: &str,
+    dto: RowDto,
+    errs: &mut Vec<LoadError>,
+    warnings: &mut Vec<LoadWarning>,
+) -> Entry {
     let label = dto.key.join(" ");
     let key = seg_bytes(&dto.key);
     let before = errs.len();
@@ -764,9 +800,9 @@ fn build_row(file: &str, dto: RowDto, errs: &mut Vec<LoadError>) -> Entry {
         });
     }
     if key_valid && !dto.runs_code && key.first().is_some_and(|h| is_inexpressible(h)) {
-        errs.push(LoadError::DenylistedHead {
+        warnings.push(LoadWarning::CodeRunningHead {
             file: file.to_owned(),
-            row: label.clone(),
+            row: label.escape_default().to_string(),
         });
     }
     if key.first().is_some_and(|h| h.contains(&b'/')) {

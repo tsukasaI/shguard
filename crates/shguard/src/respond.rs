@@ -6,7 +6,8 @@
 //!    with the first load error, whatever `ask_outcome` says.
 //! 3. Input that is not the hook contract, an empty command and a command
 //!    outside the parsed subset are Asks.
-//! 4. Otherwise the kernel decides.
+//! 4. Otherwise the kernel decides. An Allow that the embedded catalog alone
+//!    would not give (it needs a user `[[row]]`) says so in its reason.
 //! 5. Every Ask goes through `ask_outcome`; a Block is always a deny.
 //!
 //! The reasons say what was found. None of them says a command is safe, and
@@ -25,9 +26,28 @@ use crate::hook::{Request, Response, parse_request};
 /// The most stdin the hook reads. More is malformed.
 pub const INPUT_CAP: usize = 1024 * 1024;
 
+/// Where the catalog coverage behind an Allow comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AllowKind {
+    /// The embedded catalog covers the command.
+    Catalog,
+    /// The embedded catalog alone would not Allow the command; a user `[[row]]`
+    /// covers it.
+    UserRow,
+}
+
+impl AllowKind {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Catalog => "covered by the catalog; no rule hit",
+            Self::UserRow => "covered by the catalog through a user [[row]]; no rule hit",
+        }
+    }
+}
+
 /// What the flow concluded before `ask_outcome` is applied.
 enum Judged {
-    Allow(String),
+    Allow(AllowKind),
     Ask(String),
     Deny(String),
 }
@@ -63,7 +83,7 @@ fn response(request: Request, settings: Result<&Settings, &[LoadError]>) -> Resp
 
 fn settle(judged: Judged, settings: &Settings) -> Response {
     match judged {
-        Judged::Allow(r) => Response::Allow(r),
+        Judged::Allow(kind) => Response::Allow(kind.reason().to_owned()),
         Judged::Deny(r) => Response::Deny(r),
         Judged::Ask(r) => match settings.ask_outcome {
             AskOutcome::Ask => Response::Ask(r),
@@ -99,9 +119,31 @@ fn judge(command: &str, settings: &Settings) -> Judged {
     };
     let loaded = &settings.loaded;
     match decide(&loaded.catalog, &loaded.rules, script) {
-        Verdict::Allow(_) => Judged::Allow("covered by the catalog; no rule hit".to_owned()),
+        Verdict::Allow(_) => Judged::Allow(allow_kind(command, settings)),
         Verdict::Ask(script, reason) => Judged::Ask(reason_text(&reason, &script, loaded)),
         Verdict::Block(script, reason) => Judged::Deny(reason_text(&reason, &script, loaded)),
+    }
+}
+
+/// Whether the embedded catalog alone would Allow `command` too. Only
+/// `Settings::embedded_only` is consulted: it is `None` when the config adds
+/// no `[[row]]`, and then no user row can have made the Allow. A command that
+/// parsed once parses again; if it somehow did not, the Allow is called a
+/// user-row one, the conservative label.
+fn allow_kind(command: &str, settings: &Settings) -> AllowKind {
+    let Some(embedded) = &settings.embedded_only else {
+        return AllowKind::Catalog;
+    };
+    let embedded_allows = parse(command.as_bytes()).is_ok_and(|s| {
+        matches!(
+            decide(&embedded.catalog, &embedded.rules, s),
+            Verdict::Allow(_)
+        )
+    });
+    if embedded_allows {
+        AllowKind::Catalog
+    } else {
+        AllowKind::UserRow
     }
 }
 
@@ -328,6 +370,40 @@ short = "a"
         // The hook reason carries the text.
         let r = |cmd: &str| reason(&respond(&bash(cmd), Ok(&with))).to_owned();
         assert!(r("find . -name x").contains("use fd or rg --files"));
+    }
+
+    fn allow_reason_for(cfg: &str, cmd: &str) -> (String, Value) {
+        let embedded = [Source {
+            origin: Origin::Embedded,
+            name: "t.toml",
+            text: CATALOG,
+        }];
+        let s = match settings(&embedded, Some(("c.toml", cfg))) {
+            Ok(s) => s,
+            Err(e) => panic!("{e:?}"),
+        };
+        let (command, response) = answer(&bash(cmd), Ok(&s));
+        assert_eq!(decision(&render(&response)), Some("allow"), "{cmd}");
+        let line = crate::decision_log::entry(1, command.as_deref(), &response);
+        (
+            reason(&render(&response)).to_owned(),
+            line.unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn an_allow_that_needs_a_user_row_says_so() {
+        let user_row = "[[row]]\nkey = [\"uname\"]\nsource = \"https://example.com\"\n\
+                        order = \"permute\"\ndashdash = \"ends\"\n";
+        let (user, logged) = allow_reason_for(user_row, "uname");
+        assert_eq!(user, AllowKind::UserRow.reason());
+        assert_eq!(logged["reason"], AllowKind::UserRow.reason());
+        // The embedded catalog already Allows `ls`, with or without a user row.
+        let (embedded, _) = allow_reason_for(user_row, "ls -l");
+        assert_eq!(embedded, AllowKind::Catalog.reason());
+        let (none, _) = allow_reason_for("", "ls -l");
+        assert_eq!(none, AllowKind::Catalog.reason());
+        assert_ne!(AllowKind::UserRow.reason(), AllowKind::Catalog.reason());
     }
 
     #[test]
