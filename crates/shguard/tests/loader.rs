@@ -280,8 +280,10 @@ fn case_variant_head_of_option_key_still_collides() {
     ])
     .unwrap_err();
     assert!(
-        errs.iter()
-            .any(|e| matches!(e, LoadError::DuplicateRow { file, .. } if file == "user.toml")),
+        errs.iter().any(|e| matches!(
+            e,
+            LoadError::DuplicateRow { file, row, .. } if file == "user.toml" && row == "FD -x"
+        )),
         "{errs:?}"
     );
 }
