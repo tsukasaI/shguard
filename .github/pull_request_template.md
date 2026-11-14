@@ -18,9 +18,7 @@ reads as a different or code-running option. One line per spelling tried:
   spelling tried -> what the tool does with it -> shguard decision -> evidence (doc/source/run)
 
 The decision is what a build of shguard returns (hook JSON on stdin). Cover
-option clusters, abbreviated long options, --opt=value vs separate value,
---opt= (empty value), --no- forms, attached short values (-ofile), options
-after operands, --, +word, case variants and code-running options.
+the spellings listed in CLAUDE.md, "Tests and catalog".
 -->
 
 N/A: no catalog row changes
