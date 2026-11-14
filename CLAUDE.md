@@ -139,6 +139,12 @@ singletons, newtypes and enums instead of flag structs.
 - Tests pin only command to decision, never messages or rule ids.
 - Every catalog row records its upstream source (GNU/BSD docs or source). The
   catalog loader (M12) rejects a row without one.
+- A PR that adds or changes a `catalog/*.toml` row needs a P2 audit, recorded
+  in a "P2 audit" section of the PR body: each spelling tried against the row
+  (option clusters, abbreviated long options, `--opt=value` vs separate value,
+  `--`, `+word`, case variants, code-running options, ...) and the decision
+  shguard gives it, checked against the real tool's argv parsing (its docs or
+  source, per the row's `source`).
 
 ## Tooling facts
 
