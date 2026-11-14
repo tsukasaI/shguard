@@ -31,7 +31,9 @@ jobs:
       - name: Acceptance soft report
         run: cargo test -p shguard --locked --test acceptance_report -- --ignored --nocapture
       - name: The soft report wrote nothing
-        run: test -z "$(git status --porcelain -- acceptance/)"
+        run: |
+          out=$(git status --porcelain -- acceptance/)
+          test -z "$out" || { echo "$out"; exit 1; }
       # The spike has its own lockfile. A nix-form one, with no source or
       # checksum for creusot-std, must not land there either (#1020).
       - name: Spike lockfile is the registry form
