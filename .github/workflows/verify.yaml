@@ -32,8 +32,9 @@ jobs:
         run: cargo test -p shguard --locked --test acceptance_report -- --ignored --nocapture
       - name: The soft report wrote nothing
         run: |
-          out=$(git status --porcelain -- acceptance/)
-          test -z "$out" || { echo "$out"; exit 1; }
+          git ls-files --error-unmatch acceptance/baseline/old_ask_new_allow.jsonl > /dev/null
+          out=$(git status --porcelain -- acceptance/) || exit 1
+          test -z "$out" || { echo "::error::the soft report changed files under acceptance/"; echo "$out"; exit 1; }
       # The spike has its own lockfile. A nix-form one, with no source or
       # checksum for creusot-std, must not land there either (#1020).
       - name: Spike lockfile is the registry form
