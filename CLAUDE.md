@@ -139,12 +139,18 @@ singletons, newtypes and enums instead of flag structs.
 - Tests pin only command to decision, never messages or rule ids.
 - Every catalog row records its upstream source (GNU/BSD docs or source). The
   catalog loader (M12) rejects a row without one.
-- A PR that adds or changes a `catalog/*.toml` row needs a P2 audit, recorded
-  in a "P2 audit" section of the PR body: each spelling tried against the row
+- A PR that adds or changes a `catalog/*.toml` row needs a P2 audit: an
+  adversarial search for a spelling the row Allows that the real tool reads as
+  a different or code-running option. A row counts as changed when any field or
+  `[[row.opt]]` entry is added or changed (a new row included); deleting a row
+  or editing only `[[rule]]`/`[[hint]]` needs none. Record it in a "P2 audit"
+  section of the PR body (copy it from `.github/pull_request_template.md`;
+  `gh pr create --body-file` does not apply the template): each spelling tried
   (option clusters, abbreviated long options, `--opt=value` vs separate value,
-  `--`, `+word`, case variants, code-running options, ...) and the decision
-  shguard gives it, checked against the real tool's argv parsing (its docs or
-  source, per the row's `source`).
+  `--opt=`, `--no-` forms, attached short values like `-ofile`, options after
+  operands, `--`, `+word`, case variants, code-running options, ...), the
+  decision a build of shguard returns for it (hook JSON on stdin), and the real
+  tool's argv parsing (its source, or running it, when the docs are silent).
 
 ## Tooling facts
 

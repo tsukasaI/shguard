@@ -1,8 +1,10 @@
-## Summary
+<!-- What changes and why. Closes #N. -->
 
-<!-- What changes and why. Link the issue: Closes #N. -->
+## Change
 
-## Tests
+<!-- Files touched and what each change does. -->
+
+## Verification
 
 <!-- Commands run and their results. -->
 
@@ -10,12 +12,15 @@
 
 <!--
 Required when a catalog/*.toml row is added or changed (see CLAUDE.md,
-"Tests and catalog"). One line per spelling tried against the row:
+"Tests and catalog"). Goal: find a spelling the row Allows that the real tool
+reads as a different or code-running option. One line per spelling tried:
 
-  spelling tried -> shguard decision -> upstream evidence (doc or source)
+  spelling tried -> what the tool does with it -> shguard decision -> evidence (doc/source/run)
 
-Cover option clusters, abbreviated long options, --opt=value vs separate
-value, --, +word, case variants and code-running options.
+The decision is what a build of shguard returns (hook JSON on stdin). Cover
+option clusters, abbreviated long options, --opt=value vs separate value,
+--opt= (empty value), --no- forms, attached short values (-ofile), options
+after operands, --, +word, case variants and code-running options.
 -->
 
 N/A: no catalog row changes
