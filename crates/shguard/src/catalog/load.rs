@@ -100,6 +100,8 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
     b"tclsh",
     b"expect",
     b"pwsh",
+    b"pwsh-preview",
+    b"pwsh-lts",
     b"osascript",
     b"python2",
     b"gtimeout",
@@ -122,13 +124,15 @@ const INEXPRESSIBLE_HEADS: &[&[u8]] = &[
 /// Interpreters whose binaries carry a version suffix (`ruby3.1`, `python-3.10`).
 const VERSIONED_INTERPRETERS: &[&[u8]] = &[
     b"python", b"perl", b"ruby", b"php", b"lua", b"luajit", b"pwsh", b"pypy", b"ipython", b"tclsh",
+    b"wish",
 ];
 
 /// Whether `head` is an [`INEXPRESSIBLE_HEADS`] entry, compared in ASCII
 /// lower case, or an interpreter name from [`VERSIONED_INTERPRETERS`]
 /// followed by a digit, or by `-` and a digit (`python3.10`, `perl5.30`,
-/// `python-3.10`, `luajit-2.1.0-beta3`), or `python`
-/// followed by the framework GUI build's `w` (`pythonw`, `pythonw3.12`).
+/// `python-3.10`, `luajit-2.1.0-beta3`), or `pythonw`
+/// (the framework GUI build) alone or followed by the same version suffix
+/// (`pythonw3.12`, `pythonw-3.12`).
 ///
 /// Not an exact byte match: the default macOS filesystem is case-insensitive,
 /// so `ENV` and `Python3` reach the same binary, and the version suffix is
@@ -143,7 +147,7 @@ fn is_inexpressible(head: &[u8]) -> bool {
     });
     let versioned_pythonw = lower
         .strip_prefix(b"pythonw")
-        .is_some_and(|suffix| matches!(suffix, [] | [b'0'..=b'9', ..]));
+        .is_some_and(|suffix| matches!(suffix, [] | [b'0'..=b'9', ..] | [b'-', b'0'..=b'9', ..]));
     versioned || versioned_pythonw || INEXPRESSIBLE_HEADS.contains(&lower.as_slice())
 }
 
