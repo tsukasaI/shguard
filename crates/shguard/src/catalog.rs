@@ -14,8 +14,8 @@ pub(crate) mod load;
 
 pub use dto::AskOutcome;
 pub use embedded::EMBEDDED;
-pub use error::LoadError;
+pub use error::{LoadError, LoadWarning};
 pub use load::{
-    ConfigHead, GuidanceText, Hint, Loaded, Origin, ParsedFile, Source, TEXT_CAP, load,
-    parse_config,
+    Checked, ConfigHead, GuidanceText, Hint, Loaded, Origin, ParsedFile, Source, TEXT_CAP, load,
+    load_with_warnings, parse_config,
 };

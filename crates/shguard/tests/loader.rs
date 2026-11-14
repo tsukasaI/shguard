@@ -459,31 +459,70 @@ fn denylisted_head() {
     ] {
         let t = row(&format!("\"{head}\""), "");
         assert!(
-            matches!(errors(&t)[0], LoadError::DenylistedHead { .. }),
+            matches!(
+                checked_warnings(&t)[..],
+                [shguard::catalog::LoadWarning::CodeRunningHead { .. }]
+            ),
             "{head}"
         );
         let ok = row(&format!("\"{head}\""), "runs_code = true");
-        assert!(load_one(&ok).is_ok(), "{head}");
+        assert!(checked_warnings(&ok).is_empty(), "{head}");
     }
     // Only `w` alone or before a digit is denylisted.
     for head in ["pythonwx", "pythonic"] {
-        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+        assert!(
+            checked_warnings(&row(&format!("\"{head}\""), "")).is_empty(),
+            "{head}"
+        );
     }
     // A versioned interpreter needs a digit right after its name.
     for head in ["perlx", "phpize", "rubygems"] {
-        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+        assert!(
+            checked_warnings(&row(&format!("\"{head}\""), "")).is_empty(),
+            "{head}"
+        );
     }
     // A hyphen after a versioned interpreter's name must be followed by a digit.
     for head in ["php-config", "perl-rename", "ruby-build"] {
-        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+        assert!(
+            checked_warnings(&row(&format!("\"{head}\""), "")).is_empty(),
+            "{head}"
+        );
     }
     // A hyphen after pythonw, and a longer word after wish, must not be a version.
     for head in ["pythonw-x", "wishful"] {
-        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+        assert!(
+            checked_warnings(&row(&format!("\"{head}\""), "")).is_empty(),
+            "{head}"
+        );
     }
     // A bare hyphen with no digit after it is not a version either.
     for head in ["wish-x", "pythonw-"] {
-        assert!(load_one(&row(&format!("\"{head}\""), "")).is_ok(), "{head}");
+        assert!(
+            checked_warnings(&row(&format!("\"{head}\""), "")).is_empty(),
+            "{head}"
+        );
+    }
+}
+
+/// The warnings of a catalog that must load.
+fn checked_warnings(text: &str) -> Vec<shguard::catalog::LoadWarning> {
+    let sources = [Source {
+        origin: Origin::User,
+        name: "t.toml",
+        text,
+    }];
+    match shguard::catalog::load_with_warnings(&sources) {
+        Ok(checked) => checked.warnings,
+        Err(e) => panic!("load failed: {e:?}"),
+    }
+}
+
+#[test]
+fn the_embedded_catalog_loads_without_warnings() {
+    match shguard::catalog::load_with_warnings(shguard::catalog::EMBEDDED) {
+        Ok(checked) => assert!(checked.warnings.is_empty(), "{:?}", checked.warnings),
+        Err(e) => panic!("the embedded catalog does not load: {e:?}"),
     }
 }
 
@@ -1269,6 +1308,61 @@ fn check_subcommand_status() {
     assert_eq!(run_check(&[&dir.path().join("missing.toml")]), Some(1));
     // `check` with no files, and the bare binary, are covered in
     // `hook_contract.rs`.
+}
+
+#[test]
+fn check_prints_a_warning_and_still_exits_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("warn.toml");
+    std::fs::write(&file, row("\"bash\"", "")).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let check = |path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_shguard"))
+            .arg("check")
+            .arg(path)
+            .env("HOME", home.path())
+            .env_remove("SHGUARD_CONFIG")
+            .output()
+            .unwrap()
+    };
+    let out = check(&file);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(!out.stderr.is_empty(), "the warning goes to stderr");
+    let clean = dir.path().join("clean.toml");
+    std::fs::write(&clean, row("\"ls\"", "")).unwrap();
+    let out = check(&clean);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(out.stderr.is_empty());
+}
+
+#[test]
+fn the_hook_stays_silent_on_a_warned_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, row("\"bash\"", "")).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_shguard"));
+    cmd.env("HOME", home.path()).env("SHGUARD_CONFIG", &config);
+    let out = common::spawn(cmd, &common::bash("bash"));
+    assert_eq!(common::decision(&out).as_deref(), Some("allow"), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+}
+
+#[test]
+fn check_config_prints_the_warning_and_exits_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, row("\"bash\"", "")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
+        .args(["check", "--config"])
+        .arg(&config)
+        .env("HOME", home.path())
+        .env_remove("SHGUARD_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(!out.stderr.is_empty(), "the warning goes to stderr");
 }
 
 fn run_check_config(args: &[&std::path::Path], home: &std::path::Path) -> Option<i32> {
