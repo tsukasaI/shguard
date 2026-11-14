@@ -74,7 +74,7 @@ fn tally_capped(mut log: impl BufRead, text: CommandText, cap: usize) -> io::Res
             skip_line(&mut log)?;
         }
         let line = raw.trim_ascii();
-        if line.is_empty() {
+        if line.is_empty() && !overlong {
             continue;
         }
         let object = std::str::from_utf8(line)
@@ -209,6 +209,20 @@ mod tests {
         let mut out = Vec::new();
         assert!(t.write_to(20, &mut out).is_ok());
         assert_eq!(out, b"2\tinvalid\n1\ta\n1\tb\n4\ttotal\n");
+    }
+
+    #[test]
+    fn an_overlong_line_of_whitespace_is_invalid_not_skipped() {
+        let log = format!(
+            "{}\n{{\"class\":\"x\"}}\n{{\"class\":\"a\"}}\n",
+            " ".repeat(30)
+        );
+        let Ok(t) = tally_capped(log.as_bytes(), CommandText::Hide, 14) else {
+            panic!("reads");
+        };
+        let mut out = Vec::new();
+        assert!(t.write_to(20, &mut out).is_ok());
+        assert_eq!(out, b"1\ta\n1\tinvalid\n1\tx\n3\ttotal\n");
     }
 
     #[test]
