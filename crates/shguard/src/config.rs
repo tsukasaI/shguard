@@ -17,9 +17,10 @@
 //! is a load error. A longer user key still shadows its parent for the
 //! commands it matches. A user `[[row]]` widens Allow and the user owns
 //! that; an Allow that only a user row gives says so in the hook reason. A
-//! row for a head that can run other code and does not set `runs_code` loads
-//! with a warning, which `shguard check` prints. Under `ask_outcome = "ask"` an embedded Block holds only for
-//! commands the catalog covers: an unknown option makes the command
+//! row for a head that runs other code or has option syntax the grammar
+//! cannot express, and does not set `runs_code`, loads with a warning, which
+//! `shguard check` prints. Under `ask_outcome = "ask"` an embedded Block holds
+//! only for commands the catalog covers: an unknown option makes the command
 //! uncovered, so it is an Ask. `SHGUARD_CONFIG` must be an absolute path.
 //! `decision_log` must be absolute (the only thing the loader checks) and its
 //! directory must exist (a missing one fails only when the hook writes the

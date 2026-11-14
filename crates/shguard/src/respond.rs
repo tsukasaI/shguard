@@ -118,28 +118,28 @@ fn judge(command: &str, settings: &Settings) -> Judged {
         Err(u) => return Judged::Ask(format!("outside the supported subset: {u}")),
     };
     let loaded = &settings.loaded;
+    // `decide` consumes the script, and `Allowed` exposes none back, so the
+    // copy for the embedded-only decision is taken before it; only a config
+    // with a `[[row]]` pays for it.
+    let for_embedded = settings.embedded_only.as_ref().map(|e| (e, script.clone()));
     match decide(&loaded.catalog, &loaded.rules, script) {
-        Verdict::Allow(_) => Judged::Allow(allow_kind(command, settings)),
+        Verdict::Allow(_) => Judged::Allow(allow_kind(for_embedded)),
         Verdict::Ask(script, reason) => Judged::Ask(reason_text(&reason, &script, loaded)),
         Verdict::Block(script, reason) => Judged::Deny(reason_text(&reason, &script, loaded)),
     }
 }
 
-/// Whether the embedded catalog alone would Allow `command` too. Only
-/// `Settings::embedded_only` is consulted: it is `None` when the config adds
-/// no `[[row]]`, and then no user row can have made the Allow. A command that
-/// parsed once parses again; if it somehow did not, the Allow is called a
-/// user-row one, the conservative label.
-fn allow_kind(command: &str, settings: &Settings) -> AllowKind {
-    let Some(embedded) = &settings.embedded_only else {
+/// Whether the embedded catalog alone would Allow the script too. `None` means
+/// the config adds no `[[row]]` (`Settings::embedded_only`), so no user row can
+/// have made the Allow.
+fn allow_kind(for_embedded: Option<(&Loaded, Script)>) -> AllowKind {
+    let Some((embedded, script)) = for_embedded else {
         return AllowKind::Catalog;
     };
-    let embedded_allows = parse(command.as_bytes()).is_ok_and(|s| {
-        matches!(
-            decide(&embedded.catalog, &embedded.rules, s),
-            Verdict::Allow(_)
-        )
-    });
+    let embedded_allows = matches!(
+        decide(&embedded.catalog, &embedded.rules, script),
+        Verdict::Allow(_)
+    );
     if embedded_allows {
         AllowKind::Catalog
     } else {

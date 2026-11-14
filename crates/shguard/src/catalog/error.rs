@@ -7,13 +7,13 @@ use thiserror::Error;
 /// them, and the hook never does.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LoadWarning {
-    /// A row's head can run other code (an interpreter, shell, wrapper or
-    /// remote session, or a tool whose options the grammar cannot express),
-    /// and the row does not set `runs_code`. The row lets shguard Allow
-    /// commands under that head that it covers, so the user owns what that
-    /// Allow lets through.
+    /// A row's head runs other code (an interpreter, shell, wrapper or remote
+    /// session) or has option syntax the grammar cannot express (`ps`, `ar`,
+    /// `find`, `tar`), and the row does not set `runs_code`. The row lets
+    /// shguard Allow commands under that head that it covers, so the user
+    /// owns what that Allow lets through.
     #[error(
-        "{file:?}: row \"{row}\": head can run other code, and the row does not set `runs_code`, so shguard can Allow commands under it; set `runs_code = true` to keep them an Ask"
+        "{file:?}: row \"{row}\": head runs other code or has option syntax the grammar cannot express, and the row does not set `runs_code`, so shguard can Allow commands under it; set `runs_code = true` to keep them an Ask"
     )]
     CodeRunningHead {
         /// Name of the file, as passed to the loader.

@@ -4,16 +4,17 @@
 
 ### Changed
 
-- A user row for a head that can run other code (an interpreter, shell,
-  wrapper, remote session or tool whose options the grammar cannot express,
-  as the README lists) and that does not set `runs_code` is now a warning,
-  not a load error. Such a config failed to load on 0.12.0 and now loads, so
-  the row can make shguard Allow commands under that head. `shguard check`
-  and `shguard check --config` print each warning to stderr and exit 0; the
-  hook prints none. Set `runs_code = true` to keep the head an Ask.
+- A user row for a head that runs other code or has option syntax the
+  grammar cannot express (an interpreter, shell, wrapper, remote session,
+  `find`, `ps`, as the README lists) and that does not set `runs_code` is
+  now a warning, not a load error. Such a config failed to load on 0.12.0
+  and now loads, so the row can make shguard Allow commands under that head.
+  `shguard check` and `shguard check --config` print each warning to stderr
+  and exit 0; the hook prints none. Set `runs_code = true` to keep the head
+  an Ask (#1242).
 - The hook reason of an Allow that only a user `[[row]]` gives reads
   "covered by the catalog through a user [[row]]; no rule hit", and the
-  decision log line carries it.
+  decision log line carries it (#1242).
 
 ## 0.12.0 - 2026-11-10
 

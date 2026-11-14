@@ -1315,22 +1315,54 @@ fn check_prints_a_warning_and_still_exits_0() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("warn.toml");
     std::fs::write(&file, row("\"bash\"", "")).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
-        .arg("check")
-        .arg(&file)
-        .output()
-        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let check = |path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_shguard"))
+            .arg("check")
+            .arg(path)
+            .env("HOME", home.path())
+            .env_remove("SHGUARD_CONFIG")
+            .output()
+            .unwrap()
+    };
+    let out = check(&file);
     assert_eq!(out.status.code(), Some(0));
     assert!(!out.stderr.is_empty(), "the warning goes to stderr");
     let clean = dir.path().join("clean.toml");
     std::fs::write(&clean, row("\"ls\"", "")).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
-        .arg("check")
-        .arg(&clean)
-        .output()
-        .unwrap();
+    let out = check(&clean);
     assert_eq!(out.status.code(), Some(0));
     assert!(out.stderr.is_empty());
+}
+
+#[test]
+fn the_hook_stays_silent_on_a_warned_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, row("\"bash\"", "")).unwrap();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_shguard"));
+    cmd.env("HOME", home.path()).env("SHGUARD_CONFIG", &config);
+    let out = common::spawn(cmd, &common::bash("bash"));
+    assert_eq!(common::decision(&out).as_deref(), Some("allow"), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+}
+
+#[test]
+fn check_config_prints_the_warning_and_exits_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, row("\"bash\"", "")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
+        .args(["check", "--config"])
+        .arg(&config)
+        .env("HOME", home.path())
+        .env_remove("SHGUARD_CONFIG")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(!out.stderr.is_empty(), "the warning goes to stderr");
 }
 
 fn run_check_config(args: &[&std::path::Path], home: &std::path::Path) -> Option<i32> {
