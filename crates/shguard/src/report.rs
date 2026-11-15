@@ -10,8 +10,10 @@
 //! The output is one `<count>\t<class>` line per listed class, most frequent
 //! first and by class name among equals, then `<total>\ttotal`, which counts
 //! every line, listed or not. Command text is printed only under
-//! [`CommandText::Show`], as `\t<count>\t<command as a JSON string>` under its
-//! class. A class says which path produced an answer; it does not say a
+//! [`CommandText::Show`], as `\t<count>\t<command>` under its class. The
+//! command is JSON-quoted and then further escaped for display: every control
+//! character and bidi control left raw by the quoting is written as `\u{XXXX}`,
+//! so the text is one line that cannot drive the terminal. A class says which path produced an answer; it does not say a
 //! command is safe.
 
 use std::collections::HashMap;
@@ -133,6 +135,21 @@ fn ranked(counts: &HashMap<String, u64>) -> Vec<(&str, u64)> {
     rows
 }
 
+// Not the JSON quoting alone: serde_json leaves DEL, the C1 controls (U+009B
+// is a CSI on some terminals) and the bidi controls raw.
+fn display_command(command: &str) -> String {
+    let quoted = Value::from(command).to_string();
+    let mut out = String::with_capacity(quoted.len());
+    for c in quoted.chars() {
+        if c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
+            out.push_str(&format!("\\u{{{:04X}}}", u32::from(c)));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 impl Tally {
     /// Writes the report: at most `limit` classes, then the total.
     ///
@@ -144,8 +161,8 @@ impl Tally {
             writeln!(out, "{count}\t{class}")?;
             if let Some(commands) = self.commands.get(class) {
                 for (command, n) in ranked(commands).into_iter().take(COMMANDS_PER_CLASS) {
-                    let quoted = Value::from(command).to_string();
-                    writeln!(out, "\t{n}\t{quoted}")?;
+                    let shown = display_command(command);
+                    writeln!(out, "\t{n}\t{shown}")?;
                 }
             }
         }
@@ -242,6 +259,19 @@ mod tests {
             run(log, CommandText::Show, 20),
             "3\tallow\n\t2\t\"ls\\n-l\"\n\t1\t\"pwd\"\n3\ttotal\n"
         );
+    }
+
+    #[test]
+    fn display_escapes_controls_and_bidi_but_keeps_json_escapes_and_text() {
+        assert_eq!(display_command("a\nb"), "\"a\\nb\"");
+        assert_eq!(display_command("\u{7F}"), "\"\\u{007F}\"");
+        assert_eq!(display_command("\u{85}"), "\"\\u{0085}\"");
+        assert_eq!(display_command("\u{9B}"), "\"\\u{009B}\"");
+        assert_eq!(display_command("\u{202A}"), "\"\\u{202A}\"");
+        assert_eq!(display_command("\u{202E}"), "\"\\u{202E}\"");
+        assert_eq!(display_command("\u{2066}"), "\"\\u{2066}\"");
+        assert_eq!(display_command("\u{2069}"), "\"\\u{2069}\"");
+        assert_eq!(display_command("é日"), "\"é日\"");
     }
 
     #[test]
