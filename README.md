@@ -355,12 +355,13 @@ frequent first and by name among equals, the top 20 classes, then
 `<total>\ttotal`, which counts every non-empty line, listed or not. A line
 without `class` (written by an earlier version) counts as `unclassified`. A
 line that is not UTF-8, is not a JSON object, is longer than 2 MiB, or whose
-`class` is not a name listed above counts as `invalid`; a class name from a
-newer shguard counts as `invalid` too, and its text is never printed. **The default output has no command text.** `--show-commands`
-also prints, under each listed class, its five most frequent distinct
-commands as `\t<count>\t<command as a JSON string>`; that output can hold
-secrets, like the log. `report` exits 0, 1 for a log it cannot read or a
-report it cannot write, and 2 on a usage error.
+`class` is not a class name of this version counts as `invalid`; a class name
+from a newer shguard counts as `invalid` too, and its text is never printed.
+**The default output has no command text.** `--show-commands` also prints,
+under each listed class, its five most frequent distinct commands as
+`\t<count>\t<command as a JSON string>`; that output can hold secrets, like
+the log. `report` exits 0, 1 for a log it cannot read or a report it cannot
+write, and 2 on a usage error.
 
 ## Migrating from 0.9
 

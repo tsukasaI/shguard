@@ -208,8 +208,9 @@ mod tests {
                    {\"class\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n\
                    {\"class\":\"load_error\"}\n\
                    {\"class\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}";
-        // 24 bytes fit; the long lines (the last has no newline) do not.
-        let Ok(t) = tally_capped(log.as_bytes(), CommandText::Hide, 24) else {
+        // 22 bytes fit (`{"class":"load_error"}` is exactly 22); the long
+        // lines (the last has no newline) do not.
+        let Ok(t) = tally_capped(log.as_bytes(), CommandText::Hide, 22) else {
             panic!("reads");
         };
         let mut out = Vec::new();
@@ -223,7 +224,7 @@ mod tests {
             "{}\n{{\"class\":\"rule_hit\"}}\n{{\"class\":\"allow\"}}\n",
             " ".repeat(30)
         );
-        let Ok(t) = tally_capped(log.as_bytes(), CommandText::Hide, 24) else {
+        let Ok(t) = tally_capped(log.as_bytes(), CommandText::Hide, 22) else {
             panic!("reads");
         };
         let mut out = Vec::new();

@@ -52,158 +52,134 @@ impl DecisionClass {
     }
 }
 
-const FIXED: [DecisionClass; 7] = [
-    DecisionClass::Allow,
-    DecisionClass::AllowUserRow,
-    DecisionClass::AllowUserCodeRow,
-    DecisionClass::RuleHit,
-    DecisionClass::EmptyCommand,
-    DecisionClass::MalformedInput,
-    DecisionClass::LoadError,
-];
-
-const UNKNOWN_KINDS: [UnknownKind; 18] = [
-    UnknownKind::NoRow,
-    UnknownKind::OpaqueCommandName,
-    UnknownKind::UnknownOption,
-    UnknownKind::OpaqueOption,
-    UnknownKind::MissingValue,
-    UnknownKind::FlagGivenValue,
-    UnknownKind::DashDashNotAllowed,
-    UnknownKind::ExtraOperand,
-    UnknownKind::OptionAfterOperand,
-    UnknownKind::PlusWord,
-    UnknownKind::CodeRole,
-    UnknownKind::RunsCode,
-    UnknownKind::UnknownSubcommand,
-    UnknownKind::PathOpaque,
-    UnknownKind::PathDotDot,
-    UnknownKind::PathNonAscii,
-    UnknownKind::PathAfterCd,
-    UnknownKind::SensitiveAfterCd,
-];
-
-const UNSUPPORTED_KINDS: [UnsupportedKind; 39] = [
-    UnsupportedKind::InputTooLarge,
-    UnsupportedKind::ControlByte,
-    UnsupportedKind::UnterminatedSingleQuote,
-    UnsupportedKind::UnterminatedDoubleQuote,
-    UnsupportedKind::BackgroundAmpersand,
-    UnsupportedKind::PipeAmpersand,
-    UnsupportedKind::DoubleSemicolon,
-    UnsupportedKind::SemicolonAmpersand,
-    UnsupportedKind::Parenthesis,
-    UnsupportedKind::InputRedirect,
-    UnsupportedKind::AppendRedirect,
-    UnsupportedKind::ClobberRedirect,
-    UnsupportedKind::AmpersandRedirect,
-    UnsupportedKind::ProcessSubstitution,
-    UnsupportedKind::Brace,
-    UnsupportedKind::Glob,
-    UnsupportedKind::Comment,
-    UnsupportedKind::UnquotedDollar,
-    UnsupportedKind::Backquote,
-    UnsupportedKind::DollarParen,
-    UnsupportedKind::BracedParameter,
-    UnsupportedKind::SpecialParameter,
-    UnsupportedKind::NameBeforeNonAscii,
-    UnsupportedKind::BackslashAfterNonAscii,
-    UnsupportedKind::BareDollar,
-    UnsupportedKind::LineContinuation,
-    UnsupportedKind::BackslashAtEnd,
-    UnsupportedKind::TildeForm,
-    UnsupportedKind::TildeAssignment,
-    UnsupportedKind::MultiDigitFd,
-    UnsupportedKind::DupOperand,
-    UnsupportedKind::RedirectDescriptor,
-    UnsupportedKind::RedirectTarget,
-    UnsupportedKind::LeadingSeparator,
-    UnsupportedKind::MissingCommand,
-    UnsupportedKind::RedirectOnly,
-    UnsupportedKind::Assignment,
-    UnsupportedKind::ReservedWord,
-    UnsupportedKind::TooManyWords,
-];
-
-/// The position of `kind` in [`UNKNOWN_KINDS`]. No `_` arm: a new kind fails to
-/// compile here, next to the array that has to grow with it.
-#[cfg(test)]
-fn unknown_slot(kind: UnknownKind) -> usize {
-    match kind {
-        UnknownKind::NoRow => 0,
-        UnknownKind::OpaqueCommandName => 1,
-        UnknownKind::UnknownOption => 2,
-        UnknownKind::OpaqueOption => 3,
-        UnknownKind::MissingValue => 4,
-        UnknownKind::FlagGivenValue => 5,
-        UnknownKind::DashDashNotAllowed => 6,
-        UnknownKind::ExtraOperand => 7,
-        UnknownKind::OptionAfterOperand => 8,
-        UnknownKind::PlusWord => 9,
-        UnknownKind::CodeRole => 10,
-        UnknownKind::RunsCode => 11,
-        UnknownKind::UnknownSubcommand => 12,
-        UnknownKind::PathOpaque => 13,
-        UnknownKind::PathDotDot => 14,
-        UnknownKind::PathNonAscii => 15,
-        UnknownKind::PathAfterCd => 16,
-        UnknownKind::SensitiveAfterCd => 17,
-    }
+/// Defines a list of every variant of a payload-free enum, together with an
+/// exhaustive `match` over the same identifiers. The `match` has no `_` arm,
+/// so a variant missing from the list fails to compile; the list is built
+/// from the identifiers once, so it cannot drift from the `match`.
+macro_rules! variants {
+    ($list:ident, $ty:ident, [$($variant:ident),* $(,)?]) => {
+        const $list: &[$ty] = &[$($ty::$variant),*];
+        const _: () = {
+            const fn every_variant_is_listed(kind: $ty) {
+                match kind {
+                    $($ty::$variant)|* => (),
+                }
+            }
+            let _ = every_variant_is_listed;
+        };
+    };
 }
 
-/// The position of `kind` in [`UNSUPPORTED_KINDS`]; no `_` arm, as above.
-#[cfg(test)]
-fn unsupported_slot(kind: UnsupportedKind) -> usize {
-    match kind {
-        UnsupportedKind::InputTooLarge => 0,
-        UnsupportedKind::ControlByte => 1,
-        UnsupportedKind::UnterminatedSingleQuote => 2,
-        UnsupportedKind::UnterminatedDoubleQuote => 3,
-        UnsupportedKind::BackgroundAmpersand => 4,
-        UnsupportedKind::PipeAmpersand => 5,
-        UnsupportedKind::DoubleSemicolon => 6,
-        UnsupportedKind::SemicolonAmpersand => 7,
-        UnsupportedKind::Parenthesis => 8,
-        UnsupportedKind::InputRedirect => 9,
-        UnsupportedKind::AppendRedirect => 10,
-        UnsupportedKind::ClobberRedirect => 11,
-        UnsupportedKind::AmpersandRedirect => 12,
-        UnsupportedKind::ProcessSubstitution => 13,
-        UnsupportedKind::Brace => 14,
-        UnsupportedKind::Glob => 15,
-        UnsupportedKind::Comment => 16,
-        UnsupportedKind::UnquotedDollar => 17,
-        UnsupportedKind::Backquote => 18,
-        UnsupportedKind::DollarParen => 19,
-        UnsupportedKind::BracedParameter => 20,
-        UnsupportedKind::SpecialParameter => 21,
-        UnsupportedKind::NameBeforeNonAscii => 22,
-        UnsupportedKind::BackslashAfterNonAscii => 23,
-        UnsupportedKind::BareDollar => 24,
-        UnsupportedKind::LineContinuation => 25,
-        UnsupportedKind::BackslashAtEnd => 26,
-        UnsupportedKind::TildeForm => 27,
-        UnsupportedKind::TildeAssignment => 28,
-        UnsupportedKind::MultiDigitFd => 29,
-        UnsupportedKind::DupOperand => 30,
-        UnsupportedKind::RedirectDescriptor => 31,
-        UnsupportedKind::RedirectTarget => 32,
-        UnsupportedKind::LeadingSeparator => 33,
-        UnsupportedKind::MissingCommand => 34,
-        UnsupportedKind::RedirectOnly => 35,
-        UnsupportedKind::Assignment => 36,
-        UnsupportedKind::ReservedWord => 37,
-        UnsupportedKind::TooManyWords => 38,
-    }
+variants!(
+    UNKNOWN_KINDS,
+    UnknownKind,
+    [
+        NoRow,
+        OpaqueCommandName,
+        UnknownOption,
+        OpaqueOption,
+        MissingValue,
+        FlagGivenValue,
+        DashDashNotAllowed,
+        ExtraOperand,
+        OptionAfterOperand,
+        PlusWord,
+        CodeRole,
+        RunsCode,
+        UnknownSubcommand,
+        PathOpaque,
+        PathDotDot,
+        PathNonAscii,
+        PathAfterCd,
+        SensitiveAfterCd,
+    ]
+);
+
+variants!(
+    UNSUPPORTED_KINDS,
+    UnsupportedKind,
+    [
+        InputTooLarge,
+        ControlByte,
+        UnterminatedSingleQuote,
+        UnterminatedDoubleQuote,
+        BackgroundAmpersand,
+        PipeAmpersand,
+        DoubleSemicolon,
+        SemicolonAmpersand,
+        Parenthesis,
+        InputRedirect,
+        AppendRedirect,
+        ClobberRedirect,
+        AmpersandRedirect,
+        ProcessSubstitution,
+        Brace,
+        Glob,
+        Comment,
+        UnquotedDollar,
+        Backquote,
+        DollarParen,
+        BracedParameter,
+        SpecialParameter,
+        NameBeforeNonAscii,
+        BackslashAfterNonAscii,
+        BareDollar,
+        LineContinuation,
+        BackslashAtEnd,
+        TildeForm,
+        TildeAssignment,
+        MultiDigitFd,
+        DupOperand,
+        RedirectDescriptor,
+        RedirectTarget,
+        LeadingSeparator,
+        MissingCommand,
+        RedirectOnly,
+        Assignment,
+        ReservedWord,
+        TooManyWords,
+    ]
+);
+
+/// The payload-free classes, listed with an exhaustive `match` as in
+/// [`variants`]; the two payload variants are covered by their kind lists.
+macro_rules! fixed_classes {
+    ($list:ident, [$($variant:ident),* $(,)?]) => {
+        const $list: &[DecisionClass] = &[$(DecisionClass::$variant),*];
+        const _: () = {
+            const fn every_fixed_class_is_listed(class: DecisionClass) {
+                match class {
+                    $(DecisionClass::$variant)|*
+                    | DecisionClass::Unknown(_)
+                    | DecisionClass::ParseRefusal(_) => (),
+                }
+            }
+            let _ = every_fixed_class_is_listed;
+        };
+    };
 }
+
+fixed_classes!(
+    FIXED,
+    [
+        Allow,
+        AllowUserRow,
+        AllowUserCodeRow,
+        RuleHit,
+        EmptyCommand,
+        MalformedInput,
+        LoadError,
+    ]
+);
 
 impl DecisionClass {
     /// Every class this version can write.
     pub fn all() -> impl Iterator<Item = DecisionClass> {
         FIXED
-            .into_iter()
-            .chain(UNKNOWN_KINDS.into_iter().map(Self::Unknown))
-            .chain(UNSUPPORTED_KINDS.into_iter().map(Self::ParseRefusal))
+            .iter()
+            .copied()
+            .chain(UNKNOWN_KINDS.iter().copied().map(Self::Unknown))
+            .chain(UNSUPPORTED_KINDS.iter().copied().map(Self::ParseRefusal))
     }
 
     /// Whether `name` is the name of a class of this version. A name from a
@@ -285,37 +261,22 @@ fn parse_refusal(kind: UnsupportedKind) -> &'static str {
 mod tests {
     use super::*;
 
-    /// Every class, from the production list. `listed` has no `_` arm, so a
-    /// new variant fails to compile here until it is handled.
+    /// Every class, from the production lists.
     pub(crate) fn every_class() -> Vec<DecisionClass> {
-        let all: Vec<DecisionClass> = DecisionClass::all().collect();
-        for class in &all {
-            assert!(listed(*class), "{class:?}");
-        }
-        all
-    }
-
-    fn listed(class: DecisionClass) -> bool {
-        match class {
-            DecisionClass::Allow
-            | DecisionClass::AllowUserRow
-            | DecisionClass::AllowUserCodeRow
-            | DecisionClass::RuleHit
-            | DecisionClass::Unknown(_)
-            | DecisionClass::ParseRefusal(_)
-            | DecisionClass::EmptyCommand
-            | DecisionClass::MalformedInput
-            | DecisionClass::LoadError => true,
-        }
+        DecisionClass::all().collect()
     }
 
     #[test]
-    fn each_kind_sits_at_its_slot_so_the_arrays_hold_every_kind_once() {
-        for (i, kind) in UNKNOWN_KINDS.into_iter().enumerate() {
-            assert_eq!(unknown_slot(kind), i, "{kind:?} is not at its slot");
-        }
-        for (i, kind) in UNSUPPORTED_KINDS.into_iter().enumerate() {
-            assert_eq!(unsupported_slot(kind), i, "{kind:?} is not at its slot");
+    fn the_class_list_has_one_entry_per_fixed_class_and_per_kind() {
+        let all = every_class();
+        assert_eq!(
+            all.len(),
+            FIXED.len() + UNKNOWN_KINDS.len() + UNSUPPORTED_KINDS.len()
+        );
+        let mut seen = Vec::new();
+        for class in &all {
+            assert!(!seen.contains(class), "{class:?} is listed twice");
+            seen.push(*class);
         }
     }
 
