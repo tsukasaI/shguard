@@ -1684,3 +1684,81 @@ fn load_returns_the_warnings_beside_the_catalog() {
         "the warned row stays in the catalog"
     );
 }
+
+fn row_without_source() -> String {
+    "[[row]]\nkey = [\"zzbad\"]\norder = \"permute\"\ndashdash = \"ends\"\n".to_owned()
+}
+
+fn failing_text(with_warned_row: bool) -> String {
+    if with_warned_row {
+        format!("{}{}", row_without_source(), row("\"env\"", ""))
+    } else {
+        row_without_source()
+    }
+}
+
+#[test]
+fn a_failed_load_returns_the_warnings_beside_the_errors() {
+    let Err(f) = load_one(&failing_text(true)) else {
+        panic!("a row without a source must fail the load");
+    };
+    assert!(!f.errors.is_empty());
+    assert!(
+        matches!(
+            f.warnings[..],
+            [shguard::catalog::LoadWarning::CodeRunningHead { .. }]
+        ),
+        "{:?}",
+        f.warnings
+    );
+}
+
+#[test]
+fn check_prints_warnings_beside_load_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("plain.toml");
+    std::fs::write(&plain, failing_text(false)).unwrap();
+    let warned = dir.path().join("warned.toml");
+    std::fs::write(&warned, failing_text(true)).unwrap();
+    let check = |path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_shguard"))
+            .arg("check")
+            .arg(path)
+            .env("HOME", home.path())
+            .env_remove("SHGUARD_CONFIG")
+            .output()
+            .unwrap()
+    };
+    let without = check(&plain);
+    let with = check(&warned);
+    assert_eq!(without.status.code(), Some(1), "{without:?}");
+    assert_eq!(with.status.code(), Some(1), "{with:?}");
+    let lines = |out: &std::process::Output| out.stderr.split(|b| *b == b'\n').count();
+    assert_eq!(lines(&with), lines(&without) + 1, "{with:?} {without:?}");
+}
+
+#[test]
+fn check_config_prints_warnings_beside_load_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("plain.toml");
+    std::fs::write(&plain, failing_text(false)).unwrap();
+    let warned = dir.path().join("warned.toml");
+    std::fs::write(&warned, failing_text(true)).unwrap();
+    let check = |path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_shguard"))
+            .args(["check", "--config"])
+            .arg(path)
+            .env("HOME", home.path())
+            .env_remove("SHGUARD_CONFIG")
+            .output()
+            .unwrap()
+    };
+    let without = check(&plain);
+    let with = check(&warned);
+    assert_eq!(without.status.code(), Some(1), "{without:?}");
+    assert_eq!(with.status.code(), Some(1), "{with:?}");
+    let lines = |out: &std::process::Output| out.stderr.split(|b| *b == b'\n').count();
+    assert_eq!(lines(&with), lines(&without) + 1, "{with:?} {without:?}");
+}
