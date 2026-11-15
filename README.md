@@ -263,6 +263,9 @@ and never from its text. It is not a safety grade. The names are stable:
 
 - `allow`: the embedded catalog covers the command.
 - `allow_user_row`: an Allow that needs a user `[[row]]`.
+- `allow_user_code_row`: an Allow that needs a user `[[row]]` for a head that
+  runs other code and does not set `runs_code`, the row that loads with a
+  warning.
 - `rule_hit`: a rule hit (an Ask or a deny).
 - `unknown:<kind>`: the catalog does not cover the command. `<kind>` is one of
   `no_row`, `opaque_command_name`, `unknown_option`, `opaque_option`,

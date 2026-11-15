@@ -36,7 +36,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub use crate::catalog::AskOutcome;
-use crate::catalog::load::{load_files, parse_sources};
+use crate::catalog::load::{load_files, load_files_split, parse_sources};
 use crate::catalog::{Checked, Failed, LoadWarning, Loaded, Origin, Source, parse_config};
 
 /// What the hook runs with.
@@ -53,6 +53,9 @@ pub struct Settings {
     /// far as an Allow goes, so the hook needs no second catalog to tell a
     /// user-row Allow from an embedded one.
     pub embedded_only: Option<Loaded>,
+    /// The merged catalog without the user rows that got a
+    /// [`LoadWarning::CodeRunningHead`]; `None` when there are none.
+    pub without_code_rows: Option<Loaded>,
     /// What the loader found that does not stop the load. `shguard check`
     /// prints them; the hook never does.
     pub warnings: Vec<LoadWarning>,
@@ -120,7 +123,7 @@ pub fn settings(embedded: &[Source<'_>], config: Option<(&str, &str)>) -> Result
             Err(e) => errs.push(e),
         }
     }
-    let Checked { loaded, warnings } = load_files(files, errs)?;
+    let (Checked { loaded, warnings }, without_code_rows) = load_files_split(files, errs)?;
     let embedded_only = if adds_rows {
         let mut none = Vec::new();
         let files = parse_sources(embedded, &mut none);
@@ -139,6 +142,7 @@ pub fn settings(embedded: &[Source<'_>], config: Option<(&str, &str)>) -> Result
         decision_log,
         loaded,
         embedded_only,
+        without_code_rows,
         warnings,
     })
 }

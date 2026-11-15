@@ -7,7 +7,9 @@
 //! 3. Input that is not the hook contract, an empty command and a command
 //!    outside the parsed subset are Asks.
 //! 4. Otherwise the kernel decides. An Allow that the embedded catalog alone
-//!    would not give (it needs a user `[[row]]`) says so in its reason.
+//!    would not give (it needs a user `[[row]]`) says so in its reason; one
+//!    that also needs a user row for a head that runs other code, without
+//!    `runs_code`, names that in its reason and class.
 //! 5. Every Ask goes through `ask_outcome`; a Block is always a deny.
 //!
 //! The reasons say what was found. None of them says a command is safe, and
@@ -35,6 +37,9 @@ enum AllowKind {
     /// The embedded catalog alone would not Allow the command; a user `[[row]]`
     /// covers it.
     UserRow,
+    /// Like `UserRow`, and the user rows that cover it include one for a head
+    /// that runs other code and does not set `runs_code`.
+    UserCodeRow,
 }
 
 impl AllowKind {
@@ -42,6 +47,9 @@ impl AllowKind {
         match self {
             Self::Catalog => "covered by the catalog; no rule hit",
             Self::UserRow => "covered by the catalog through a user [[row]]; no rule hit",
+            Self::UserCodeRow => {
+                "covered by the catalog through a user [[row]] for a head that runs other code and does not set `runs_code`; shguard cannot check what it runs; no rule hit"
+            }
         }
     }
 
@@ -49,6 +57,7 @@ impl AllowKind {
         match self {
             Self::Catalog => DecisionClass::Allow,
             Self::UserRow => DecisionClass::AllowUserRow,
+            Self::UserCodeRow => DecisionClass::AllowUserCodeRow,
         }
     }
 }
@@ -177,8 +186,12 @@ fn judge(command: &str, settings: &Settings) -> Judged {
     // copy for the embedded-only decision is taken before it; only a config
     // with a `[[row]]` pays for it.
     let for_embedded = settings.embedded_only.as_ref().map(|e| (e, script.clone()));
+    let for_without_code = settings
+        .without_code_rows
+        .as_ref()
+        .map(|w| (w, script.clone()));
     match decide(&loaded.catalog, &loaded.rules, script) {
-        Verdict::Allow(_) => Judged::Allow(allow_kind(for_embedded)),
+        Verdict::Allow(_) => Judged::Allow(allow_kind(for_embedded, for_without_code)),
         Verdict::Ask(script, reason) => {
             Judged::Ask(reason_text(&reason, &script, loaded), reason_class(&reason))
         }
@@ -197,20 +210,34 @@ fn reason_class(reason: &Reason) -> DecisionClass {
 
 /// Whether the embedded catalog alone would Allow the script too. `None` means
 /// the config adds no `[[row]]` (`Settings::embedded_only`), so no user row can
-/// have made the Allow.
-fn allow_kind(for_embedded: Option<(&Loaded, Script)>) -> AllowKind {
+/// have made the Allow. Otherwise a user row made it, and it is a
+/// [`AllowKind::UserCodeRow`] when the catalog without the warned
+/// code-running rows (`Settings::without_code_rows`, `None` when there are
+/// none) would not Allow the script.
+fn allow_kind(
+    for_embedded: Option<(&Loaded, Script)>,
+    for_without_code: Option<(&Loaded, Script)>,
+) -> AllowKind {
     let Some((embedded, script)) = for_embedded else {
         return AllowKind::Catalog;
     };
-    let embedded_allows = matches!(
-        decide(&embedded.catalog, &embedded.rules, script),
-        Verdict::Allow(_)
-    );
-    if embedded_allows {
-        AllowKind::Catalog
+    if allows(embedded, script) {
+        return AllowKind::Catalog;
+    }
+    if let Some((without, script)) = for_without_code
+        && !allows(without, script)
+    {
+        AllowKind::UserCodeRow
     } else {
         AllowKind::UserRow
     }
+}
+
+fn allows(loaded: &Loaded, script: Script) -> bool {
+    matches!(
+        decide(&loaded.catalog, &loaded.rules, script),
+        Verdict::Allow(_)
+    )
 }
 
 /// The reason for a verdict, with its guidance text appended.
@@ -543,5 +570,34 @@ short = "a"
         let mut big = bash("ls");
         big.resize(INPUT_CAP + 1, b' ');
         assert_eq!(decision(&respond(&big, Ok(&ask))), Some("ask"));
+    }
+
+    #[test]
+    fn an_allow_that_needs_a_warned_code_row_says_so() {
+        let rows = "[[row]]\nkey = [\"uname\"]\nsource = \"https://example.com\"\n\
+                    order = \"permute\"\ndashdash = \"ends\"\n\
+                    [[row]]\nkey = [\"env\"]\nsource = \"https://example.com\"\n\
+                    order = \"permute\"\ndashdash = \"ends\"\n";
+        let (code, logged) = allow_reason_for(rows, "env");
+        assert_eq!(code, AllowKind::UserCodeRow.reason());
+        assert_eq!(logged["reason"], AllowKind::UserCodeRow.reason());
+        assert_eq!(class_of(rows, &bash("env")), Some("allow_user_code_row"));
+        // A plain user row in the same config keeps its own reason and class.
+        let (plain, _) = allow_reason_for(rows, "uname");
+        assert_eq!(plain, AllowKind::UserRow.reason());
+        assert_eq!(class_of(rows, &bash("uname")), Some("allow_user_row"));
+        let (embedded, _) = allow_reason_for(rows, "ls -l");
+        assert_eq!(embedded, AllowKind::Catalog.reason());
+        assert_eq!(class_of(rows, &bash("ls -l")), Some("allow"));
+        let kinds = [
+            AllowKind::Catalog,
+            AllowKind::UserRow,
+            AllowKind::UserCodeRow,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for b in &kinds[i + 1..] {
+                assert_ne!(a.reason(), b.reason());
+            }
+        }
     }
 }

@@ -8,6 +8,10 @@
   `allow_user_row`, `rule_hit`, `unknown:<kind>`, `parse_refusal:<kind>`,
   `load_error`), and `shguard report [--show-commands] <log>` counts a log by
   class without printing command text unless asked (#1243).
+- An Allow that needs a user row for a head that runs other code, without
+  `runs_code`, has its own hook reason and the class `allow_user_code_row`, so
+  the risk shows in the hook and the log without running `shguard check`
+  (#1270).
 
 ### Changed
 
