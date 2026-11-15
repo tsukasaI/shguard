@@ -1855,3 +1855,24 @@ fn check_deny_warnings_alone_is_a_usage_error() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "{out:?}");
 }
+
+#[test]
+fn check_config_deny_warnings_uses_the_default_location() {
+    let check = |home: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_shguard"))
+            .args(["check", "--deny-warnings", "--config"])
+            .env("HOME", home)
+            .env_remove("SHGUARD_CONFIG")
+            .output()
+            .unwrap()
+    };
+    let home = tempfile::tempdir().unwrap();
+    // No file at the default path: the "embedded catalog only" note is not a warning.
+    let out = check(home.path());
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let config_dir = home.path().join(".config").join("shguard");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(config_dir.join("config.toml"), row("\"env\"", "")).unwrap();
+    let out = check(home.path());
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+}
