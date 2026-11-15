@@ -181,8 +181,8 @@ to it is yours.
 - `bun` is an inexpressible head, so these rows load with a warning (see
   above; leave out `runs_code`, or every command stays an Ask). `bun test` runs
   the test files under the paths it is given (the working directory by
-  default). A path can be absolute or start with `~`, and bun runs a file
-  named with `./` or `/` even when it is not a `*.test.*` file. `bunfig.toml`
+  default). An absolute or `~` path is Ask through the recipe's `[[rule]]`,
+  and bun runs a file named with `./` even when it is not a `*.test.*` file. `bunfig.toml`
   can preload a script before them. `bun run <script>` runs a `package.json`
   script, which is arbitrary code, and also runs `pre<script>`/`post<script>`
   and any script it calls, so the recipe gives each script its own row: list
@@ -268,6 +268,14 @@ order = "permute"
 dashdash = "ends"
 rest = "path"
 opt = [{ short = "t", long = "test-name-pattern", value = { takes = "inert" } }]
+
+# Asks for an absolute or `~` path (`bun test /` scans the whole filesystem).
+[[rule]]
+id = "bun-test-absolute-path"
+key = ["bun", "test"]
+targets = [{ pat = "/", kind = "prefix" }, { pat = "~", kind = "prefix" }]
+outcome = "ask"
+reason = "bun test is asked for absolute and `~` paths; use a path relative to the repository"
 
 # One row per script you have read; each script is arbitrary code.
 [[row]]
