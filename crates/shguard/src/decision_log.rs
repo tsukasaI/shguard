@@ -24,13 +24,11 @@ use crate::hook::{Response, WireDecision};
 /// versions wrote), or `None` when there is nothing to log.
 #[cfg(test)]
 fn entry(unix_secs: u64, command: Option<&str>, response: &Response) -> Option<Value> {
-    let WireDecision { word, reason } = response.decision()?;
-    Some(json!({
-        "ts": unix_secs,
-        "decision": word,
-        "reason": reason,
-        "command": command,
-    }))
+    let mut line = entry_classified(unix_secs, command, response, DecisionClass::Allow)?;
+    if let Some(fields) = line.as_object_mut() {
+        fields.remove("class");
+    }
+    Some(line)
 }
 
 /// The log line for one answer with the stable `class` name of the decision,
