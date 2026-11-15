@@ -321,7 +321,8 @@ line. The log is written after the answer, with a 500 ms bound; a log that
 cannot be written is reported on stderr and never changes the answer.
 
 `class` names the path that produced the answer, from the type of the reason
-and never from its text. It is not a safety grade. The names are stable:
+and never from its text. It is not a safety grade. The names are stable from
+the release after 0.13.0 (see the note after `malformed_input`):
 
 - `allow`: the embedded catalog covers the command.
 - `allow_user_row`: an Allow that needs a user `[[row]]`.
@@ -338,8 +339,12 @@ and never from its text. It is not a safety grade. The names are stable:
 - `parse_refusal:<kind>`: the command is outside the parsed subset.
   `<kind>` is the construct, such as `unquoted_dollar`, `backquote`, `glob`,
   `input_redirect` or `redirect_target` (the full list is `UnsupportedKind`
-  in `shguard-syntax`, in snake case). Also `parse_refusal:empty_command` and
-  `parse_refusal:malformed_input` (hook input that is not the hook contract).
+  in `shguard-syntax`, in snake case).
+- `empty_command`: the command is empty.
+- `malformed_input`: hook input that is not the hook contract. 0.13.0 wrote
+  these two as `parse_refusal:empty_command` and
+  `parse_refusal:malformed_input`; `report` counts such lines under those
+  names.
 - `load_error`: the config or catalog failed to load. The hook denies, and
   since the log path comes from that config, such a line is not written in
   practice.
