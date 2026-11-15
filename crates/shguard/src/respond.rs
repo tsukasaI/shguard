@@ -627,4 +627,24 @@ short = "a"
         assert_eq!(c("uname"), Some("allow_user_row"));
         assert_eq!(c("ls -l"), Some("allow"));
     }
+
+    #[test]
+    fn a_warned_bash_user_row_allows_with_its_own_reason_and_class() {
+        let rows = "[[row]]\nkey = [\"uname\"]\nsource = \"https://example.com\"\n\
+                    order = \"permute\"\ndashdash = \"ends\"\n\
+                    [[row]]\nkey = [\"bash\"]\nsource = \"https://example.com\"\n\
+                    order = \"permute\"\ndashdash = \"ends\"\n";
+        // `allow_reason_for` asserts the decision is "allow".
+        let (code, logged) = allow_reason_for(rows, "bash");
+        let (plain, _) = allow_reason_for(rows, "uname");
+        assert_eq!(code, AllowKind::UserCodeRow.reason());
+        assert_eq!(logged["reason"], AllowKind::UserCodeRow.reason());
+        assert_ne!(
+            code, plain,
+            "a warned bash row must not read as a plain user row"
+        );
+        assert_ne!(code, AllowKind::UserRow.reason());
+        assert_eq!(class_of(rows, &bash("bash")), Some("allow_user_code_row"));
+        assert_eq!(class_of(rows, &bash("uname")), Some("allow_user_row"));
+    }
 }
