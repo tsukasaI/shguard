@@ -2,7 +2,10 @@ name: verify
 
 on:
   pull_request:
-    # edited: fixing the PR body re-runs the P2 audit check (#1258).
+    # edited: a re-run reuses the old event payload, so without it a fixed PR
+    # body cannot clear the P2 audit check (#1258). Every edit (title, body or
+    # base branch) starts a new run, which restarts rust and proofs, and
+    # cancel-in-progress cancels a run still in flight (#1305).
     types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
