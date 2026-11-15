@@ -11,9 +11,11 @@
 ## P2 audit
 
 <!--
-Required when a catalog/*.toml row is added or changed, or when a change to
-how the loader or kernel reads a row's fields lands (crates/shguard/src/catalog,
-crates/shguard-kernel/src; see CLAUDE.md, "Tests and catalog"). Goal: find a spelling the row Allows that the real tool
+Required when a catalog/*.toml row is added or changed, or when a PR changes
+how the loader or kernel reads a row's fields or which heads it accepts
+(crates/shguard/src/catalog, crates/shguard-kernel/src; see CLAUDE.md, "Tests
+and catalog"); the audit then covers each row the change reads differently.
+Goal: find a spelling the row Allows that the real tool
 reads as a different or code-running option. One line per spelling tried:
 
   spelling tried -> what the tool does with it -> shguard decision -> evidence (doc/source/run)
