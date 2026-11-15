@@ -7,7 +7,10 @@
 //! 3. Input that is not the hook contract, an empty command and a command
 //!    outside the parsed subset are Asks.
 //! 4. Otherwise the kernel decides. An Allow that the embedded catalog alone
-//!    would not give (it needs a user `[[row]]`) says so in its reason.
+//!    would not give (it needs a user `[[row]]`) says so in its reason; one
+//!    that needs a user row that does not set `runs_code` for a head that runs
+//!    other code or has option syntax the grammar cannot express names that in
+//!    its reason and class.
 //! 5. Every Ask goes through `ask_outcome`; a Block is always a deny.
 //!
 //! The reasons say what was found. None of them says a command is safe, and
@@ -35,6 +38,10 @@ enum AllowKind {
     /// The embedded catalog alone would not Allow the command; a user `[[row]]`
     /// covers it.
     UserRow,
+    /// Like `UserRow`, and the Allow needs a user `[[row]]` that does not set
+    /// `runs_code` for a head that runs other code or has option syntax the
+    /// grammar cannot express (a row that loads with a warning).
+    UserCodeRow,
 }
 
 impl AllowKind {
@@ -42,6 +49,9 @@ impl AllowKind {
         match self {
             Self::Catalog => "covered by the catalog; no rule hit",
             Self::UserRow => "covered by the catalog through a user [[row]]; no rule hit",
+            Self::UserCodeRow => {
+                "covered by the catalog through a user [[row]] that does not set `runs_code` for a head that runs other code or has option syntax the grammar cannot express; shguard cannot check such a command; no rule hit"
+            }
         }
     }
 
@@ -49,6 +59,7 @@ impl AllowKind {
         match self {
             Self::Catalog => DecisionClass::Allow,
             Self::UserRow => DecisionClass::AllowUserRow,
+            Self::UserCodeRow => DecisionClass::AllowUserCodeRow,
         }
     }
 }
@@ -174,11 +185,16 @@ fn judge(command: &str, settings: &Settings) -> Judged {
     };
     let loaded = &settings.loaded;
     // `decide` consumes the script, and `Allowed` exposes none back, so the
-    // copy for the embedded-only decision is taken before it; only a config
-    // with a `[[row]]` pays for it.
+    // copies for the embedded-only and the without-warned-rows decisions are
+    // taken before it; only a config with a `[[row]]` pays for the first, and
+    // only one with a warned row for the second.
     let for_embedded = settings.embedded_only.as_ref().map(|e| (e, script.clone()));
+    let for_without_code = settings
+        .without_code_rows
+        .as_ref()
+        .map(|w| (w, script.clone()));
     match decide(&loaded.catalog, &loaded.rules, script) {
-        Verdict::Allow(_) => Judged::Allow(allow_kind(for_embedded)),
+        Verdict::Allow(_) => Judged::Allow(allow_kind(for_embedded, for_without_code)),
         Verdict::Ask(script, reason) => {
             Judged::Ask(reason_text(&reason, &script, loaded), reason_class(&reason))
         }
@@ -195,22 +211,37 @@ fn reason_class(reason: &Reason) -> DecisionClass {
     }
 }
 
-/// Whether the embedded catalog alone would Allow the script too. `None` means
-/// the config adds no `[[row]]` (`Settings::embedded_only`), so no user row can
-/// have made the Allow.
-fn allow_kind(for_embedded: Option<(&Loaded, Script)>) -> AllowKind {
+/// Which catalog coverage made the Allow. The warned-row check comes first, so
+/// the label that names the risk wins: it is [`AllowKind::UserCodeRow`] when
+/// the catalog without the warned rows (`Settings::without_code_rows`, `None`
+/// when there are none) would not Allow the script. Otherwise it is
+/// [`AllowKind::Catalog`] when the embedded catalog alone would Allow it too
+/// (`None` means the config adds no `[[row]]`, `Settings::embedded_only`, so no
+/// user row can have made the Allow), and [`AllowKind::UserRow`] if not.
+fn allow_kind(
+    for_embedded: Option<(&Loaded, Script)>,
+    for_without_code: Option<(&Loaded, Script)>,
+) -> AllowKind {
+    if let Some((without, script)) = for_without_code
+        && !allows(without, script)
+    {
+        return AllowKind::UserCodeRow;
+    }
     let Some((embedded, script)) = for_embedded else {
         return AllowKind::Catalog;
     };
-    let embedded_allows = matches!(
-        decide(&embedded.catalog, &embedded.rules, script),
-        Verdict::Allow(_)
-    );
-    if embedded_allows {
+    if allows(embedded, script) {
         AllowKind::Catalog
     } else {
         AllowKind::UserRow
     }
+}
+
+fn allows(loaded: &Loaded, script: Script) -> bool {
+    matches!(
+        decide(&loaded.catalog, &loaded.rules, script),
+        Verdict::Allow(_)
+    )
 }
 
 /// The reason for a verdict, with its guidance text appended.
@@ -543,5 +574,57 @@ short = "a"
         let mut big = bash("ls");
         big.resize(INPUT_CAP + 1, b' ');
         assert_eq!(decision(&respond(&big, Ok(&ask))), Some("ask"));
+    }
+
+    #[test]
+    fn an_allow_that_needs_a_warned_code_row_says_so() {
+        let rows = "[[row]]\nkey = [\"uname\"]\nsource = \"https://example.com\"\n\
+                    order = \"permute\"\ndashdash = \"ends\"\n\
+                    [[row]]\nkey = [\"env\"]\nsource = \"https://example.com\"\n\
+                    order = \"permute\"\ndashdash = \"ends\"\n";
+        let (code, logged) = allow_reason_for(rows, "env");
+        assert_eq!(code, AllowKind::UserCodeRow.reason());
+        assert_eq!(logged["reason"], AllowKind::UserCodeRow.reason());
+        assert_eq!(class_of(rows, &bash("env")), Some("allow_user_code_row"));
+        // A plain user row in the same config keeps its own reason and class.
+        let (plain, _) = allow_reason_for(rows, "uname");
+        assert_eq!(plain, AllowKind::UserRow.reason());
+        assert_eq!(class_of(rows, &bash("uname")), Some("allow_user_row"));
+        let (embedded, _) = allow_reason_for(rows, "ls -l");
+        assert_eq!(embedded, AllowKind::Catalog.reason());
+        assert_eq!(class_of(rows, &bash("ls -l")), Some("allow"));
+        let kinds = [
+            AllowKind::Catalog,
+            AllowKind::UserRow,
+            AllowKind::UserCodeRow,
+        ];
+        for (i, a) in kinds.iter().enumerate() {
+            for b in &kinds[i + 1..] {
+                assert_ne!(a.reason(), b.reason());
+            }
+        }
+    }
+
+    #[test]
+    fn a_warned_row_anywhere_in_the_script_names_the_risk() {
+        let row = |key: &str, runs_code: bool| {
+            format!(
+                "[[row]]\nkey = {key}\nsource = \"https://example.com\"\n\
+                 order = \"permute\"\ndashdash = \"ends\"\nruns_code = {runs_code}\n"
+            )
+        };
+        let rows = [
+            row("[\"uname\"]", false),
+            row("[\"env\"]", false),
+            row("[\"docker\"]", true),
+            row("[\"docker\", \"ps\"]", false),
+        ]
+        .concat();
+        let c = |cmd: &str| class_of(&rows, &bash(cmd));
+        assert_eq!(c("uname && env"), Some("allow_user_code_row"));
+        assert_eq!(c("ls -l | env"), Some("allow_user_code_row"));
+        assert_eq!(c("docker ps"), Some("allow_user_code_row"));
+        assert_eq!(c("uname"), Some("allow_user_row"));
+        assert_eq!(c("ls -l"), Some("allow"));
     }
 }

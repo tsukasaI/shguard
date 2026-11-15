@@ -19,7 +19,8 @@
 //! that; an Allow that only a user row gives says so in the hook reason. A
 //! row for a head that runs other code or has option syntax the grammar
 //! cannot express, and does not set `runs_code`, loads with a warning, which
-//! `shguard check` prints. Under `ask_outcome = "ask"` an embedded Block holds
+//! `shguard check` prints; the hook gives an Allow that needs such a row its
+//! own reason and class (`allow_user_code_row`). Under `ask_outcome = "ask"` an embedded Block holds
 //! only for commands the catalog covers: an unknown option makes the command
 //! uncovered, so it is an Ask. `SHGUARD_CONFIG` must be an absolute path.
 //! `decision_log` must be absolute (the only thing the loader checks) and its
@@ -36,7 +37,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub use crate::catalog::AskOutcome;
-use crate::catalog::load::{load_files, parse_sources};
+use crate::catalog::load::{load_files, load_files_split, parse_sources};
 use crate::catalog::{Checked, Failed, LoadWarning, Loaded, Origin, Source, parse_config};
 
 /// What the hook runs with.
@@ -53,6 +54,9 @@ pub struct Settings {
     /// far as an Allow goes, so the hook needs no second catalog to tell a
     /// user-row Allow from an embedded one.
     pub embedded_only: Option<Loaded>,
+    /// The merged catalog without the user rows that got a
+    /// [`LoadWarning::CodeRunningHead`]; `None` when there are none.
+    pub without_code_rows: Option<Loaded>,
     /// What the loader found that does not stop the load. `shguard check`
     /// prints them; the hook never does.
     pub warnings: Vec<LoadWarning>,
@@ -120,7 +124,7 @@ pub fn settings(embedded: &[Source<'_>], config: Option<(&str, &str)>) -> Result
             Err(e) => errs.push(e),
         }
     }
-    let Checked { loaded, warnings } = load_files(files, errs)?;
+    let (Checked { loaded, warnings }, without_code_rows) = load_files_split(files, errs)?;
     let embedded_only = if adds_rows {
         let mut none = Vec::new();
         let files = parse_sources(embedded, &mut none);
@@ -139,6 +143,7 @@ pub fn settings(embedded: &[Source<'_>], config: Option<(&str, &str)>) -> Result
         decision_log,
         loaded,
         embedded_only,
+        without_code_rows,
         warnings,
     })
 }

@@ -5,9 +5,13 @@
 ### Added
 
 - Each decision log line has a stable `class` field (`allow`,
-  `allow_user_row`, `rule_hit`, `unknown:<kind>`, `parse_refusal:<kind>`,
+  `allow_user_row`, `allow_user_code_row`, `rule_hit`, `unknown:<kind>`, `parse_refusal:<kind>`,
   `load_error`), and `shguard report [--show-commands] <log>` counts a log by
   class without printing command text unless asked (#1243).
+- An Allow that needs a user row that does not set `runs_code` for a head that
+  runs other code or has option syntax the grammar cannot express has its own
+  hook reason and the class `allow_user_code_row`, so the risk shows in the
+  hook and the log without running `shguard check` (#1270).
 
 ### Changed
 
@@ -21,9 +25,9 @@
   an Ask (#1242); when the load also has errors, they print the warnings
   after the errors and exit 1 (#1269). An embedded catalog row with such a
   head and no `runs_code` is still a load error (#1265).
-- The hook reason of an Allow that only a user `[[row]]` gives reads
-  "covered by the catalog through a user [[row]]; no rule hit", and the
-  decision log line carries it (#1242).
+- The hook reason of an Allow that only a user `[[row]]` gives, a row that
+  loads without a warning, reads "covered by the catalog through a user
+  [[row]]; no rule hit", and the decision log line carries it (#1242).
 
 ## 0.12.0 - 2026-11-10
 

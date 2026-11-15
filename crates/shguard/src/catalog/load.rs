@@ -407,6 +407,8 @@ struct Entry {
     label: String,
     key: Vec<Vec<u8>>,
     row: Option<Row>,
+    /// The row produced a [`LoadWarning::CodeRunningHead`].
+    warned: bool,
 }
 
 /// A catalog that loaded, with the warnings found while loading it.
@@ -561,8 +563,22 @@ fn is_legacy(text: &str) -> bool {
 /// the [`LoadWarning`]s found beside them.
 pub(crate) fn load_files(
     files: Vec<(String, Origin, ParsedFile)>,
-    mut errs: Vec<LoadError>,
+    errs: Vec<LoadError>,
 ) -> Result<Checked, Failed> {
+    load_files_split(files, errs).map(|(checked, _)| checked)
+}
+
+/// Like [`load_files`], and also the catalog without the rows that got a
+/// [`LoadWarning::CodeRunningHead`]: `Some` only when there is such a row. It
+/// has the same rules and hints as the merged catalog.
+///
+/// # Errors
+///
+/// Same as [`load_files`].
+pub(crate) fn load_files_split(
+    files: Vec<(String, Origin, ParsedFile)>,
+    mut errs: Vec<LoadError>,
+) -> Result<(Checked, Option<Loaded>), Failed> {
     let mut warnings = Vec::new();
     let mut entries = Vec::new();
     let mut rule_dtos: Vec<(String, RuleDto)> = Vec::new();
@@ -640,17 +656,35 @@ pub(crate) fn load_files(
             warnings,
         });
     }
-    let rows = entries.into_iter().filter_map(|e| e.row).collect();
-    Ok(Checked {
+    let hints: Vec<Hint> = hints.into_iter().map(|(h, _)| h).collect();
+    let any_warned = entries.iter().any(|e| e.warned && e.row.is_some());
+    let mut unwarned = Vec::new();
+    let mut rows = Vec::new();
+    for e in entries {
+        let Some(row) = e.row else { continue };
+        if any_warned && !e.warned {
+            unwarned.push(row.clone());
+        }
+        rows.push(row);
+    }
+    let without_code_rows = any_warned.then(|| Loaded {
+        catalog: Catalog::new(unwarned, Vec::new()),
+        rules: rules.clone(),
+        rule_ids: rule_ids.clone(),
+        rule_reasons: rule_reasons.clone(),
+        hints: hints.clone(),
+    });
+    let checked = Checked {
         loaded: Loaded {
             catalog: Catalog::new(rows, Vec::new()),
             rules,
             rule_ids,
             rule_reasons,
-            hints: hints.into_iter().map(|(h, _)| h).collect(),
+            hints,
         },
         warnings,
-    })
+    };
+    Ok((checked, without_code_rows))
 }
 
 /// Checks one hint against the hints before it. A hint key needs no row:
@@ -779,6 +813,7 @@ fn build_row(
     let label = dto.key.join(" ");
     let key = seg_bytes(&dto.key);
     let before = errs.len();
+    let mut warned = false;
     let key_valid = key_ok(&key);
     if !key_valid {
         errs.push(LoadError::BadRowKey {
@@ -805,10 +840,13 @@ fn build_row(
                 file: file.to_owned(),
                 row,
             }),
-            Origin::User => warnings.push(LoadWarning::CodeRunningHead {
-                file: file.to_owned(),
-                row,
-            }),
+            Origin::User => {
+                warned = true;
+                warnings.push(LoadWarning::CodeRunningHead {
+                    file: file.to_owned(),
+                    row,
+                });
+            }
         }
     }
     if key.first().is_some_and(|h| h.contains(&b'/')) {
@@ -926,6 +964,7 @@ fn build_row(
         // key-based checks.
         key: if key_valid { key } else { Vec::new() },
         row,
+        warned,
     }
 }
 

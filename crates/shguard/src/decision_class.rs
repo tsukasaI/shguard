@@ -16,6 +16,10 @@ pub enum DecisionClass {
     Allow,
     /// An Allow that needs a user `[[row]]`.
     AllowUserRow,
+    /// An Allow that needs a user `[[row]]` that does not set `runs_code` for
+    /// a head that runs other code or has option syntax the grammar cannot
+    /// express (a row that loads with a warning).
+    AllowUserCodeRow,
     /// A rule hit (an Ask or a Block).
     RuleHit,
     /// A command the catalog does not cover, by the kernel's kind.
@@ -37,6 +41,7 @@ impl DecisionClass {
         match self {
             Self::Allow => "allow",
             Self::AllowUserRow => "allow_user_row",
+            Self::AllowUserCodeRow => "allow_user_code_row",
             Self::RuleHit => "rule_hit",
             Self::Unknown(kind) => unknown(kind),
             Self::ParseRefusal(kind) => parse_refusal(kind),

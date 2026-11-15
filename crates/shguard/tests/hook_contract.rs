@@ -399,3 +399,22 @@ fn bare_invocation_is_hook_mode() {
     // Empty stdin is malformed input, answered, with status 0.
     assert!(decision(&out).is_some());
 }
+
+#[test]
+fn an_allow_through_a_warned_code_row_is_logged_with_its_class_and_prints_nothing() {
+    let dir = ok(tempfile::tempdir());
+    let log = dir.path().join("decisions.jsonl");
+    let text = format!(
+        "decision_log = {:?}\n[[row]]\nkey = [\"bash\"]\nsource = \"https://example.com\"\n\
+         order = \"permute\"\ndashdash = \"ends\"\n",
+        log.display().to_string()
+    );
+    let out = run(&bash("bash"), &Config::File(&text));
+    assert_eq!(decision(&out).as_deref(), Some("allow"));
+    assert!(out.stderr.is_empty(), "{out:?}");
+    // The log is written with its own bound after the answer; the child has
+    // exited by now.
+    let line = ok(std::fs::read_to_string(&log));
+    let logged: Value = ok(serde_json::from_str(line.trim()));
+    assert_eq!(logged["class"], "allow_user_code_row");
+}
