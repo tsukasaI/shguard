@@ -178,6 +178,20 @@ to it is yours.
 - `nix build`: it runs the flake's code (derivation builders; on macOS the
   Nix sandbox is off by default), and an installable can name a remote flake
   (`github:o/r#x`), which is code from outside the repository.
+- `bun` is an inexpressible head, so these rows load with a warning (see
+  above; leave out `runs_code`, or every command stays an Ask). `bun test` runs
+  the test files under the paths it is given (the working directory by
+  default). A path can be absolute or start with `~`, and bun runs a file
+  named with `./` or `/` even when it is not a `*.test.*` file. `bunfig.toml`
+  can preload a script before them. `bun run <script>` runs a `package.json`
+  script, which is arbitrary code, and also runs `pre<script>`/`post<script>`
+  and any script it calls, so the recipe gives each script its own row: list
+  only scripts you have read, together with their `pre<script>`/`post<script>`
+  scripts and any script they call. A script name with no row,
+  a file (`bun run x.ts`), `bun x.ts`, `bun -e` and `bunx` stay Ask, and so do
+  extra arguments to a script (`bun run lint --fix`). `bun test` takes only
+  file filters and `-t`/`--test-name-pattern`; `--preload`, `-u` and the rest
+  are left out. The rows are `cwd_sensitive`, so they are Ask after a `cd`.
 - `git checkout` and `git restore` have no recipe: a row cannot require an
   option, so a row that allows `git checkout -b x` also allows
   `git checkout f`, which throws away local changes. Use `git switch -c`.
@@ -229,6 +243,48 @@ order = "permute"
 dashdash = "ends"
 rest = "path"
 opt = [{ short = "L", long = "print-build-logs" }, { long = "no-link" }]
+
+[[row]]
+key = ["bun"]
+source = "https://bun.sh/docs/cli/run"
+cwd_sensitive = true
+order = "strict"
+dashdash = "ends"
+positionals = []
+
+[[row]]
+key = ["bun", "run"]
+source = "https://bun.sh/docs/cli/run"
+cwd_sensitive = true
+order = "strict"
+dashdash = "ends"
+positionals = []
+
+[[row]]
+key = ["bun", "test"]
+source = "https://bun.sh/docs/cli/test"
+cwd_sensitive = true
+order = "permute"
+dashdash = "ends"
+rest = "path"
+opt = [{ short = "t", long = "test-name-pattern", value = { takes = "inert" } }]
+
+# One row per script you have read; each script is arbitrary code.
+[[row]]
+key = ["bun", "run", "lint"]
+source = "https://bun.sh/docs/cli/run"
+cwd_sensitive = true
+order = "strict"
+dashdash = "ends"
+positionals = []
+
+[[row]]
+key = ["bun", "run", "typecheck"]
+source = "https://bun.sh/docs/cli/run"
+cwd_sensitive = true
+order = "strict"
+dashdash = "ends"
+positionals = []
 ```
 
 The grammar has no option with more than one value and cannot require an
