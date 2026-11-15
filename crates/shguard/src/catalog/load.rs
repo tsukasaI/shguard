@@ -15,7 +15,7 @@ use super::dto::{
     AskOutcome, ConfigDto, DashDashDto, FileDto, HintDto, OptDto, OrderDto, OutcomeDto, PatKindDto,
     PlusWordsDto, RoleDto, RowDto, RuleDto, ScopeDto, TargetDto, ValueDto,
 };
-use super::{LoadError, LoadWarning};
+use super::{Failed, LoadError, LoadWarning};
 
 /// Command heads that the embedded catalog never gives a coverable row. A
 /// user row for one of them that does not set `runs_code` still loads, with a
@@ -423,8 +423,9 @@ pub struct Checked {
 ///
 /// # Errors
 ///
-/// Every [`LoadError`] found, if there is at least one.
-pub fn load(sources: &[Source<'_>]) -> Result<Checked, Vec<LoadError>> {
+/// A [`Failed`] with every [`LoadError`] found, if there is at least one, and
+/// the [`LoadWarning`]s found beside them.
+pub fn load(sources: &[Source<'_>]) -> Result<Checked, Failed> {
     let mut errs = Vec::new();
     let files = parse_sources(sources, &mut errs);
     load_files(files, errs)
@@ -553,11 +554,12 @@ fn is_legacy(text: &str) -> bool {
 ///
 /// # Errors
 ///
-/// Every [`LoadError`] found, if there is at least one.
+/// A [`Failed`] with every [`LoadError`] found, if there is at least one, and
+/// the [`LoadWarning`]s found beside them.
 pub(crate) fn load_files(
     files: Vec<(String, Origin, ParsedFile)>,
     mut errs: Vec<LoadError>,
-) -> Result<Checked, Vec<LoadError>> {
+) -> Result<Checked, Failed> {
     let mut warnings = Vec::new();
     let mut entries = Vec::new();
     let mut rule_dtos: Vec<(String, RuleDto)> = Vec::new();
@@ -630,7 +632,10 @@ pub(crate) fn load_files(
         rule_reasons.push(reason);
     }
     if !errs.is_empty() {
-        return Err(errs);
+        return Err(Failed {
+            errors: errs,
+            warnings,
+        });
     }
     let rows = entries.into_iter().filter_map(|e| e.row).collect();
     Ok(Checked {

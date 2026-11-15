@@ -24,6 +24,15 @@ pub enum LoadWarning {
     },
 }
 
+/// A load that found at least one error, with the warnings found beside them.
+#[derive(Debug)]
+pub struct Failed {
+    /// Every error found; never empty.
+    pub errors: Vec<LoadError>,
+    /// The warnings found, in file order; a file that fails to parse adds none.
+    pub warnings: Vec<LoadWarning>,
+}
+
 /// A problem found while loading catalog files. Every variant names the file
 /// and where in it: a row (its key joined with spaces) or a rule (its id).
 #[derive(Debug, Error)]

@@ -37,7 +37,7 @@ use std::path::PathBuf;
 
 pub use crate::catalog::AskOutcome;
 use crate::catalog::load::{load_files, parse_sources};
-use crate::catalog::{Checked, LoadError, LoadWarning, Loaded, Origin, Source, parse_config};
+use crate::catalog::{Checked, Failed, LoadWarning, Loaded, Origin, Source, parse_config};
 
 /// What the hook runs with.
 #[derive(Debug)]
@@ -101,11 +101,9 @@ pub fn locate(shguard_config: Option<OsString>, home: Option<OsString>) -> Locat
 ///
 /// # Errors
 ///
-/// Every [`LoadError`] found in the embedded files and the config.
-pub fn settings(
-    embedded: &[Source<'_>],
-    config: Option<(&str, &str)>,
-) -> Result<Settings, Vec<LoadError>> {
+/// A [`Failed`] with every [`LoadError`](crate::catalog::LoadError) found in the embedded files and the
+/// config, and the warnings found beside them.
+pub fn settings(embedded: &[Source<'_>], config: Option<(&str, &str)>) -> Result<Settings, Failed> {
     let mut errs = Vec::new();
     let mut files = parse_sources(embedded, &mut errs);
     let mut ask_outcome = AskOutcome::default();
@@ -126,7 +124,13 @@ pub fn settings(
     let embedded_only = if adds_rows {
         let mut none = Vec::new();
         let files = parse_sources(embedded, &mut none);
-        Some(load_files(files, none)?.loaded)
+        match load_files(files, none) {
+            Ok(embedded_checked) => Some(embedded_checked.loaded),
+            Err(mut failed) => {
+                failed.warnings.splice(0..0, warnings);
+                return Err(failed);
+            }
+        }
     } else {
         None
     };
@@ -142,6 +146,7 @@ pub fn settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::LoadError;
 
     fn os(s: &str) -> Option<OsString> {
         Some(OsString::from(s))
@@ -182,7 +187,7 @@ mod tests {
     fn first_error(text: &str) -> LoadError {
         match settings(&[], Some(("c", text))) {
             Ok(_) => panic!("`{text}` loads"),
-            Err(mut e) => e.remove(0),
+            Err(mut e) => e.errors.remove(0),
         }
     }
 

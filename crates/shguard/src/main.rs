@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use shguard::catalog::{EMBEDDED, LoadError, Origin, Source, load};
+use shguard::catalog::{EMBEDDED, Failed, LoadError, Origin, Source, load};
 use shguard::config::{Location, Settings, locate, settings};
 use shguard::decision_class::DecisionClass;
 use shguard::hook::{Response, panic_output, render, to_bytes};
@@ -163,7 +163,7 @@ fn hook(location: Location) -> ExitCode {
         command,
         response,
         class,
-    } = answer_classified(&input, loaded.as_ref().map_err(Vec::as_slice));
+    } = answer_classified(&input, loaded.as_ref().map_err(|f| f.errors.as_slice()));
     let mut out = std::io::stdout().lock();
     match out
         .write_all(&to_bytes(&render(&response)))
@@ -286,23 +286,32 @@ fn init_config(location: Location) -> ExitCode {
 
 /// Reads the config at `location` and merges it with the embedded catalog.
 /// Only a missing file at the default path means "no config".
-fn load_settings(location: Location) -> Result<Settings, Vec<LoadError>> {
+fn load_settings(location: Location) -> Result<Settings, Failed> {
     let (path, optional) = match location {
         Location::Nowhere => return settings(EMBEDDED, None),
         Location::Default(p) => (p, true),
         Location::Explicit(p) => (p, false),
         Location::Relative(p) => {
-            return Err(vec![LoadError::Read {
-                file: p.to_string_lossy().into_owned(),
-                error: std::io::Error::new(std::io::ErrorKind::InvalidInput, RELATIVE_PATH_MESSAGE),
-            }]);
+            return Err(Failed {
+                errors: vec![LoadError::Read {
+                    file: p.to_string_lossy().into_owned(),
+                    error: std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        RELATIVE_PATH_MESSAGE,
+                    ),
+                }],
+                warnings: Vec::new(),
+            });
         }
     };
     let name = path.to_string_lossy().into_owned();
     match std::fs::read_to_string(&path) {
         Ok(text) => settings(EMBEDDED, Some((&name, &text))),
         Err(e) if optional && e.kind() == std::io::ErrorKind::NotFound => settings(EMBEDDED, None),
-        Err(error) => Err(vec![LoadError::Read { file: name, error }]),
+        Err(error) => Err(Failed {
+            errors: vec![LoadError::Read { file: name, error }],
+            warnings: Vec::new(),
+        }),
     }
 }
 
@@ -340,9 +349,12 @@ fn check_config(location: Location, err: &mut impl Write) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(errors) => {
-            for e in errors {
+        Err(failed) => {
+            for e in failed.errors {
                 drop(writeln!(err, "{e}"));
+            }
+            for w in &failed.warnings {
+                drop(writeln!(err, "warning: {w}"));
             }
             ExitCode::FAILURE
         }
@@ -380,9 +392,12 @@ fn check(files: &[PathBuf], err: &mut impl Write) -> ExitCode {
                     drop(writeln!(err, "warning: {w}"));
                 }
             }
-            Err(errors) => {
-                for e in errors {
+            Err(load_failed) => {
+                for e in load_failed.errors {
                     drop(writeln!(err, "{e}"));
+                }
+                for w in &load_failed.warnings {
+                    drop(writeln!(err, "warning: {w}"));
                 }
                 failed = true;
             }

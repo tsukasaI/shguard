@@ -19,7 +19,7 @@ use shguard_kernel::catalog::{
 use shguard_kernel::decision::Decision;
 use shguard_kernel::rule::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
 
-fn load_one(text: &str) -> Result<Checked, Vec<LoadError>> {
+fn load_one(text: &str) -> Result<Checked, shguard::catalog::Failed> {
     load(&[Source {
         origin: Origin::User,
         name: "t.toml",
@@ -30,7 +30,7 @@ fn load_one(text: &str) -> Result<Checked, Vec<LoadError>> {
 fn errors(text: &str) -> Vec<LoadError> {
     match load_one(text) {
         Ok(_) => panic!("expected load errors"),
-        Err(e) => e,
+        Err(e) => e.errors,
     }
 }
 
@@ -96,7 +96,8 @@ fn toml_error_in_one_file_does_not_hide_others() {
             text: &both,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(errs.iter().any(|e| matches!(e, LoadError::Toml { .. })));
     assert!(
         errs.iter()
@@ -165,7 +166,8 @@ fn duplicate_row_key_across_files() {
             text: &t,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(matches!(errs[0], LoadError::DuplicateRow { .. }));
 }
 
@@ -186,7 +188,8 @@ fn case_variant_duplicate_row() {
                 text: &upper,
             },
         ])
-        .unwrap_err();
+        .unwrap_err()
+        .errors;
         assert!(
             errs.iter()
                 .any(|e| matches!(e, LoadError::DuplicateRow { .. })),
@@ -213,7 +216,8 @@ fn case_variant_duplicate_row_against_embedded_and_later_segments() {
             text: &user_status,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(
         errs.iter()
             .any(|e| matches!(e, LoadError::DuplicateRow { file, .. } if file == "user.toml")),
@@ -234,7 +238,8 @@ fn case_variant_duplicate_row_against_embedded_and_later_segments() {
             text: &user_fd,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(
         errs.iter()
             .any(|e| matches!(e, LoadError::DuplicateRow { file, .. } if file == "user.toml")),
@@ -278,7 +283,8 @@ fn case_variant_head_of_option_key_still_collides() {
             text: &second,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(
         errs.iter().any(|e| matches!(
             e,
@@ -1228,7 +1234,8 @@ fn option_like_key_segment() {
                 text: &user,
             },
         ])
-        .unwrap_err();
+        .unwrap_err()
+        .errors;
         assert!(
             errs.iter()
                 .any(|e| matches!(e, LoadError::OptionLikeKey { file, .. } if file == "user.toml")),
@@ -1613,7 +1620,7 @@ fn a_user_hint_replaces_an_embedded_one() {
         name: "user2.toml",
         text: user,
     });
-    let errs = load(&sources).expect_err("duplicate");
+    let errs = load(&sources).expect_err("duplicate").errors;
     assert!(
         errs.iter()
             .any(|e| matches!(e, LoadError::DuplicateHint { .. }))
@@ -1676,4 +1683,77 @@ fn load_returns_the_warnings_beside_the_catalog() {
         Decision::Allow,
         "the warned row stays in the catalog"
     );
+}
+
+fn row_without_source() -> String {
+    "[[row]]\nkey = [\"zzbad\"]\norder = \"permute\"\ndashdash = \"ends\"\n".to_owned()
+}
+
+fn failing_text(with_warned_row: bool) -> String {
+    if with_warned_row {
+        format!("{}{}", row_without_source(), row("\"env\"", ""))
+    } else {
+        row_without_source()
+    }
+}
+
+#[test]
+fn a_failed_load_returns_the_warnings_beside_the_errors() {
+    let Err(f) = load_one(&failing_text(true)) else {
+        panic!("a row without a source must fail the load");
+    };
+    assert!(!f.errors.is_empty());
+    assert!(
+        matches!(
+            f.warnings[..],
+            [shguard::catalog::LoadWarning::CodeRunningHead { .. }]
+        ),
+        "{:?}",
+        f.warnings
+    );
+}
+
+/// Runs `shguard <args> <path>` on an error-only text and then on the same
+/// path holding the error plus a warned row: both fail, and the second run's
+/// stderr is the first's plus exactly one line.
+fn assert_warnings_beside_errors(args: &[&str]) -> std::io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let home = tempfile::tempdir()?;
+    let path = dir.path().join("failing.toml");
+    let run = |text: String| -> std::io::Result<(Option<i32>, String)> {
+        std::fs::write(&path, text)?;
+        let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
+            .args(args)
+            .arg(&path)
+            .env("HOME", home.path())
+            .env_remove("SHGUARD_CONFIG")
+            .output()?;
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        Ok((out.status.code(), stderr))
+    };
+    let (without_code, without) = run(failing_text(false))?;
+    let (with_code, with) = run(failing_text(true))?;
+    assert_eq!(without_code, Some(1), "{without}");
+    assert_eq!(with_code, Some(1), "{with}");
+    assert!(!without.is_empty(), "the error goes to stderr");
+    let with_lines: Vec<&str> = with.lines().collect();
+    for line in without.lines() {
+        assert!(with_lines.contains(&line), "{line:?} missing from {with}");
+    }
+    assert_eq!(
+        with_lines.len(),
+        without.lines().count() + 1,
+        "{with} / {without}"
+    );
+    Ok(())
+}
+
+#[test]
+fn check_prints_warnings_beside_load_errors() -> std::io::Result<()> {
+    assert_warnings_beside_errors(&["check"])
+}
+
+#[test]
+fn check_config_prints_warnings_beside_load_errors() -> std::io::Result<()> {
+    assert_warnings_beside_errors(&["check", "--config"])
 }
