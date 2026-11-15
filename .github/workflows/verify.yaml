@@ -2,6 +2,8 @@ name: verify
 
 on:
   pull_request:
+    # edited: fixing the PR body re-runs the P2 audit check (#1258).
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 
@@ -20,6 +22,38 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The P2 audit step diffs against the PR base.
+          fetch-depth: 0
+      # A PR that changes a catalog row, or how the loader or kernel reads one,
+      # needs a filled "## P2 audit" section (#1258; CLAUDE.md, "Tests and
+      # catalog"). The PR body is untrusted text: it reaches the script only
+      # through env, never through an expression inside run.
+      - name: P2 audit section is filled
+        if: github.event_name == 'pull_request'
+        env: { PR_BODY: "${{ github.event.pull_request.body }}", BASE_SHA: "${{ github.event.pull_request.base.sha }}" }
+        run: |
+          # Pathspecs, no rename detection: a file renamed out of a watched
+          # directory still lists. A git failure (bad BASE_SHA) fails the step.
+          paths=$(git diff --name-only --no-renames "$BASE_SHA" HEAD -- catalog crates/shguard/src/catalog crates/shguard-kernel/src)
+          if [ -z "$paths" ]; then
+            echo "no catalog, loader or kernel path changed; P2 audit not required"
+            exit 0
+          fi
+          # Lines after the heading up to the next "## ", HTML comments
+          # (multi-line too) and bare-URL lines (the session-URL footer) dropped,
+          # surrounding whitespace trimmed. There is no pipefail here: only
+          # perl's exit status counts, and an awk or tr failure reads as an
+          # empty section, which fails closed. awk still reads all its input.
+          section=$(printf '%s\n' "$PR_BODY" | tr -d '\r' \
+            | awk '/^## P2 audit[[:space:]]*$/ && !done { on = 1; next } on && /^## / { on = 0; done = 1 } on { print }' \
+            | perl -0pe 's/<!--.*?-->//gs; s{^[ \t]*https?://\S+[ \t]*$}{}mg; s/\A\s+//; s/\s+\z//')
+          case "$section" in
+            "" | N/A*)
+              echo "::error::these paths changed: $(printf '%s' "$paths" | tr '\n' ' '). Fill in the PR body's '## P2 audit' section with the spellings tried, the decision shguard returns for each and the real tool's argv parsing (CLAUDE.md, 'Tests and catalog'); it is empty or starts with N/A."
+              exit 1
+              ;;
+          esac
+          echo "P2 audit section present"
       # Installs the toolchain rust-toolchain.toml names (#1013).
       - name: Install toolchain
         run: rustup toolchain install --no-self-update
