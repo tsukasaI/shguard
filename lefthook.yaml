@@ -6,7 +6,9 @@ pre-commit:
   parallel: true
   commands:
     gitleaks:
-      run: gitleaks git --staged --redact
+      # The central dotfiles config, not this repo's .gitleaks.toml, so a change
+      # here cannot weaken the scan; inline gitleaks:allow comments are ignored.
+      run: gitleaks git --staged --redact --config "$HOME/.config/gitleaks/gitleaks.toml" --ignore-gitleaks-allow
     rust-format:
       glob: "*.rs"
       run: cargo fmt --all -- --check
@@ -29,6 +31,12 @@ pre-commit:
 # ("no files for inspection"). (`files:` overrides and a hook-level `files:` do NOT help; a
 # `# {all_files}` comment does not count; {files}/{push_files} are the empty
 # push list itself.)
+#
+# prepush-sandbox (dotfiles): git push runs these outside Claude Code's
+# sandbox, so jobs that build or run the repo's code (build scripts, proc
+# macros, tests) run under srt with no network and no secret reads.
+# rust-format runs no repo code; cargo-deny needs the network for its
+# advisory database, so both stay unwrapped.
 pre-push:
   parallel: true
   commands:
@@ -37,10 +45,10 @@ pre-push:
       run: ": {all_files}; cargo fmt --all -- --check"
     rust-lint:
       glob: "Cargo.toml"
-      run: ": {all_files}; cargo clippy --workspace --all-targets -- -D warnings"
+      run: ": {all_files}; prepush-sandbox cargo clippy --workspace --all-targets -- -D warnings"
     rust-test:
       glob: "Cargo.toml"
-      run: ": {all_files}; cargo test --workspace"
+      run: ": {all_files}; prepush-sandbox cargo test --workspace"
     cargo-deny:
       glob: "Cargo.toml"
       run: ": {all_files}; cargo deny check"
@@ -53,7 +61,7 @@ pre-push:
       glob: "spikes/lattice/Cargo.toml"
       skip:
         - run: "! command -v cargo-creusot"
-      run: ": {all_files}; cargo creusot --span-mode relative"
+      run: ": {all_files}; prepush-sandbox cargo creusot --span-mode relative"
     # The kernel is a workspace member: why3find.json and verif/ live at the
     # workspace root, and the run starts from the crate directory.
     proof-kernel:
@@ -61,4 +69,4 @@ pre-push:
       glob: "crates/shguard-kernel/Cargo.toml"
       skip:
         - run: "! command -v cargo-creusot"
-      run: ": {all_files}; cargo creusot --span-mode relative"
+      run: ": {all_files}; prepush-sandbox cargo creusot --span-mode relative"
