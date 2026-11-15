@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0 - 2026-11-15
 
 ### Added
 
@@ -31,6 +31,23 @@
 - The hook reason of an Allow that only a user `[[row]]` gives, a row that
   loads without a warning, reads "covered by the catalog through a user
   [[row]]; no rule hit", and the decision log line carries it (#1242).
+- More heads are treated as code-running, so a user row for one of them
+  without `runs_code` loads with the warning above (#1242), and an embedded
+  row for one is a load error (#1265): `pythonw-3.12` (`pythonw` followed by
+  `-` and a digit), `pwsh-preview`, `pwsh-lts` and a versioned `wish`
+  (`wish8.6`, `wish-8.6`) (#1211, #1212, #1217), and 25 more: `r`, `jirb`,
+  `jrubyc`, `escript`, `erl`, `elixirc`, `mix`, `groovysh`, `groovyconsole`,
+  `tkcon`, `nodejs`, `mawk`, `nawk`, `mksh`, `ash`, `yash`, `nu`, `elvish`,
+  `xonsh`, `busybox`, `stdbuf`, `setsid`, `chroot`, `podman` and `screen`
+  (#1218). Heads compare in ASCII lower case, as for the other heads.
+- A non-ASCII byte in a row key segment after the head
+  (`["git", "Clipp\u{17f}"]`) is now a load error (`NonAsciiSegment`), as it
+  already was for the head. A 0.12.0 config with such a row fails to load, so
+  the hook denies every Bash call until the key is spelled in ASCII (#1207).
+- The duplicate-row check keeps a key segment that starts with `-` or `+`
+  (an option spelling) case-sensitive, so rows keyed `["fd", "-x"]` and
+  `["fd", "-X"]` are different rows and load together. Other segments still
+  fold ASCII case, so `FD` still collides with `fd` (#1205).
 
 ## 0.12.0 - 2026-11-10
 
