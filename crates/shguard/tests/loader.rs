@@ -1663,11 +1663,17 @@ fn a_user_source_named_embedded_still_replaces_the_embedded_hint() {
 
 #[test]
 fn load_returns_the_warnings_beside_the_catalog() {
-    let Ok(checked) = load_one(&row("\"env\"", "")) else {
-        panic!("a code-running head without runs_code must still load");
+    let checked = match load_one(&row("\"env\"", "")) {
+        Ok(c) => c,
+        Err(e) => panic!("a code-running head without runs_code must still load: {e:?}"),
     };
     assert!(matches!(
         checked.warnings[..],
         [shguard::catalog::LoadWarning::CodeRunningHead { .. }]
     ));
+    assert_eq!(
+        decide(&checked.loaded, "env"),
+        Decision::Allow,
+        "the warned row stays in the catalog"
+    );
 }
