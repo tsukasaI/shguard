@@ -1788,3 +1788,70 @@ fn a_code_running_head_without_runs_code_is_an_error_when_embedded_and_a_warning
         Err(f) => panic!("a user row must load: {f:?}"),
     }
 }
+
+#[test]
+fn check_deny_warnings_fails_a_warned_catalog_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let warned = dir.path().join("warn.toml");
+    std::fs::write(&warned, row("\"env\"", "")).unwrap();
+    let clean = dir.path().join("clean.toml");
+    std::fs::write(&clean, row("\"ls\"", "")).unwrap();
+    let check = |args: &[&str], path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_shguard"))
+            .arg("check")
+            .args(args)
+            .arg(path)
+            .env("HOME", home.path())
+            .env_remove("SHGUARD_CONFIG")
+            .output()
+            .unwrap()
+    };
+    let out = check(&["--deny-warnings"], &warned);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!out.stderr.is_empty(), "the warning still goes to stderr");
+    let out = check(&["--deny-warnings"], &clean);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+    let out = check(&[], &warned);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+#[test]
+fn check_config_deny_warnings_fails_a_warned_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let warned = dir.path().join("warn.toml");
+    std::fs::write(&warned, row("\"env\"", "")).unwrap();
+    let clean = dir.path().join("clean.toml");
+    // `ls` would duplicate an embedded row, which a config merges with.
+    std::fs::write(&clean, "ask_outcome = \"ask\"\n").unwrap();
+    let check = |args: &[&str], path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_shguard"))
+            .arg("check")
+            .args(args)
+            .arg("--config")
+            .arg(path)
+            .env("HOME", home.path())
+            .env_remove("SHGUARD_CONFIG")
+            .output()
+            .unwrap()
+    };
+    let out = check(&["--deny-warnings"], &warned);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(!out.stderr.is_empty(), "the warning still goes to stderr");
+    let out = check(&["--deny-warnings"], &clean);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+    let out = check(&[], &warned);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
+#[test]
+fn check_deny_warnings_alone_is_a_usage_error() {
+    let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
+        .args(["check", "--deny-warnings"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+}
