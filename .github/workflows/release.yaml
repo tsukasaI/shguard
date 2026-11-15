@@ -20,8 +20,7 @@ jobs:
   # A tag on a main commit is not proof that `verify` passed on it, so this job
   # refuses any other commit, waits for `verify`'s push run on main for the
   # tagged SHA to succeed with its `rust` and `proofs` jobs (#1223, #1261,
-  # #1279), and re-checks what a mistagged commit
-  # would break.
+  # #1279), and re-checks what a mistagged commit would break.
   check:
     runs-on: ubuntu-latest
     # The wait for verify's push run ends at most 120 minutes after its step
@@ -29,7 +28,8 @@ jobs:
     # the last poll.
     timeout-minutes: 150
     # A job-level `permissions` replaces the workflow-level set, so
-    # `contents: read` is repeated; `actions: read` is for the workflow-runs and jobs APIs.
+    # `contents: read` is repeated; `actions: read` is for the workflow-runs
+    # and jobs APIs.
     permissions:
       contents: read
       actions: read
@@ -87,7 +87,7 @@ jobs:
             failures=$((failures + 1))
             echo "::warning::$1 (attempt ${failures})"
             test "${failures}" -lt 10 \
-              || { echo "::error::$1 failed ${failures} times in a row"; exit 1; }
+              || { echo "::error::$1: ${failures} API failures in a row"; exit 1; }
             sleep 30
           }
           while :; do
@@ -119,7 +119,9 @@ jobs:
               success)
                 seen=1
                 gone=0
-                for id in $(jq -r '.[].id' <<< "${runs}"); do
+                ids=$(jq -r '.[].id' <<< "${runs}")
+                test -n "${ids}" || { echo "::error::no verify run id to check jobs for"; exit 1; }
+                for id in ${ids}; do
                   if ! jobs=$(gh api --paginate \
                     "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/jobs?filter=latest&per_page=100" \
                     | jq -s '[.[].jobs[]]'); then
@@ -135,7 +137,7 @@ jobs:
                         end;
                     need("rust"), need("proofs")' <<< "${jobs}")
                   if test -n "${problems}"; then
-                    echo "::error::verify run ${id}: ${problems//$'\n'/; }; re-run that verify run (gh run rerun ${id}), then re-run this job"
+                    echo "::error::verify run ${id}: ${problems//$'\n'/; }; re-run that verify run (gh run rerun ${id}) unless verify.yaml skips or renames the job, then re-run this job"
                     exit 1
                   fi
                 done
