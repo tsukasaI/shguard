@@ -251,7 +251,9 @@ fn code_option_hit(c: &CodeOptions, name: &OptName) -> Option<&'static str> {
 }
 
 /// Where a catalog file comes from. A user hint replaces an embedded hint
-/// with the same key; the file name says nothing about the origin.
+/// with the same key; the file name says nothing about the origin. The origin
+/// also decides whether a code-running head without `runs_code` is an error
+/// (embedded) or a warning (user).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     /// Compiled into the binary.
@@ -767,9 +769,6 @@ fn opt_name(file: &str, row: &str, dto: &OptDto, errs: &mut Vec<LoadError>) -> O
     }
 }
 
-/// Builds one row. A head that runs code (or has option syntax the grammar
-/// cannot express) without `runs_code` is a [`LoadError::CodeRunningHead`] in
-/// an embedded file and a [`LoadWarning::CodeRunningHead`] in a user file.
 fn build_row(
     file: &str,
     origin: Origin,

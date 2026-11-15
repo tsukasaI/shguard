@@ -1767,12 +1767,13 @@ fn a_code_running_head_without_runs_code_is_an_error_when_embedded_and_a_warning
         text: &text,
     }]);
     match embedded {
-        Err(f) => assert!(
-            f.errors
-                .iter()
-                .any(|e| matches!(e, LoadError::CodeRunningHead { .. })),
-            "{f:?}"
-        ),
+        Err(f) => {
+            assert!(
+                matches!(f.errors.as_slice(), [LoadError::CodeRunningHead { .. }]),
+                "{f:?}"
+            );
+            assert!(f.warnings.is_empty(), "{f:?}");
+        }
         Ok(_) => panic!("an embedded row with a code-running head must not load"),
     }
     match load_one(&text) {
