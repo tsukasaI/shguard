@@ -1713,52 +1713,47 @@ fn a_failed_load_returns_the_warnings_beside_the_errors() {
     );
 }
 
-#[test]
-fn check_prints_warnings_beside_load_errors() {
-    let dir = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    let plain = dir.path().join("plain.toml");
-    std::fs::write(&plain, failing_text(false)).unwrap();
-    let warned = dir.path().join("warned.toml");
-    std::fs::write(&warned, failing_text(true)).unwrap();
-    let check = |path: &std::path::Path| {
-        Command::new(env!("CARGO_BIN_EXE_shguard"))
-            .arg("check")
-            .arg(path)
+/// Runs `shguard <args> <path>` on an error-only text and then on the same
+/// path holding the error plus a warned row: both fail, and the second run's
+/// stderr is the first's plus exactly one line.
+fn assert_warnings_beside_errors(args: &[&str]) -> std::io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let home = tempfile::tempdir()?;
+    let path = dir.path().join("failing.toml");
+    let run = |text: String| -> std::io::Result<(Option<i32>, String)> {
+        std::fs::write(&path, text)?;
+        let out = Command::new(env!("CARGO_BIN_EXE_shguard"))
+            .args(args)
+            .arg(&path)
             .env("HOME", home.path())
             .env_remove("SHGUARD_CONFIG")
-            .output()
-            .unwrap()
+            .output()?;
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        Ok((out.status.code(), stderr))
     };
-    let without = check(&plain);
-    let with = check(&warned);
-    assert_eq!(without.status.code(), Some(1), "{without:?}");
-    assert_eq!(with.status.code(), Some(1), "{with:?}");
-    let lines = |out: &std::process::Output| out.stderr.split(|b| *b == b'\n').count();
-    assert_eq!(lines(&with), lines(&without) + 1, "{with:?} {without:?}");
+    let (without_code, without) = run(failing_text(false))?;
+    let (with_code, with) = run(failing_text(true))?;
+    assert_eq!(without_code, Some(1), "{without}");
+    assert_eq!(with_code, Some(1), "{with}");
+    assert!(!without.is_empty(), "the error goes to stderr");
+    let with_lines: Vec<&str> = with.lines().collect();
+    for line in without.lines() {
+        assert!(with_lines.contains(&line), "{line:?} missing from {with}");
+    }
+    assert_eq!(
+        with_lines.len(),
+        without.lines().count() + 1,
+        "{with} / {without}"
+    );
+    Ok(())
 }
 
 #[test]
-fn check_config_prints_warnings_beside_load_errors() {
-    let dir = tempfile::tempdir().unwrap();
-    let home = tempfile::tempdir().unwrap();
-    let plain = dir.path().join("plain.toml");
-    std::fs::write(&plain, failing_text(false)).unwrap();
-    let warned = dir.path().join("warned.toml");
-    std::fs::write(&warned, failing_text(true)).unwrap();
-    let check = |path: &std::path::Path| {
-        Command::new(env!("CARGO_BIN_EXE_shguard"))
-            .args(["check", "--config"])
-            .arg(path)
-            .env("HOME", home.path())
-            .env_remove("SHGUARD_CONFIG")
-            .output()
-            .unwrap()
-    };
-    let without = check(&plain);
-    let with = check(&warned);
-    assert_eq!(without.status.code(), Some(1), "{without:?}");
-    assert_eq!(with.status.code(), Some(1), "{with:?}");
-    let lines = |out: &std::process::Output| out.stderr.split(|b| *b == b'\n').count();
-    assert_eq!(lines(&with), lines(&without) + 1, "{with:?} {without:?}");
+fn check_prints_warnings_beside_load_errors() -> std::io::Result<()> {
+    assert_warnings_beside_errors(&["check"])
+}
+
+#[test]
+fn check_config_prints_warnings_beside_load_errors() -> std::io::Result<()> {
+    assert_warnings_beside_errors(&["check", "--config"])
 }

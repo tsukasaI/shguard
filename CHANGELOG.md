@@ -18,7 +18,8 @@
   and now loads, so the row can make shguard Allow commands under that head.
   `shguard check` and `shguard check --config` print each warning to stderr
   and exit 0; the hook prints none. Set `runs_code = true` to keep the head
-  an Ask (#1242).
+  an Ask (#1242); when the load also has errors, they print the warnings
+  after the errors and exit 1 (#1269).
 - The hook reason of an Allow that only a user `[[row]]` gives reads
   "covered by the catalog through a user [[row]]; no rule hit", and the
   decision log line carries it (#1242).

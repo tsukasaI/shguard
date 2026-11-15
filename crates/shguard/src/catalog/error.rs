@@ -29,7 +29,7 @@ pub enum LoadWarning {
 pub struct Failed {
     /// Every error found; never empty.
     pub errors: Vec<LoadError>,
-    /// The warnings found before the load stopped, in file order.
+    /// The warnings found, in file order; a file that fails to parse adds none.
     pub warnings: Vec<LoadWarning>,
 }
 

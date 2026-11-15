@@ -233,7 +233,7 @@ option (`git commit` without `-m` opens the editor and waits).
 A config or catalog that fails to load makes the hook deny every Bash call,
 with the first error as the reason. `shguard check --config [<path>]` loads a
 config the way the hook does (merged with the embedded catalog, with
-`ask_outcome` and `decision_log`) and prints each error; a relative `<path>`
+`ask_outcome` and `decision_log`) and prints each error and warning; a relative `<path>`
 is read from the current directory, while `SHGUARD_CONFIG` itself must be
 absolute. Without a path it checks the file the hook would read with the same
 `HOME` and `SHGUARD_CONFIG`, and a missing file there is fine (no config,

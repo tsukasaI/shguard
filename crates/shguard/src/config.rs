@@ -124,7 +124,13 @@ pub fn settings(embedded: &[Source<'_>], config: Option<(&str, &str)>) -> Result
     let embedded_only = if adds_rows {
         let mut none = Vec::new();
         let files = parse_sources(embedded, &mut none);
-        Some(load_files(files, none)?.loaded)
+        match load_files(files, none) {
+            Ok(embedded_checked) => Some(embedded_checked.loaded),
+            Err(mut failed) => {
+                failed.warnings.splice(0..0, warnings);
+                return Err(failed);
+            }
+        }
     } else {
         None
     };
