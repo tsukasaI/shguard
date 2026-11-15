@@ -18,8 +18,8 @@ pub enum LoadWarning {
     CodeRunningHead {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces, with every non-ASCII
-        /// character escaped.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
 }
@@ -47,7 +47,8 @@ pub struct Failed {
 }
 
 /// A problem found while loading catalog files. Every variant names the file
-/// and where in it: a row (its key joined with spaces) or a rule (its id).
+/// and where in it: a row (its key joined with spaces and escaped with
+/// `str::escape_default`) or a rule (its id).
 #[derive(Debug, Error)]
 pub enum LoadError {
     /// The file is not valid TOML, or does not match the schema (unknown
@@ -62,93 +63,102 @@ pub enum LoadError {
         error: toml::de::Error,
     },
     /// A row has no `source`, or an empty one.
-    #[error("{file:?}: row {row:?}: missing or empty `source`")]
+    #[error("{file:?}: row \"{row}\": missing or empty `source`")]
     MissingSource {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row key is empty or has an empty segment.
-    #[error("{file:?}: row {row:?}: empty key or key segment")]
+    #[error("{file:?}: row \"{row}\": empty key or key segment")]
     BadRowKey {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// An option name is not a valid short or long name.
-    #[error("{file:?}: row {row:?}: bad option name {name:?}")]
+    #[error("{file:?}: row \"{row}\": bad option name {name:?}")]
     BadOptName {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// The rejected option name, as written in the file.
         name: String,
     },
     /// An option has neither `short` nor `long`.
-    #[error("{file:?}: row {row:?}: option with neither `short` nor `long`")]
+    #[error("{file:?}: row \"{row}\": option with neither `short` nor `long`")]
     OptWithoutName {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// Two rows (possibly in different files) have the same key.
-    #[error("{file:?}: row {row:?}: duplicate key, first defined in {first_file:?}")]
+    #[error("{file:?}: row \"{row}\": duplicate key, first defined in {first_file:?}")]
     DuplicateRow {
         /// Name of the file holding the later, duplicate row.
         file: String,
-        /// Key shared by both rows, segments joined with spaces.
+        /// Key shared by both rows, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// Name of the file holding the first row with this key.
         first_file: String,
     },
     /// Two options of one grammar share a short or a long name.
-    #[error("{file:?}: row {row:?}: duplicate option name {name:?}")]
+    #[error("{file:?}: row \"{row}\": duplicate option name {name:?}")]
     DuplicateOpt {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// The option name that occurs twice, spelled as on argv (`-x` or `--name`).
         name: String,
     },
     /// A row with a longer key has no row for the key minus its last
     /// segment.
-    #[error("{file:?}: row {row:?}: no parent row")]
+    #[error("{file:?}: row \"{row}\": no parent row")]
     OrphanRow {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row sets both `changes_cwd` and `cwd_sensitive`.
-    #[error("{file:?}: row {row:?}: sets both `changes_cwd` and `cwd_sensitive`")]
+    #[error("{file:?}: row \"{row}\": sets both `changes_cwd` and `cwd_sensitive`")]
     ConflictingCwd {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row under a `cwd_sensitive` parent row does not set `cwd_sensitive`.
-    #[error("{file:?}: row {row:?}: the parent row is `cwd_sensitive`, so this row must be too")]
+    #[error("{file:?}: row \"{row}\": the parent row is `cwd_sensitive`, so this row must be too")]
     CwdSensitiveParent {
         /// Name of the file holding the child row.
         file: String,
         /// Key of the child row that lacks `cwd_sensitive`, segments joined
-        /// with spaces.
+        /// with spaces, escaped with `str::escape_default`.
         row: String,
     },
     /// A row head holds a `/` (`/bin/bash`, `/opt/homebrew/bin/fd`). The
     /// kernel matches heads byte for byte, so a path head would skip the
     /// head checks that a bare name gets.
-    #[error("{file:?}: row {row:?}: head is a path; name the command without `/`")]
+    #[error("{file:?}: row \"{row}\": head is a path; name the command without `/`")]
     PathHead {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row head holds a non-ASCII byte (`baſh`). The head checks compare in
@@ -160,8 +170,8 @@ pub enum LoadError {
     NonAsciiHead {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces, with every non-ASCII
-        /// character escaped like `head`.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default` like `head`.
         row: String,
         /// The head with every non-ASCII character escaped (`ba\u{17f}h`), so
         /// the head prints in ASCII.
@@ -176,8 +186,8 @@ pub enum LoadError {
     CodeRunningHead {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces, with every non-ASCII
-        /// character escaped.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row key segment after the head holds a non-ASCII byte
@@ -192,8 +202,8 @@ pub enum LoadError {
     NonAsciiSegment {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces, with every non-ASCII
-        /// character escaped like `segment`.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default` like `segment`.
         row: String,
         /// The segment with every non-ASCII character escaped (`Clipp\u{17f}`),
         /// so it prints in ASCII.
@@ -203,12 +213,13 @@ pub enum LoadError {
     /// lists one of them, or an abbreviation of one, without a
     /// `takes = "code"` value (#1111).
     #[error(
-        "{file:?}: row {row:?}: option {opt:?} runs code, so leave it out or give it `value = {{ takes = \"code\" }}`"
+        "{file:?}: row \"{row}\": option {opt:?} runs code, so leave it out or give it `value = {{ takes = \"code\" }}`"
     )]
     CodeOptionNotCode {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// The known code-running option the listed one spells in full or
         /// abbreviates, such as `-x`.
@@ -216,11 +227,12 @@ pub enum LoadError {
     },
     /// A parent option spells a `runs_code` child's last key segment but
     /// does not take a `Code` value (#1070).
-    #[error("{file:?}: row {row:?}: option {opt:?} is the child key but its value is not `code`")]
+    #[error("{file:?}: row \"{row}\": option {opt:?} is the child key but its value is not `code`")]
     ParentOptNotCode {
         /// Name of the file holding the parent row.
         file: String,
-        /// Key of the parent row, segments joined with spaces.
+        /// Key of the parent row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// The child's last key segment, which the parent's option spells.
         opt: String,
