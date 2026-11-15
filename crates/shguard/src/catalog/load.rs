@@ -415,8 +415,8 @@ pub struct Checked {
     pub warnings: Vec<LoadWarning>,
 }
 
-/// Loads and checks catalog files, and drops the warnings; see
-/// [`load_with_warnings`].
+/// Loads and checks catalog files, and returns the [`LoadWarning`]s beside
+/// the catalog. The loader prints nothing.
 ///
 /// A TOML or schema error stops that file only; the rows and rules of the
 /// other files are still merged and checked, and every error is returned.
@@ -424,17 +424,7 @@ pub struct Checked {
 /// # Errors
 ///
 /// Every [`LoadError`] found, if there is at least one.
-pub fn load(sources: &[Source<'_>]) -> Result<Loaded, Vec<LoadError>> {
-    load_with_warnings(sources).map(|checked| checked.loaded)
-}
-
-/// Loads and checks catalog files like [`load`], and returns the
-/// [`LoadWarning`]s beside the catalog. The loader prints nothing.
-///
-/// # Errors
-///
-/// Every [`LoadError`] found, if there is at least one.
-pub fn load_with_warnings(sources: &[Source<'_>]) -> Result<Checked, Vec<LoadError>> {
+pub fn load(sources: &[Source<'_>]) -> Result<Checked, Vec<LoadError>> {
     let mut errs = Vec::new();
     let files = parse_sources(sources, &mut errs);
     load_files(files, errs)

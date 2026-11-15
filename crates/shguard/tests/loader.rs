@@ -10,7 +10,7 @@ mod common;
 use std::process::Command;
 
 use common::decide;
-use shguard::catalog::{GuidanceText, LoadError, Loaded, Origin, Source, load};
+use shguard::catalog::{Checked, GuidanceText, LoadError, Loaded, Origin, Source, load};
 use shguard_kernel::ast::{Opaque, Part};
 use shguard_kernel::catalog::{
     Catalog, Cwd, DashDash, Grammar, LongName, Opt, OptName, OptValue, Order, PlusWords, Role, Row,
@@ -19,7 +19,7 @@ use shguard_kernel::catalog::{
 use shguard_kernel::decision::Decision;
 use shguard_kernel::rule::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
 
-fn load_one(text: &str) -> Result<Loaded, Vec<LoadError>> {
+fn load_one(text: &str) -> Result<Checked, Vec<LoadError>> {
     load(&[Source {
         origin: Origin::User,
         name: "t.toml",
@@ -36,7 +36,7 @@ fn errors(text: &str) -> Vec<LoadError> {
 
 fn loaded(text: &str) -> Loaded {
     match load_one(text) {
-        Ok(l) => l,
+        Ok(l) => l.loaded,
         Err(e) => panic!("load failed: {e:?}"),
     }
 }
@@ -512,7 +512,7 @@ fn checked_warnings(text: &str) -> Vec<shguard::catalog::LoadWarning> {
         name: "t.toml",
         text,
     }];
-    match shguard::catalog::load_with_warnings(&sources) {
+    match shguard::catalog::load(&sources) {
         Ok(checked) => checked.warnings,
         Err(e) => panic!("load failed: {e:?}"),
     }
@@ -520,7 +520,7 @@ fn checked_warnings(text: &str) -> Vec<shguard::catalog::LoadWarning> {
 
 #[test]
 fn the_embedded_catalog_loads_without_warnings() {
-    match shguard::catalog::load_with_warnings(shguard::catalog::EMBEDDED) {
+    match shguard::catalog::load(shguard::catalog::EMBEDDED) {
         Ok(checked) => assert!(checked.warnings.is_empty(), "{:?}", checked.warnings),
         Err(e) => panic!("the embedded catalog does not load: {e:?}"),
     }
@@ -1584,7 +1584,9 @@ fn the_text_cap_message_names_the_cap() {
 /// Pins presence only: every embedded rule explains itself.
 #[test]
 fn every_embedded_rule_has_a_reason() {
-    let loaded = load(shguard::catalog::EMBEDDED).expect("embedded catalog loads");
+    let loaded = load(shguard::catalog::EMBEDDED)
+        .expect("embedded catalog loads")
+        .loaded;
     assert!(!loaded.rule_reasons.is_empty());
     assert!(loaded.rule_reasons.iter().all(Option::is_some));
 }
@@ -1600,7 +1602,7 @@ fn a_user_hint_replaces_an_embedded_one() {
         name: "user.toml",
         text: user,
     });
-    let l = load(&sources).expect("loads");
+    let l = load(&sources).expect("loads").loaded;
     let key = vec![b"find".to_vec()];
     let found: Vec<_> = l.hints.iter().filter(|h| h.key == key).collect();
     assert_eq!(found.len(), 1);
@@ -1652,9 +1654,26 @@ fn a_user_source_named_embedded_still_replaces_the_embedded_hint() {
         name: "embedded:x.toml",
         text: "[[hint]]\nkey = [\"find\"]\ntext = \"mine\"\n",
     });
-    let l = load(&sources).expect("no DuplicateHint");
+    let l = load(&sources).expect("no DuplicateHint").loaded;
     let key = vec![b"find".to_vec()];
     let found: Vec<_> = l.hints.iter().filter(|h| h.key == key).collect();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].text.as_str(), "mine");
+}
+
+#[test]
+fn load_returns_the_warnings_beside_the_catalog() {
+    let checked = match load_one(&row("\"env\"", "")) {
+        Ok(c) => c,
+        Err(e) => panic!("a code-running head without runs_code must still load: {e:?}"),
+    };
+    assert!(matches!(
+        checked.warnings[..],
+        [shguard::catalog::LoadWarning::CodeRunningHead { .. }]
+    ));
+    assert_eq!(
+        decide(&checked.loaded, "env"),
+        Decision::Allow,
+        "the warned row stays in the catalog"
+    );
 }
