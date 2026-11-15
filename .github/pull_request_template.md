@@ -22,6 +22,11 @@ reads as a different or code-running option. One line per spelling tried:
 
 The decision is what a build of shguard returns (hook JSON on stdin). Cover
 the spellings listed in CLAUDE.md, "Tests and catalog".
+
+Every spelling here whose decision is not Allow is pinned as a
+command-to-decision test with the decision the audit recorded
+(crates/shguard/tests/catalog_*.rs, or crates/shguard/tests/loader.rs for a
+README recipe).
 -->
 
 N/A: no catalog row or loader/kernel row-reading changes
