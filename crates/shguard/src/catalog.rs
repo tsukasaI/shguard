@@ -17,5 +17,5 @@ pub use embedded::EMBEDDED;
 pub use error::{LoadError, LoadWarning};
 pub use load::{
     Checked, ConfigHead, GuidanceText, Hint, Loaded, Origin, ParsedFile, Source, TEXT_CAP, load,
-    load_with_warnings, parse_config,
+    parse_config,
 };

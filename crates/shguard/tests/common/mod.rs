@@ -11,7 +11,7 @@ use shguard_kernel::decision::Decision;
 
 pub fn embedded() -> Loaded {
     match load(EMBEDDED) {
-        Ok(l) => l,
+        Ok(c) => c.loaded,
         Err(e) => panic!("the embedded catalog does not load: {e:?}"),
     }
 }

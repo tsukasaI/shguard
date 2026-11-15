@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use shguard::catalog::{EMBEDDED, LoadError, Origin, Source, load_with_warnings};
+use shguard::catalog::{EMBEDDED, LoadError, Origin, Source, load};
 use shguard::config::{Location, Settings, locate, settings};
 use shguard::decision_class::DecisionClass;
 use shguard::hook::{Response, panic_output, render, to_bytes};
@@ -374,7 +374,7 @@ fn check(files: &[PathBuf], err: &mut impl Write) -> ExitCode {
                 text,
             })
             .collect();
-        match load_with_warnings(&sources) {
+        match load(&sources) {
             Ok(checked) => {
                 for w in &checked.warnings {
                     drop(writeln!(err, "warning: {w}"));
