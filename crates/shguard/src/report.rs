@@ -13,8 +13,8 @@
 //! [`CommandText::Show`], as `\t<count>\t<command>` under its class. The
 //! command is JSON-quoted and then further escaped for display: every control
 //! character and bidi control left raw by the quoting is written as `\u{XXXX}`,
-//! so the text is one line that cannot drive the terminal. A class says which path produced an answer; it does not say a
-//! command is safe.
+//! so the text is one line that cannot drive the terminal. A class says which
+//! path produced an answer; it does not say a command is safe.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -264,6 +264,8 @@ mod tests {
     #[test]
     fn display_escapes_controls_and_bidi_but_keeps_json_escapes_and_text() {
         assert_eq!(display_command("a\nb"), "\"a\\nb\"");
+        assert_eq!(display_command("\u{1b}"), "\"\\u001b\"");
+        assert_eq!(display_command("\\u{009B}"), "\"\\\\u{009B}\"");
         assert_eq!(display_command("\u{7F}"), "\"\\u{007F}\"");
         assert_eq!(display_command("\u{85}"), "\"\\u{0085}\"");
         assert_eq!(display_command("\u{9B}"), "\"\\u{009B}\"");

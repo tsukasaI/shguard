@@ -13,10 +13,11 @@
   as `invalid`, and never prints that text, so a forged or newer class value
   cannot reach the terminal, `--show-commands` included (#1274).
 - `shguard report --show-commands` writes a command JSON-quoted with every
-  control character and bidi character (U+202A-U+202E, U+2066-U+2069) left
-  raw by the quoting escaped as `\u{XXXX}`, so a logged command cannot drive
-  the terminal or reorder its text. DEL and the C1 controls used to pass
-  through unescaped (#1275).
+  control character and the bidi embedding, override and isolate controls
+  (U+202A-U+202E, U+2066-U+2069) left raw by the quoting escaped as
+  `\u{XXXX}`, so a logged command cannot drive the terminal or reorder its
+  text. DEL, the C1 controls and the bidi controls used to pass through
+  unescaped (#1275).
 - A non-ASCII byte in a `[[rule]]` key segment, the head included
   (`["git", "Push\u{127}"]`), is now a load error (`NonAsciiRuleSegment`),
   as it is for row keys since 0.13.0 (#1207). Such a rule used to load and

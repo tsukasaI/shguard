@@ -360,10 +360,11 @@ from a newer shguard counts as `invalid` too, and its text is never printed.
 **The default output has no command text.** `--show-commands` also prints,
 under each listed class, its five most frequent distinct commands as
 `\t<count>\t<command>`. The command is JSON-quoted, and every control
-character and bidi character (U+202A-U+202E, U+2066-U+2069) that the quoting
-leaves raw is written as `\u{XXXX}`, so a logged command cannot drive the
-terminal; that output can hold secrets, like the log. `report` exits 0, 1 for a log it cannot read or a report it cannot
-write, and 2 on a usage error.
+character and the bidi embedding, override and isolate controls
+(U+202A-U+202E, U+2066-U+2069) that the quoting leaves raw is written as
+`\u{XXXX}`, so a logged command cannot drive the terminal; that output can
+hold secrets, like the log. `report` exits 0, 1 for a log it cannot read or a
+report it cannot write, and 2 on a usage error.
 
 ## Migrating from 0.9
 
