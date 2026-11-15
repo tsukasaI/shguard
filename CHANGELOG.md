@@ -4,6 +4,10 @@
 
 ### Changed
 
+- The decision log classes `parse_refusal:empty_command` and
+  `parse_refusal:malformed_input` are now `empty_command` and
+  `malformed_input`, so the `parse_refusal:` prefix always carries a parser
+  kind. Lines written by 0.13.0 keep the old names (#1276).
 - A non-ASCII byte in a `[[rule]]` key segment, the head included
   (`["git", "Push\u{127}"]`), is now a load error (`NonAsciiRuleSegment`),
   as it is for row keys since 0.13.0 (#1207). Such a rule used to load and

@@ -20,13 +20,10 @@ use serde_json::{Value, json};
 use crate::decision_class::DecisionClass;
 use crate::hook::{Response, WireDecision};
 
-/// The log line for one answer, without a `class` field, or `None` when there
-/// is nothing to log (a non-Bash tool gets no decision). `unix_secs` is the
-/// time of the answer; `command` is the Bash command, if the input had one.
-/// The hook uses [`entry_classified`]; a line without `class` is the shape
-/// older versions wrote.
-#[must_use]
-pub fn entry(unix_secs: u64, command: Option<&str>, response: &Response) -> Option<Value> {
+/// The log line for one answer without a `class` field (the shape older
+/// versions wrote), or `None` when there is nothing to log.
+#[cfg(test)]
+fn entry(unix_secs: u64, command: Option<&str>, response: &Response) -> Option<Value> {
     let WireDecision { word, reason } = response.decision()?;
     Some(json!({
         "ts": unix_secs,
@@ -36,7 +33,10 @@ pub fn entry(unix_secs: u64, command: Option<&str>, response: &Response) -> Opti
     }))
 }
 
-/// Like [`entry`], plus the stable `class` name of the decision.
+/// The log line for one answer with the stable `class` name of the decision,
+/// or `None` when there is nothing to log (a non-Bash tool gets no decision).
+/// `unix_secs` is the time of the answer; `command` is the Bash command, if the
+/// input had one.
 #[must_use]
 pub fn entry_classified(
     unix_secs: u64,
@@ -44,11 +44,14 @@ pub fn entry_classified(
     response: &Response,
     class: DecisionClass,
 ) -> Option<Value> {
-    let mut line = entry(unix_secs, command, response)?;
-    if let Some(fields) = line.as_object_mut() {
-        fields.insert("class".to_owned(), Value::from(class.as_str()));
-    }
-    Some(line)
+    let WireDecision { word, reason } = response.decision()?;
+    Some(json!({
+        "ts": unix_secs,
+        "decision": word,
+        "reason": reason,
+        "command": command,
+        "class": class.as_str(),
+    }))
 }
 
 /// The bytes of one log line, newline-terminated. Serializing a [`Value`]

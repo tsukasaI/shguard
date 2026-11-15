@@ -13,7 +13,7 @@ use shguard::catalog::{EMBEDDED, Failed, LoadError, Origin, Source, load};
 use shguard::config::{Location, Settings, locate, settings};
 use shguard::decision_class::DecisionClass;
 use shguard::hook::{Response, panic_output, render, to_bytes};
-use shguard::respond::{Answered, INPUT_CAP, answer_classified};
+use shguard::respond::{INPUT_CAP, answer_classified};
 use shguard::{decision_log, init, report};
 
 const USAGE: &str = "\
@@ -24,7 +24,8 @@ usage: shguard                          run as a Claude Code PreToolUse hook (JS
                                         check a config as the hook loads it (default: the hook's path)
        shguard init                     write a config and print the settings.json hook entry
        shguard report [--show-commands] <log>
-                                        count a decision log by class (no command text unless asked)
+                                        count a decision log by class (no command text unless asked);
+                                        write a log path that starts with `-` as `./-name`
        shguard --help | --version
 ";
 
@@ -180,14 +181,10 @@ fn hook(location: Location) -> ExitCode {
         input.clear();
     }
     let loaded = load_settings(location);
-    let Answered {
-        command,
-        response,
-        class,
-    } = answer_classified(&input, loaded.as_ref().map_err(|f| f.errors.as_slice()));
+    let answered = answer_classified(&input, loaded.as_ref().map_err(|f| f.errors.as_slice()));
     let mut out = std::io::stdout().lock();
     match out
-        .write_all(&to_bytes(&render(&response)))
+        .write_all(&to_bytes(&render(answered.response())))
         .and_then(|()| out.flush())
     {
         Ok(()) => {
@@ -197,8 +194,13 @@ fn hook(location: Location) -> ExitCode {
                 decision_log: Some(path),
                 ..
             }) = &loaded
-                && let Some(class) = class
-                && let Err(e) = log_answer(path, command.as_deref(), &response, class)
+                && let Some(decided) = &answered.decision
+                && let Err(e) = log_answer(
+                    path,
+                    answered.command.as_deref(),
+                    &decided.response,
+                    decided.class,
+                )
             {
                 drop(writeln!(
                     std::io::stderr().lock(),

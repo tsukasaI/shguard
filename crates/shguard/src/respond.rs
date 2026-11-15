@@ -71,31 +71,37 @@ enum Judged {
     Deny(String, DecisionClass),
 }
 
-/// One answer: the Bash command of the stdin (if it had one), the response,
-/// and the class of the decision (`None` when there is no decision).
+/// A decision and the class of the path that produced it.
+#[derive(Debug)]
+pub struct Decided {
+    /// What the hook answers.
+    pub response: Response,
+    /// Why the decision came out as it did.
+    pub class: DecisionClass,
+}
+
+/// One answer: the Bash command of the stdin (if it had one) and the decision
+/// (`None` when there is none, as for a non-Bash tool).
 #[derive(Debug)]
 pub struct Answered {
     /// The Bash command, if the input had one.
     pub command: Option<String>,
-    /// What the hook answers.
-    pub response: Response,
-    /// Why the decision came out as it did.
-    pub class: Option<DecisionClass>,
+    /// The decision with its class, if there is one.
+    pub decision: Option<Decided>,
 }
 
-/// The Bash command of one stdin, if it had one, and the answer to it.
-#[must_use]
-pub fn answer(
-    stdin: &[u8],
-    settings: Result<&Settings, &[LoadError]>,
-) -> (Option<String>, Response) {
-    let Answered {
-        command, response, ..
-    } = answer_classified(stdin, settings);
-    (command, response)
+static NO_DECISION: Response = Response::NoDecision;
+
+impl Answered {
+    /// What the hook answers: the decision's response, or no decision.
+    #[must_use]
+    pub fn response(&self) -> &Response {
+        self.decision.as_ref().map_or(&NO_DECISION, |d| &d.response)
+    }
 }
 
-/// Like [`answer`], with the class of the decision.
+/// The Bash command of one stdin, if it had one, and the decision on it with
+/// its class.
 #[must_use]
 pub fn answer_classified(stdin: &[u8], settings: Result<&Settings, &[LoadError]>) -> Answered {
     let request = if stdin.len() > INPUT_CAP {
@@ -107,45 +113,43 @@ pub fn answer_classified(stdin: &[u8], settings: Result<&Settings, &[LoadError]>
         Request::Command(c) => Some(c.clone()),
         Request::NotBash | Request::Malformed(_) => None,
     };
-    let (response, class) = response(request, settings);
     Answered {
         command,
-        response,
-        class,
+        decision: decide_request(request, settings),
     }
 }
 
-fn response(
-    request: Request,
-    settings: Result<&Settings, &[LoadError]>,
-) -> (Response, Option<DecisionClass>) {
+fn decide_request(request: Request, settings: Result<&Settings, &[LoadError]>) -> Option<Decided> {
     match (request, settings) {
-        (Request::NotBash, Ok(_) | Err(_)) => (Response::NoDecision, None),
-        (Request::Malformed(_) | Request::Command(_), Err(errs)) => (
-            Response::Deny(load_reason(errs)),
-            Some(DecisionClass::LoadError),
-        ),
-        (Request::Malformed(why), Ok(s)) => settle(
+        (Request::NotBash, Ok(_) | Err(_)) => None,
+        (Request::Malformed(_) | Request::Command(_), Err(errs)) => Some(Decided {
+            response: Response::Deny(load_reason(errs)),
+            class: DecisionClass::LoadError,
+        }),
+        (Request::Malformed(why), Ok(s)) => Some(settle(
             Judged::Ask(why.to_owned(), DecisionClass::MalformedInput),
             s,
-        ),
-        (Request::Command(command), Ok(s)) => settle(judge(&command, s), s),
+        )),
+        (Request::Command(command), Ok(s)) => Some(settle(judge(&command, s), s)),
     }
 }
 
-fn settle(judged: Judged, settings: &Settings) -> (Response, Option<DecisionClass>) {
+fn settle(judged: Judged, settings: &Settings) -> Decided {
     match judged {
-        Judged::Allow(kind) => (
-            Response::Allow(kind.reason().to_owned()),
-            Some(kind.class()),
-        ),
-        Judged::Deny(r, class) => (Response::Deny(r), Some(class)),
+        Judged::Allow(kind) => Decided {
+            response: Response::Allow(kind.reason().to_owned()),
+            class: kind.class(),
+        },
+        Judged::Deny(r, class) => Decided {
+            response: Response::Deny(r),
+            class,
+        },
         Judged::Ask(r, class) => {
             let response = match settings.ask_outcome {
                 AskOutcome::Ask => Response::Ask(r),
                 AskOutcome::Deny => Response::Deny(format!("{r} (ask_outcome = deny)")),
             };
-            (response, Some(class))
+            Decided { response, class }
         }
     }
 }
@@ -358,7 +362,7 @@ short = "a"
 "#;
 
     fn respond(stdin: &[u8], settings: Result<&Settings, &[LoadError]>) -> Value {
-        render(&answer(stdin, settings).1)
+        render(answer_classified(stdin, settings).response())
     }
 
     fn bash(cmd: &str) -> Vec<u8> {
@@ -479,11 +483,15 @@ short = "a"
             Ok(s) => s,
             Err(e) => panic!("{e:?}"),
         };
-        let (command, response) = answer(&bash(cmd), Ok(&s));
-        assert_eq!(decision(&render(&response)), Some("allow"), "{cmd}");
-        let line = crate::decision_log::entry(1, command.as_deref(), &response);
+        let answered = answer_classified(&bash(cmd), Ok(&s));
+        let response = answered.response();
+        assert_eq!(decision(&render(response)), Some("allow"), "{cmd}");
+        let class = answered.decision.as_ref().map(|d| d.class);
+        let line = class.and_then(|class| {
+            crate::decision_log::entry_classified(1, answered.command.as_deref(), response, class)
+        });
         (
-            reason(&render(&response)).to_owned(),
+            reason(&render(response)).to_owned(),
             line.unwrap_or_default(),
         )
     }
@@ -514,8 +522,8 @@ short = "a"
             Err(e) => panic!("{e:?}"),
         };
         answer_classified(stdin, Ok(&s))
-            .class
-            .map(DecisionClass::as_str)
+            .decision
+            .map(|d| d.class.as_str())
     }
 
     #[test]
@@ -534,11 +542,8 @@ short = "a"
         assert_eq!(c("ls -z"), Some("unknown:unknown_option"));
         assert_eq!(c("echo $(id)"), Some("parse_refusal:unquoted_dollar"));
         assert_eq!(c("a &"), Some("parse_refusal:background_ampersand"));
-        assert_eq!(c(" \n"), Some("parse_refusal:empty_command"));
-        assert_eq!(
-            class_of(cfg, b"junk"),
-            Some("parse_refusal:malformed_input")
-        );
+        assert_eq!(c(" \n"), Some("empty_command"));
+        assert_eq!(class_of(cfg, b"junk"), Some("malformed_input"));
         assert_eq!(class_of(cfg, br#"{"tool_name":"Read"}"#), None);
         // `ask_outcome = deny` changes the answer, not the class.
         assert_eq!(
@@ -550,7 +555,10 @@ short = "a"
             item: "row `x`".to_owned(),
         }];
         let loaded = answer_classified(&bash("ls"), Err(&errs));
-        assert_eq!(loaded.class.map(DecisionClass::as_str), Some("load_error"));
+        assert_eq!(
+            loaded.decision.map(|d| d.class.as_str()),
+            Some("load_error")
+        );
     }
 
     #[test]

@@ -338,8 +338,9 @@ and never from its text. It is not a safety grade. The names are stable:
 - `parse_refusal:<kind>`: the command is outside the parsed subset.
   `<kind>` is the construct, such as `unquoted_dollar`, `backquote`, `glob`,
   `input_redirect` or `redirect_target` (the full list is `UnsupportedKind`
-  in `shguard-syntax`, in snake case). Also `parse_refusal:empty_command` and
-  `parse_refusal:malformed_input` (hook input that is not the hook contract).
+  in `shguard-syntax`, in snake case).
+- `empty_command`: the command is empty.
+- `malformed_input`: hook input that is not the hook contract.
 - `load_error`: the config or catalog failed to load. The hook denies, and
   since the log path comes from that config, such a line is not written in
   practice.

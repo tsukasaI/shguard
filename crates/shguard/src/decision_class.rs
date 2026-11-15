@@ -45,8 +45,8 @@ impl DecisionClass {
             Self::RuleHit => "rule_hit",
             Self::Unknown(kind) => unknown(kind),
             Self::ParseRefusal(kind) => parse_refusal(kind),
-            Self::EmptyCommand => "parse_refusal:empty_command",
-            Self::MalformedInput => "parse_refusal:malformed_input",
+            Self::EmptyCommand => "empty_command",
+            Self::MalformedInput => "malformed_input",
             Self::LoadError => "load_error",
         }
     }
@@ -116,5 +116,143 @@ fn parse_refusal(kind: UnsupportedKind) -> &'static str {
         UnsupportedKind::Assignment => "parse_refusal:assignment",
         UnsupportedKind::ReservedWord => "parse_refusal:reserved_word",
         UnsupportedKind::TooManyWords => "parse_refusal:too_many_words",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every class: the fixed variants, then each kind of the two payload
+    /// variants. `listed` has no `_` arm, so a new variant fails to compile
+    /// here until it is handled.
+    pub(crate) fn every_class() -> Vec<DecisionClass> {
+        use UnknownKind as U;
+        use UnsupportedKind as S;
+        let unknown = [
+            U::NoRow,
+            U::OpaqueCommandName,
+            U::UnknownOption,
+            U::OpaqueOption,
+            U::MissingValue,
+            U::FlagGivenValue,
+            U::DashDashNotAllowed,
+            U::ExtraOperand,
+            U::OptionAfterOperand,
+            U::PlusWord,
+            U::CodeRole,
+            U::RunsCode,
+            U::UnknownSubcommand,
+            U::PathOpaque,
+            U::PathDotDot,
+            U::PathNonAscii,
+            U::PathAfterCd,
+            U::SensitiveAfterCd,
+        ];
+        let refusals = [
+            S::InputTooLarge,
+            S::ControlByte,
+            S::UnterminatedSingleQuote,
+            S::UnterminatedDoubleQuote,
+            S::BackgroundAmpersand,
+            S::PipeAmpersand,
+            S::DoubleSemicolon,
+            S::SemicolonAmpersand,
+            S::Parenthesis,
+            S::InputRedirect,
+            S::AppendRedirect,
+            S::ClobberRedirect,
+            S::AmpersandRedirect,
+            S::ProcessSubstitution,
+            S::Brace,
+            S::Glob,
+            S::Comment,
+            S::UnquotedDollar,
+            S::Backquote,
+            S::DollarParen,
+            S::BracedParameter,
+            S::SpecialParameter,
+            S::NameBeforeNonAscii,
+            S::BackslashAfterNonAscii,
+            S::BareDollar,
+            S::LineContinuation,
+            S::BackslashAtEnd,
+            S::TildeForm,
+            S::TildeAssignment,
+            S::MultiDigitFd,
+            S::DupOperand,
+            S::RedirectDescriptor,
+            S::RedirectTarget,
+            S::LeadingSeparator,
+            S::MissingCommand,
+            S::RedirectOnly,
+            S::Assignment,
+            S::ReservedWord,
+            S::TooManyWords,
+        ];
+        let mut all = vec![
+            DecisionClass::Allow,
+            DecisionClass::AllowUserRow,
+            DecisionClass::AllowUserCodeRow,
+            DecisionClass::RuleHit,
+            DecisionClass::EmptyCommand,
+            DecisionClass::MalformedInput,
+            DecisionClass::LoadError,
+        ];
+        all.extend(unknown.map(DecisionClass::Unknown));
+        all.extend(refusals.map(DecisionClass::ParseRefusal));
+        for class in &all {
+            assert!(listed(*class), "{class:?}");
+        }
+        all
+    }
+
+    fn listed(class: DecisionClass) -> bool {
+        match class {
+            DecisionClass::Allow
+            | DecisionClass::AllowUserRow
+            | DecisionClass::AllowUserCodeRow
+            | DecisionClass::RuleHit
+            | DecisionClass::Unknown(_)
+            | DecisionClass::ParseRefusal(_)
+            | DecisionClass::EmptyCommand
+            | DecisionClass::MalformedInput
+            | DecisionClass::LoadError => true,
+        }
+    }
+
+    #[test]
+    fn every_class_name_is_distinct() {
+        let all = every_class();
+        let mut seen = std::collections::HashSet::new();
+        for class in &all {
+            assert!(
+                seen.insert(class.as_str()),
+                "the name of {class:?} is used twice"
+            );
+        }
+        assert_eq!(seen.len(), all.len());
+    }
+
+    #[test]
+    fn a_kind_name_never_equals_another_class_name() {
+        for class in every_class() {
+            let name = class.as_str();
+            match class {
+                DecisionClass::Unknown(_) => assert!(name.starts_with("unknown:"), "{name}"),
+                DecisionClass::ParseRefusal(_) => {
+                    assert!(name.starts_with("parse_refusal:"), "{name}");
+                }
+                DecisionClass::Allow
+                | DecisionClass::AllowUserRow
+                | DecisionClass::AllowUserCodeRow
+                | DecisionClass::RuleHit
+                | DecisionClass::EmptyCommand
+                | DecisionClass::MalformedInput
+                | DecisionClass::LoadError => {
+                    assert!(!name.contains(':'), "{name}");
+                }
+            }
+        }
     }
 }

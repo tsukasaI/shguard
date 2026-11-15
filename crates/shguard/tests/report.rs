@@ -162,8 +162,8 @@ fn the_hook_writes_a_class_that_report_counts() {
         (&bash("ls -a"), "rule_hit"),
         (&bash("definitely-not-in-the-catalog"), "unknown:no_row"),
         (&bash("echo $(id)"), "parse_refusal:unquoted_dollar"),
-        (&bash("  "), "parse_refusal:empty_command"),
-        (b"junk", "parse_refusal:malformed_input"),
+        (&bash("  "), "empty_command"),
+        (b"junk", "malformed_input"),
         (&bash("ls -l"), "allow"),
     ];
     for (stdin, _) in &cases {
@@ -180,8 +180,8 @@ fn the_hook_writes_a_class_that_report_counts() {
     let out = shguard(dir.path(), &["report", &log.display().to_string()], b"");
     assert_eq!(
         text(&out.stdout),
-        "2\tallow\n1\tallow_user_row\n1\tparse_refusal:empty_command\n\
-         1\tparse_refusal:malformed_input\n1\tparse_refusal:unquoted_dollar\n\
+        "2\tallow\n1\tallow_user_row\n1\tempty_command\n\
+         1\tmalformed_input\n1\tparse_refusal:unquoted_dollar\n\
          1\trule_hit\n1\tunknown:no_row\n8\ttotal\n"
     );
 }
