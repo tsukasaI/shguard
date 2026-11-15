@@ -810,7 +810,7 @@ fn build_row(
     errs: &mut Vec<LoadError>,
     warnings: &mut Vec<LoadWarning>,
 ) -> Entry {
-    let label = dto.key.join(" ");
+    let label = dto.key.join(" ").escape_default().to_string();
     let key = seg_bytes(&dto.key);
     let before = errs.len();
     let mut warned = false;
@@ -824,7 +824,7 @@ fn build_row(
     if option_like(&dto.key) && !(dto.runs_code && is_option_child(&dto.key)) {
         errs.push(LoadError::OptionLikeKey {
             file: file.to_owned(),
-            item: format!("row {label:?}"),
+            item: format!("row \"{label}\""),
         });
     }
     if dto.source.as_deref().is_none_or(|s| s.trim().is_empty()) {
@@ -834,17 +834,16 @@ fn build_row(
         });
     }
     if key_valid && !dto.runs_code && key.first().is_some_and(|h| is_inexpressible(h)) {
-        let row = label.escape_default().to_string();
         match origin {
             Origin::Embedded => errs.push(LoadError::CodeRunningHead {
                 file: file.to_owned(),
-                row,
+                row: label.clone(),
             }),
             Origin::User => {
                 warned = true;
                 warnings.push(LoadWarning::CodeRunningHead {
                     file: file.to_owned(),
-                    row,
+                    row: label.clone(),
                 });
             }
         }
@@ -858,14 +857,14 @@ fn build_row(
     if let Some(h) = dto.key.first().filter(|h| !h.is_ascii()) {
         errs.push(LoadError::NonAsciiHead {
             file: file.to_owned(),
-            row: label.escape_default().to_string(),
+            row: label.clone(),
             head: h.escape_default().to_string(),
         });
     }
     for seg in dto.key.iter().skip(1).filter(|s| !s.is_ascii()) {
         errs.push(LoadError::NonAsciiSegment {
             file: file.to_owned(),
-            row: label.escape_default().to_string(),
+            row: label.clone(),
             segment: seg.escape_default().to_string(),
         });
     }

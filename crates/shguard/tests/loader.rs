@@ -610,6 +610,68 @@ fn non_ascii_head_check_covers_later_segments() {
 }
 
 #[test]
+fn every_row_load_message_is_ascii_for_a_non_ascii_key_segment() {
+    let seg = "\"Clipp\u{17f}\"";
+    let opt = "[[row.opt]]\nshort = \"a\"\n[[row.opt]]\nshort = \"a\"\n";
+    let git = row("\"git\"", "");
+    let cases: [(&str, String); 5] = [
+        ("PathHead", row(&format!("\"/bin/git\", {seg}"), "")),
+        ("OrphanRow", row(&format!("\"git\", {seg}"), "")),
+        (
+            "ConflictingCwd",
+            row(
+                &format!("\"git\", {seg}"),
+                "changes_cwd = true\ncwd_sensitive = true",
+            ),
+        ),
+        (
+            "DuplicateRow",
+            format!(
+                "{git}{}{}",
+                row(&format!("\"git\", {seg}"), ""),
+                row(&format!("\"git\", {seg}"), "")
+            ),
+        ),
+        (
+            "DuplicateOpt",
+            format!("{git}{}", row(&format!("\"git\", {seg}"), opt)),
+        ),
+    ];
+    for (name, text) in &cases {
+        let errs = errors(text);
+        assert!(
+            errs.iter().any(|e| format!("{e:?}").starts_with(name)),
+            "{name}: {errs:?}"
+        );
+        for e in &errs {
+            assert!(e.to_string().is_ascii(), "{name}: {e}");
+        }
+    }
+
+    let missing =
+        format!("[[row]]\nkey = [\"git\", {seg}]\norder = \"permute\"\ndashdash = \"ends\"\n");
+    let errs = errors(&missing);
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::MissingSource { .. })),
+        "{errs:?}"
+    );
+    for e in &errs {
+        assert!(e.to_string().is_ascii(), "{e}");
+    }
+
+    let warned = row(&format!("\"ps\", {seg}"), "");
+    let warnings = match load_one(&warned) {
+        Ok(c) => c.warnings,
+        Err(f) => f.warnings,
+    };
+    assert!(!warnings.is_empty(), "no warning");
+    for w in &warnings {
+        assert!(w.to_string().is_ascii(), "{w}");
+    }
+}
+
+#[test]
 fn code_option_heads_load_without_their_code_options() {
     for head in ["fd", "split", "gsplit"] {
         let t = row(&format!("\"{head}\""), "rest = \"path\"");

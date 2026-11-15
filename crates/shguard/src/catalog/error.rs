@@ -62,7 +62,7 @@ pub enum LoadError {
         error: toml::de::Error,
     },
     /// A row has no `source`, or an empty one.
-    #[error("{file:?}: row {row:?}: missing or empty `source`")]
+    #[error("{file:?}: row \"{row}\": missing or empty `source`")]
     MissingSource {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -70,7 +70,7 @@ pub enum LoadError {
         row: String,
     },
     /// A row key is empty or has an empty segment.
-    #[error("{file:?}: row {row:?}: empty key or key segment")]
+    #[error("{file:?}: row \"{row}\": empty key or key segment")]
     BadRowKey {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -78,7 +78,7 @@ pub enum LoadError {
         row: String,
     },
     /// An option name is not a valid short or long name.
-    #[error("{file:?}: row {row:?}: bad option name {name:?}")]
+    #[error("{file:?}: row \"{row}\": bad option name {name:?}")]
     BadOptName {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -88,7 +88,7 @@ pub enum LoadError {
         name: String,
     },
     /// An option has neither `short` nor `long`.
-    #[error("{file:?}: row {row:?}: option with neither `short` nor `long`")]
+    #[error("{file:?}: row \"{row}\": option with neither `short` nor `long`")]
     OptWithoutName {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -96,7 +96,7 @@ pub enum LoadError {
         row: String,
     },
     /// Two rows (possibly in different files) have the same key.
-    #[error("{file:?}: row {row:?}: duplicate key, first defined in {first_file:?}")]
+    #[error("{file:?}: row \"{row}\": duplicate key, first defined in {first_file:?}")]
     DuplicateRow {
         /// Name of the file holding the later, duplicate row.
         file: String,
@@ -106,7 +106,7 @@ pub enum LoadError {
         first_file: String,
     },
     /// Two options of one grammar share a short or a long name.
-    #[error("{file:?}: row {row:?}: duplicate option name {name:?}")]
+    #[error("{file:?}: row \"{row}\": duplicate option name {name:?}")]
     DuplicateOpt {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -117,7 +117,7 @@ pub enum LoadError {
     },
     /// A row with a longer key has no row for the key minus its last
     /// segment.
-    #[error("{file:?}: row {row:?}: no parent row")]
+    #[error("{file:?}: row \"{row}\": no parent row")]
     OrphanRow {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -125,7 +125,7 @@ pub enum LoadError {
         row: String,
     },
     /// A row sets both `changes_cwd` and `cwd_sensitive`.
-    #[error("{file:?}: row {row:?}: sets both `changes_cwd` and `cwd_sensitive`")]
+    #[error("{file:?}: row \"{row}\": sets both `changes_cwd` and `cwd_sensitive`")]
     ConflictingCwd {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -133,7 +133,7 @@ pub enum LoadError {
         row: String,
     },
     /// A row under a `cwd_sensitive` parent row does not set `cwd_sensitive`.
-    #[error("{file:?}: row {row:?}: the parent row is `cwd_sensitive`, so this row must be too")]
+    #[error("{file:?}: row \"{row}\": the parent row is `cwd_sensitive`, so this row must be too")]
     CwdSensitiveParent {
         /// Name of the file holding the child row.
         file: String,
@@ -144,7 +144,7 @@ pub enum LoadError {
     /// A row head holds a `/` (`/bin/bash`, `/opt/homebrew/bin/fd`). The
     /// kernel matches heads byte for byte, so a path head would skip the
     /// head checks that a bare name gets.
-    #[error("{file:?}: row {row:?}: head is a path; name the command without `/`")]
+    #[error("{file:?}: row \"{row}\": head is a path; name the command without `/`")]
     PathHead {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -203,7 +203,7 @@ pub enum LoadError {
     /// lists one of them, or an abbreviation of one, without a
     /// `takes = "code"` value (#1111).
     #[error(
-        "{file:?}: row {row:?}: option {opt:?} runs code, so leave it out or give it `value = {{ takes = \"code\" }}`"
+        "{file:?}: row \"{row}\": option {opt:?} runs code, so leave it out or give it `value = {{ takes = \"code\" }}`"
     )]
     CodeOptionNotCode {
         /// Name of the file, as passed to the loader.
@@ -216,7 +216,7 @@ pub enum LoadError {
     },
     /// A parent option spells a `runs_code` child's last key segment but
     /// does not take a `Code` value (#1070).
-    #[error("{file:?}: row {row:?}: option {opt:?} is the child key but its value is not `code`")]
+    #[error("{file:?}: row \"{row}\": option {opt:?} is the child key but its value is not `code`")]
     ParentOptNotCode {
         /// Name of the file holding the parent row.
         file: String,
