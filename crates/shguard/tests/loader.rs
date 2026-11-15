@@ -1757,3 +1757,34 @@ fn check_prints_warnings_beside_load_errors() -> std::io::Result<()> {
 fn check_config_prints_warnings_beside_load_errors() -> std::io::Result<()> {
     assert_warnings_beside_errors(&["check", "--config"])
 }
+
+#[test]
+fn a_code_running_head_without_runs_code_is_an_error_when_embedded_and_a_warning_for_a_user() {
+    let text = row("\"env\"", "");
+    let embedded = load(&[Source {
+        origin: Origin::Embedded,
+        name: "t.toml",
+        text: &text,
+    }]);
+    match embedded {
+        Err(f) => {
+            assert!(
+                matches!(f.errors.as_slice(), [LoadError::CodeRunningHead { .. }]),
+                "{f:?}"
+            );
+            assert!(f.warnings.is_empty(), "{f:?}");
+        }
+        Ok(_) => panic!("an embedded row with a code-running head must not load"),
+    }
+    match load_one(&text) {
+        Ok(c) => assert!(
+            matches!(
+                c.warnings.as_slice(),
+                [shguard::catalog::LoadWarning::CodeRunningHead { .. }]
+            ),
+            "{:?}",
+            c.warnings
+        ),
+        Err(f) => panic!("a user row must load: {f:?}"),
+    }
+}

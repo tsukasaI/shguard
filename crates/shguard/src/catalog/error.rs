@@ -7,11 +7,12 @@ use thiserror::Error;
 /// them, and the hook never does.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LoadWarning {
-    /// A row's head runs other code (an interpreter, shell, wrapper or remote
-    /// session) or has option syntax the grammar cannot express (`ps`, `ar`,
-    /// `find`, `tar`), and the row does not set `runs_code`. The row lets
-    /// shguard Allow commands under that head that it covers, so the user
-    /// owns what that Allow lets through.
+    /// A user file's row has a head that runs other code (an interpreter,
+    /// shell, wrapper or remote session) or has option syntax the grammar
+    /// cannot express (`ps`, `ar`, `find`, `tar`), and the row does not set
+    /// `runs_code`. An embedded row gets [`LoadError::CodeRunningHead`]
+    /// instead. The row lets shguard Allow commands under that head that it
+    /// covers, so the user owns what that Allow lets through.
     #[error(
         "{file:?}: row \"{row}\": head runs other code or has option syntax the grammar cannot express, and the row does not set `runs_code`, so shguard can Allow commands under it; set `runs_code = true` to keep them an Ask"
     )]
@@ -153,6 +154,19 @@ pub enum LoadError {
         /// The head with every non-ASCII character escaped (`ba\u{17f}h`), so
         /// the head prints in ASCII.
         head: String,
+    },
+    /// A row in an embedded file has a head that runs other code or has option
+    /// syntax the grammar cannot express, and does not set `runs_code`. A user
+    /// file gets a [`LoadWarning::CodeRunningHead`] for the same row instead.
+    #[error(
+        "{file:?}: row \"{row}\": head runs other code or has option syntax the grammar cannot express, so an embedded row must set `runs_code = true`"
+    )]
+    CodeRunningHead {
+        /// Name of the file, as passed to the loader.
+        file: String,
+        /// Key of the row, segments joined with spaces, with every non-ASCII
+        /// character escaped.
+        row: String,
     },
     /// A row key segment after the head holds a non-ASCII byte
     /// (`["git", "Clippſ"]`). The duplicate-row check folds ASCII case only, so
