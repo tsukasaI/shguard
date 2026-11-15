@@ -8,7 +8,10 @@
   `parse_refusal:malformed_input` are now `empty_command` and
   `malformed_input`, so the `parse_refusal:` prefix always carries a parser
   kind. Lines written by 0.13.0 keep the old names, and `shguard report`
-  counts them under the old names, apart from the new ones (#1276).
+  counts them as `invalid` (#1276, #1274).
+- `shguard report` counts a line whose `class` is not a class name it knows
+  as `invalid`, and never prints that text, so a forged or newer class value
+  cannot reach the terminal, `--show-commands` included (#1274).
 - A non-ASCII byte in a `[[rule]]` key segment, the head included
   (`["git", "Push\u{127}"]`), is now a load error (`NonAsciiRuleSegment`),
   as it is for row keys since 0.13.0 (#1207). Such a rule used to load and

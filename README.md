@@ -343,8 +343,8 @@ the release after 0.13.0 (see the note after `malformed_input`):
 - `empty_command`: the command is empty.
 - `malformed_input`: hook input that is not the hook contract. 0.13.0 wrote
   these two as `parse_refusal:empty_command` and
-  `parse_refusal:malformed_input`; `report` counts such lines under those
-  names.
+  `parse_refusal:malformed_input`; `report` no longer knows those names and
+  counts such lines as `invalid`.
 - `load_error`: the config or catalog failed to load. The hook denies, and
   since the log path comes from that config, such a line is not written in
   practice.
@@ -354,8 +354,9 @@ file line by line and prints one `<count>\t<class>` line per class, most
 frequent first and by name among equals, the top 20 classes, then
 `<total>\ttotal`, which counts every non-empty line, listed or not. A line
 without `class` (written by an earlier version) counts as `unclassified`. A
-line that is not UTF-8, is not a JSON object, or is longer than 2 MiB counts
-as `invalid`. **The default output has no command text.** `--show-commands`
+line that is not UTF-8, is not a JSON object, is longer than 2 MiB, or whose
+`class` is not a name listed above counts as `invalid`; a class name from a
+newer shguard counts as `invalid` too, and its text is never printed. **The default output has no command text.** `--show-commands`
 also prints, under each listed class, its five most frequent distinct
 commands as `\t<count>\t<command as a JSON string>`; that output can hold
 secrets, like the log. `report` exits 0, 1 for a log it cannot read or a

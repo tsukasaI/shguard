@@ -52,6 +52,168 @@ impl DecisionClass {
     }
 }
 
+const FIXED: [DecisionClass; 7] = [
+    DecisionClass::Allow,
+    DecisionClass::AllowUserRow,
+    DecisionClass::AllowUserCodeRow,
+    DecisionClass::RuleHit,
+    DecisionClass::EmptyCommand,
+    DecisionClass::MalformedInput,
+    DecisionClass::LoadError,
+];
+
+const UNKNOWN_KINDS: [UnknownKind; 18] = [
+    UnknownKind::NoRow,
+    UnknownKind::OpaqueCommandName,
+    UnknownKind::UnknownOption,
+    UnknownKind::OpaqueOption,
+    UnknownKind::MissingValue,
+    UnknownKind::FlagGivenValue,
+    UnknownKind::DashDashNotAllowed,
+    UnknownKind::ExtraOperand,
+    UnknownKind::OptionAfterOperand,
+    UnknownKind::PlusWord,
+    UnknownKind::CodeRole,
+    UnknownKind::RunsCode,
+    UnknownKind::UnknownSubcommand,
+    UnknownKind::PathOpaque,
+    UnknownKind::PathDotDot,
+    UnknownKind::PathNonAscii,
+    UnknownKind::PathAfterCd,
+    UnknownKind::SensitiveAfterCd,
+];
+
+const UNSUPPORTED_KINDS: [UnsupportedKind; 39] = [
+    UnsupportedKind::InputTooLarge,
+    UnsupportedKind::ControlByte,
+    UnsupportedKind::UnterminatedSingleQuote,
+    UnsupportedKind::UnterminatedDoubleQuote,
+    UnsupportedKind::BackgroundAmpersand,
+    UnsupportedKind::PipeAmpersand,
+    UnsupportedKind::DoubleSemicolon,
+    UnsupportedKind::SemicolonAmpersand,
+    UnsupportedKind::Parenthesis,
+    UnsupportedKind::InputRedirect,
+    UnsupportedKind::AppendRedirect,
+    UnsupportedKind::ClobberRedirect,
+    UnsupportedKind::AmpersandRedirect,
+    UnsupportedKind::ProcessSubstitution,
+    UnsupportedKind::Brace,
+    UnsupportedKind::Glob,
+    UnsupportedKind::Comment,
+    UnsupportedKind::UnquotedDollar,
+    UnsupportedKind::Backquote,
+    UnsupportedKind::DollarParen,
+    UnsupportedKind::BracedParameter,
+    UnsupportedKind::SpecialParameter,
+    UnsupportedKind::NameBeforeNonAscii,
+    UnsupportedKind::BackslashAfterNonAscii,
+    UnsupportedKind::BareDollar,
+    UnsupportedKind::LineContinuation,
+    UnsupportedKind::BackslashAtEnd,
+    UnsupportedKind::TildeForm,
+    UnsupportedKind::TildeAssignment,
+    UnsupportedKind::MultiDigitFd,
+    UnsupportedKind::DupOperand,
+    UnsupportedKind::RedirectDescriptor,
+    UnsupportedKind::RedirectTarget,
+    UnsupportedKind::LeadingSeparator,
+    UnsupportedKind::MissingCommand,
+    UnsupportedKind::RedirectOnly,
+    UnsupportedKind::Assignment,
+    UnsupportedKind::ReservedWord,
+    UnsupportedKind::TooManyWords,
+];
+
+/// The position of `kind` in [`UNKNOWN_KINDS`]. No `_` arm: a new kind fails to
+/// compile here, next to the array that has to grow with it.
+#[cfg(test)]
+fn unknown_slot(kind: UnknownKind) -> usize {
+    match kind {
+        UnknownKind::NoRow => 0,
+        UnknownKind::OpaqueCommandName => 1,
+        UnknownKind::UnknownOption => 2,
+        UnknownKind::OpaqueOption => 3,
+        UnknownKind::MissingValue => 4,
+        UnknownKind::FlagGivenValue => 5,
+        UnknownKind::DashDashNotAllowed => 6,
+        UnknownKind::ExtraOperand => 7,
+        UnknownKind::OptionAfterOperand => 8,
+        UnknownKind::PlusWord => 9,
+        UnknownKind::CodeRole => 10,
+        UnknownKind::RunsCode => 11,
+        UnknownKind::UnknownSubcommand => 12,
+        UnknownKind::PathOpaque => 13,
+        UnknownKind::PathDotDot => 14,
+        UnknownKind::PathNonAscii => 15,
+        UnknownKind::PathAfterCd => 16,
+        UnknownKind::SensitiveAfterCd => 17,
+    }
+}
+
+/// The position of `kind` in [`UNSUPPORTED_KINDS`]; no `_` arm, as above.
+#[cfg(test)]
+fn unsupported_slot(kind: UnsupportedKind) -> usize {
+    match kind {
+        UnsupportedKind::InputTooLarge => 0,
+        UnsupportedKind::ControlByte => 1,
+        UnsupportedKind::UnterminatedSingleQuote => 2,
+        UnsupportedKind::UnterminatedDoubleQuote => 3,
+        UnsupportedKind::BackgroundAmpersand => 4,
+        UnsupportedKind::PipeAmpersand => 5,
+        UnsupportedKind::DoubleSemicolon => 6,
+        UnsupportedKind::SemicolonAmpersand => 7,
+        UnsupportedKind::Parenthesis => 8,
+        UnsupportedKind::InputRedirect => 9,
+        UnsupportedKind::AppendRedirect => 10,
+        UnsupportedKind::ClobberRedirect => 11,
+        UnsupportedKind::AmpersandRedirect => 12,
+        UnsupportedKind::ProcessSubstitution => 13,
+        UnsupportedKind::Brace => 14,
+        UnsupportedKind::Glob => 15,
+        UnsupportedKind::Comment => 16,
+        UnsupportedKind::UnquotedDollar => 17,
+        UnsupportedKind::Backquote => 18,
+        UnsupportedKind::DollarParen => 19,
+        UnsupportedKind::BracedParameter => 20,
+        UnsupportedKind::SpecialParameter => 21,
+        UnsupportedKind::NameBeforeNonAscii => 22,
+        UnsupportedKind::BackslashAfterNonAscii => 23,
+        UnsupportedKind::BareDollar => 24,
+        UnsupportedKind::LineContinuation => 25,
+        UnsupportedKind::BackslashAtEnd => 26,
+        UnsupportedKind::TildeForm => 27,
+        UnsupportedKind::TildeAssignment => 28,
+        UnsupportedKind::MultiDigitFd => 29,
+        UnsupportedKind::DupOperand => 30,
+        UnsupportedKind::RedirectDescriptor => 31,
+        UnsupportedKind::RedirectTarget => 32,
+        UnsupportedKind::LeadingSeparator => 33,
+        UnsupportedKind::MissingCommand => 34,
+        UnsupportedKind::RedirectOnly => 35,
+        UnsupportedKind::Assignment => 36,
+        UnsupportedKind::ReservedWord => 37,
+        UnsupportedKind::TooManyWords => 38,
+    }
+}
+
+impl DecisionClass {
+    /// Every class this version can write.
+    pub fn all() -> impl Iterator<Item = DecisionClass> {
+        FIXED
+            .into_iter()
+            .chain(UNKNOWN_KINDS.into_iter().map(Self::Unknown))
+            .chain(UNSUPPORTED_KINDS.into_iter().map(Self::ParseRefusal))
+    }
+
+    /// Whether `name` is the name of a class of this version. A name from a
+    /// newer version, or one that is not a class name at all, is not known.
+    #[must_use]
+    pub fn is_known(name: &str) -> bool {
+        Self::all().any(|class| class.as_str() == name)
+    }
+}
+
 fn unknown(kind: UnknownKind) -> &'static str {
     match kind {
         UnknownKind::NoRow => "unknown:no_row",
@@ -123,84 +285,10 @@ fn parse_refusal(kind: UnsupportedKind) -> &'static str {
 mod tests {
     use super::*;
 
-    /// Every class: the fixed variants, then each kind of the two payload
-    /// variants. `listed` has no `_` arm, so a new variant fails to compile
-    /// here until it is handled.
+    /// Every class, from the production list. `listed` has no `_` arm, so a
+    /// new variant fails to compile here until it is handled.
     pub(crate) fn every_class() -> Vec<DecisionClass> {
-        use UnknownKind as U;
-        use UnsupportedKind as S;
-        let unknown = [
-            U::NoRow,
-            U::OpaqueCommandName,
-            U::UnknownOption,
-            U::OpaqueOption,
-            U::MissingValue,
-            U::FlagGivenValue,
-            U::DashDashNotAllowed,
-            U::ExtraOperand,
-            U::OptionAfterOperand,
-            U::PlusWord,
-            U::CodeRole,
-            U::RunsCode,
-            U::UnknownSubcommand,
-            U::PathOpaque,
-            U::PathDotDot,
-            U::PathNonAscii,
-            U::PathAfterCd,
-            U::SensitiveAfterCd,
-        ];
-        let refusals = [
-            S::InputTooLarge,
-            S::ControlByte,
-            S::UnterminatedSingleQuote,
-            S::UnterminatedDoubleQuote,
-            S::BackgroundAmpersand,
-            S::PipeAmpersand,
-            S::DoubleSemicolon,
-            S::SemicolonAmpersand,
-            S::Parenthesis,
-            S::InputRedirect,
-            S::AppendRedirect,
-            S::ClobberRedirect,
-            S::AmpersandRedirect,
-            S::ProcessSubstitution,
-            S::Brace,
-            S::Glob,
-            S::Comment,
-            S::UnquotedDollar,
-            S::Backquote,
-            S::DollarParen,
-            S::BracedParameter,
-            S::SpecialParameter,
-            S::NameBeforeNonAscii,
-            S::BackslashAfterNonAscii,
-            S::BareDollar,
-            S::LineContinuation,
-            S::BackslashAtEnd,
-            S::TildeForm,
-            S::TildeAssignment,
-            S::MultiDigitFd,
-            S::DupOperand,
-            S::RedirectDescriptor,
-            S::RedirectTarget,
-            S::LeadingSeparator,
-            S::MissingCommand,
-            S::RedirectOnly,
-            S::Assignment,
-            S::ReservedWord,
-            S::TooManyWords,
-        ];
-        let mut all = vec![
-            DecisionClass::Allow,
-            DecisionClass::AllowUserRow,
-            DecisionClass::AllowUserCodeRow,
-            DecisionClass::RuleHit,
-            DecisionClass::EmptyCommand,
-            DecisionClass::MalformedInput,
-            DecisionClass::LoadError,
-        ];
-        all.extend(unknown.map(DecisionClass::Unknown));
-        all.extend(refusals.map(DecisionClass::ParseRefusal));
+        let all: Vec<DecisionClass> = DecisionClass::all().collect();
         for class in &all {
             assert!(listed(*class), "{class:?}");
         }
@@ -218,6 +306,34 @@ mod tests {
             | DecisionClass::EmptyCommand
             | DecisionClass::MalformedInput
             | DecisionClass::LoadError => true,
+        }
+    }
+
+    #[test]
+    fn each_kind_sits_at_its_slot_so_the_arrays_hold_every_kind_once() {
+        for (i, kind) in UNKNOWN_KINDS.into_iter().enumerate() {
+            assert_eq!(unknown_slot(kind), i, "{kind:?} is not at its slot");
+        }
+        for (i, kind) in UNSUPPORTED_KINDS.into_iter().enumerate() {
+            assert_eq!(unsupported_slot(kind), i, "{kind:?} is not at its slot");
+        }
+    }
+
+    #[test]
+    fn every_listed_class_is_known_by_its_own_name_and_nothing_else_is() {
+        for class in every_class() {
+            assert!(DecisionClass::is_known(class.as_str()), "{class:?}");
+        }
+        for name in [
+            "",
+            "ALLOW",
+            "allow ",
+            "unknown:",
+            "unknown:from_the_future",
+            "parse_refusal:",
+            "export TOKEN=abc123",
+        ] {
+            assert!(!DecisionClass::is_known(name), "{name:?}");
         }
     }
 
