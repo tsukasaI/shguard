@@ -19,7 +19,8 @@
 //! that; an Allow that only a user row gives says so in the hook reason. A
 //! row for a head that runs other code or has option syntax the grammar
 //! cannot express, and does not set `runs_code`, loads with a warning, which
-//! `shguard check` prints. Under `ask_outcome = "ask"` an embedded Block holds
+//! `shguard check` prints; the hook gives an Allow that needs such a row its
+//! own reason and class (`allow_user_code_row`). Under `ask_outcome = "ask"` an embedded Block holds
 //! only for commands the catalog covers: an unknown option makes the command
 //! uncovered, so it is an Ask. `SHGUARD_CONFIG` must be an absolute path.
 //! `decision_log` must be absolute (the only thing the loader checks) and its

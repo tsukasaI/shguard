@@ -657,14 +657,12 @@ pub(crate) fn load_files_split(
         });
     }
     let hints: Vec<Hint> = hints.into_iter().map(|(h, _)| h).collect();
-    let mut rows = Vec::new();
+    let any_warned = entries.iter().any(|e| e.warned && e.row.is_some());
     let mut unwarned = Vec::new();
-    let mut any_warned = false;
+    let mut rows = Vec::new();
     for e in entries {
         let Some(row) = e.row else { continue };
-        if e.warned {
-            any_warned = true;
-        } else {
+        if any_warned && !e.warned {
             unwarned.push(row.clone());
         }
         rows.push(row);

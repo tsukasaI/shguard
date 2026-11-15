@@ -16,8 +16,9 @@ pub enum DecisionClass {
     Allow,
     /// An Allow that needs a user `[[row]]`.
     AllowUserRow,
-    /// An Allow that needs a user `[[row]]` for a head that runs other code
-    /// and does not set `runs_code` (a row that loads with a warning).
+    /// An Allow that needs a user `[[row]]` that does not set `runs_code` for
+    /// a head that runs other code or has option syntax the grammar cannot
+    /// express (a row that loads with a warning).
     AllowUserCodeRow,
     /// A rule hit (an Ask or a Block).
     RuleHit,

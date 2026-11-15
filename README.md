@@ -144,7 +144,9 @@ print each warning on its own line to stderr and still exit 0, and the hook
 prints none. `runs_code = true` keeps every command under the head an Ask.
 An Allow that only a user `[[row]]` gives (the embedded catalog alone would
 not Allow the command) says so in the hook reason, "covered by the catalog
-through a user [[row]]; no rule hit", and so does its decision log line.
+through a user [[row]]; no rule hit", and so does its decision log line. An
+Allow that needs a row that loaded with this warning has its own reason and
+the class `allow_user_code_row`.
 `fd` (`fdfind`), `split` and `gsplit` run code only through known options
 (`fd -x`/`-X`/`-l`, `split --filter`); a row for them loads only when it
 leaves those options out or declares that they take a `code` value
@@ -263,9 +265,9 @@ and never from its text. It is not a safety grade. The names are stable:
 
 - `allow`: the embedded catalog covers the command.
 - `allow_user_row`: an Allow that needs a user `[[row]]`.
-- `allow_user_code_row`: an Allow that needs a user `[[row]]` for a head that
-  runs other code and does not set `runs_code`, the row that loads with a
-  warning.
+- `allow_user_code_row`: an Allow that needs a user `[[row]]` that does not
+  set `runs_code` for a head that runs other code or has option syntax the
+  grammar cannot express, the row that loads with a warning.
 - `rule_hit`: a rule hit (an Ask or a deny).
 - `unknown:<kind>`: the catalog does not cover the command. `<kind>` is one of
   `no_row`, `opaque_command_name`, `unknown_option`, `opaque_option`,
