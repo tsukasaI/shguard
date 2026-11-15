@@ -159,6 +159,10 @@ singletons, newtypes and enums instead of flag structs.
   operands, `--`, `+word`, case variants, code-running options, ...), the
   decision a build of shguard returns for it (hook JSON on stdin), and the real
   tool's argv parsing (its source, or running it, when the docs are silent).
+  Each audited spelling whose decision is not Allow is pinned as a
+  command-to-decision test (`crates/shguard/tests/catalog_*.rs`, or
+  `tests/loader.rs` for a README recipe), so a later change cannot widen it
+  silently.
 
 ## Tooling facts
 
