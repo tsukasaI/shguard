@@ -19,7 +19,7 @@ use shguard_kernel::catalog::{
 use shguard_kernel::decision::Decision;
 use shguard_kernel::rule::{OptAlts, Outcome, Pat, PatKind, Rule, RuleId, Scope};
 
-fn load_one(text: &str) -> Result<Checked, Vec<LoadError>> {
+fn load_one(text: &str) -> Result<Checked, shguard::catalog::Failed> {
     load(&[Source {
         origin: Origin::User,
         name: "t.toml",
@@ -30,7 +30,7 @@ fn load_one(text: &str) -> Result<Checked, Vec<LoadError>> {
 fn errors(text: &str) -> Vec<LoadError> {
     match load_one(text) {
         Ok(_) => panic!("expected load errors"),
-        Err(e) => e,
+        Err(e) => e.errors,
     }
 }
 
@@ -96,7 +96,8 @@ fn toml_error_in_one_file_does_not_hide_others() {
             text: &both,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(errs.iter().any(|e| matches!(e, LoadError::Toml { .. })));
     assert!(
         errs.iter()
@@ -165,7 +166,8 @@ fn duplicate_row_key_across_files() {
             text: &t,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(matches!(errs[0], LoadError::DuplicateRow { .. }));
 }
 
@@ -186,7 +188,8 @@ fn case_variant_duplicate_row() {
                 text: &upper,
             },
         ])
-        .unwrap_err();
+        .unwrap_err()
+        .errors;
         assert!(
             errs.iter()
                 .any(|e| matches!(e, LoadError::DuplicateRow { .. })),
@@ -213,7 +216,8 @@ fn case_variant_duplicate_row_against_embedded_and_later_segments() {
             text: &user_status,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(
         errs.iter()
             .any(|e| matches!(e, LoadError::DuplicateRow { file, .. } if file == "user.toml")),
@@ -234,7 +238,8 @@ fn case_variant_duplicate_row_against_embedded_and_later_segments() {
             text: &user_fd,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(
         errs.iter()
             .any(|e| matches!(e, LoadError::DuplicateRow { file, .. } if file == "user.toml")),
@@ -278,7 +283,8 @@ fn case_variant_head_of_option_key_still_collides() {
             text: &second,
         },
     ])
-    .unwrap_err();
+    .unwrap_err()
+    .errors;
     assert!(
         errs.iter().any(|e| matches!(
             e,
@@ -1228,7 +1234,8 @@ fn option_like_key_segment() {
                 text: &user,
             },
         ])
-        .unwrap_err();
+        .unwrap_err()
+        .errors;
         assert!(
             errs.iter()
                 .any(|e| matches!(e, LoadError::OptionLikeKey { file, .. } if file == "user.toml")),
@@ -1613,7 +1620,7 @@ fn a_user_hint_replaces_an_embedded_one() {
         name: "user2.toml",
         text: user,
     });
-    let errs = load(&sources).expect_err("duplicate");
+    let errs = load(&sources).expect_err("duplicate").errors;
     assert!(
         errs.iter()
             .any(|e| matches!(e, LoadError::DuplicateHint { .. }))
