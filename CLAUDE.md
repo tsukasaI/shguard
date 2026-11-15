@@ -145,6 +145,12 @@ singletons, newtypes and enums instead of flag structs.
   `[[row.opt]]` entry is added, changed or removed (a new row included;
   removing a field falls back to a loader default and can widen Allow);
   deleting a whole row or editing only `[[rule]]`/`[[hint]]` needs none.
+  A PR that changes how the loader or kernel reads a row's fields (`order`,
+  `dashdash`, `rest`, option matching) or which heads it accepts (the head
+  lists in `catalog/load.rs`), under `crates/shguard/src/catalog` or
+  `crates/shguard-kernel/src`, needs the audit too, because it can widen Allow
+  as much as a row edit; the audit covers each row whose fields the change
+  reads differently (at least one row per changed behavior).
   Record it in a "P2 audit" section of the PR body (copy it from
   `.github/pull_request_template.md`; `gh pr create --body-file` does not apply
   the template): each spelling tried
