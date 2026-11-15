@@ -287,6 +287,22 @@ pub enum LoadError {
         /// The rejected rule `id`, as written in the file.
         rule: String,
     },
+    /// A rule key segment, the head included, holds a non-ASCII byte
+    /// (`["git", "Pushħ"]`). Rule keys are matched byte for byte against row
+    /// keys, so such a rule would silently never match `git push`; the loader
+    /// fails closed. One error is reported per offending segment.
+    #[error(
+        "{file:?}: rule \"{rule}\": key segment \"{segment}\" has a non-ASCII byte; spell the key in ASCII"
+    )]
+    NonAsciiRuleSegment {
+        /// Name of the file, as passed to the loader.
+        file: String,
+        /// `id` of the rule, escaped with `str::escape_default` like `segment`.
+        rule: String,
+        /// The segment with every non-ASCII character escaped (`Push\u{127}`),
+        /// so it prints in ASCII.
+        segment: String,
+    },
     /// Two rules share an id.
     #[error("{file:?}: rule {rule:?}: duplicate id")]
     DuplicateRuleId {

@@ -886,6 +886,25 @@ fn dead_rule() {
 }
 
 #[test]
+fn non_ascii_rule_key_segment_is_rejected_in_ascii() {
+    for key in ["\"git\", \"Push\u{127}\"", "\"g\u{127}it\", \"push\""] {
+        let t = format!(
+            "{}[[rule]]\nid = \"r\"\nkey = [{key}]\noutcome = \"ask\"\n",
+            row("\"git\"", "")
+        );
+        let msgs: Vec<String> = errors(&t)
+            .iter()
+            .filter(|e| matches!(e, LoadError::NonAsciiRuleSegment { .. }))
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(msgs.len(), 1, "{key}");
+        for msg in &msgs {
+            assert!(msg.is_ascii(), "{msg}");
+        }
+    }
+}
+
+#[test]
 fn malformed_or_unknown_rule_option() {
     let rm = row(
         "\"rm\"",

@@ -1240,6 +1240,13 @@ fn build_rule(
             rule: dto.id.clone(),
         });
     }
+    for seg in dto.key.iter().filter(|s| !s.is_ascii()) {
+        errs.push(LoadError::NonAsciiRuleSegment {
+            file: file.to_owned(),
+            rule: dto.id.escape_default().to_string(),
+            segment: seg.escape_default().to_string(),
+        });
+    }
     let names_code_row = entries.iter().any(|e| {
         e.key == key
             && e.row
