@@ -52,6 +52,144 @@ impl DecisionClass {
     }
 }
 
+/// Defines a list of every variant of a payload-free enum, together with an
+/// exhaustive `match` over the same identifiers. The `match` has no `_` arm,
+/// so a variant missing from the list fails to compile; the list is built
+/// from the identifiers once, so it cannot drift from the `match`.
+macro_rules! variants {
+    ($list:ident, $ty:ident, [$($variant:ident),* $(,)?]) => {
+        const $list: &[$ty] = &[$($ty::$variant),*];
+        const _: () = {
+            const fn every_variant_is_listed(kind: $ty) {
+                match kind {
+                    $($ty::$variant)|* => (),
+                }
+            }
+            let _ = every_variant_is_listed;
+        };
+    };
+}
+
+variants!(
+    UNKNOWN_KINDS,
+    UnknownKind,
+    [
+        NoRow,
+        OpaqueCommandName,
+        UnknownOption,
+        OpaqueOption,
+        MissingValue,
+        FlagGivenValue,
+        DashDashNotAllowed,
+        ExtraOperand,
+        OptionAfterOperand,
+        PlusWord,
+        CodeRole,
+        RunsCode,
+        UnknownSubcommand,
+        PathOpaque,
+        PathDotDot,
+        PathNonAscii,
+        PathAfterCd,
+        SensitiveAfterCd,
+    ]
+);
+
+variants!(
+    UNSUPPORTED_KINDS,
+    UnsupportedKind,
+    [
+        InputTooLarge,
+        ControlByte,
+        UnterminatedSingleQuote,
+        UnterminatedDoubleQuote,
+        BackgroundAmpersand,
+        PipeAmpersand,
+        DoubleSemicolon,
+        SemicolonAmpersand,
+        Parenthesis,
+        InputRedirect,
+        AppendRedirect,
+        ClobberRedirect,
+        AmpersandRedirect,
+        ProcessSubstitution,
+        Brace,
+        Glob,
+        Comment,
+        UnquotedDollar,
+        Backquote,
+        DollarParen,
+        BracedParameter,
+        SpecialParameter,
+        NameBeforeNonAscii,
+        BackslashAfterNonAscii,
+        BareDollar,
+        LineContinuation,
+        BackslashAtEnd,
+        TildeForm,
+        TildeAssignment,
+        MultiDigitFd,
+        DupOperand,
+        RedirectDescriptor,
+        RedirectTarget,
+        LeadingSeparator,
+        MissingCommand,
+        RedirectOnly,
+        Assignment,
+        ReservedWord,
+        TooManyWords,
+    ]
+);
+
+/// The payload-free classes, listed with an exhaustive `match` as in
+/// [`variants`]; the two payload variants are covered by their kind lists.
+macro_rules! fixed_classes {
+    ($list:ident, [$($variant:ident),* $(,)?]) => {
+        const $list: &[DecisionClass] = &[$(DecisionClass::$variant),*];
+        const _: () = {
+            const fn every_fixed_class_is_listed(class: DecisionClass) {
+                match class {
+                    $(DecisionClass::$variant)|*
+                    | DecisionClass::Unknown(_)
+                    | DecisionClass::ParseRefusal(_) => (),
+                }
+            }
+            let _ = every_fixed_class_is_listed;
+        };
+    };
+}
+
+fixed_classes!(
+    FIXED,
+    [
+        Allow,
+        AllowUserRow,
+        AllowUserCodeRow,
+        RuleHit,
+        EmptyCommand,
+        MalformedInput,
+        LoadError,
+    ]
+);
+
+impl DecisionClass {
+    /// Every class this version can write.
+    pub fn all() -> impl Iterator<Item = DecisionClass> {
+        FIXED
+            .iter()
+            .copied()
+            .chain(UNKNOWN_KINDS.iter().copied().map(Self::Unknown))
+            .chain(UNSUPPORTED_KINDS.iter().copied().map(Self::ParseRefusal))
+    }
+
+    /// Whether `name` is the name of a class of this version. A name from a
+    /// newer version, or one that is not a class name at all, is not known.
+    #[must_use]
+    pub fn is_known(name: &str) -> bool {
+        Self::all().any(|class| class.as_str() == name)
+    }
+}
+
 fn unknown(kind: UnknownKind) -> &'static str {
     match kind {
         UnknownKind::NoRow => "unknown:no_row",
@@ -123,101 +261,40 @@ fn parse_refusal(kind: UnsupportedKind) -> &'static str {
 mod tests {
     use super::*;
 
-    /// Every class: the fixed variants, then each kind of the two payload
-    /// variants. `listed` has no `_` arm, so a new variant fails to compile
-    /// here until it is handled.
+    /// Every class, from the production lists.
     pub(crate) fn every_class() -> Vec<DecisionClass> {
-        use UnknownKind as U;
-        use UnsupportedKind as S;
-        let unknown = [
-            U::NoRow,
-            U::OpaqueCommandName,
-            U::UnknownOption,
-            U::OpaqueOption,
-            U::MissingValue,
-            U::FlagGivenValue,
-            U::DashDashNotAllowed,
-            U::ExtraOperand,
-            U::OptionAfterOperand,
-            U::PlusWord,
-            U::CodeRole,
-            U::RunsCode,
-            U::UnknownSubcommand,
-            U::PathOpaque,
-            U::PathDotDot,
-            U::PathNonAscii,
-            U::PathAfterCd,
-            U::SensitiveAfterCd,
-        ];
-        let refusals = [
-            S::InputTooLarge,
-            S::ControlByte,
-            S::UnterminatedSingleQuote,
-            S::UnterminatedDoubleQuote,
-            S::BackgroundAmpersand,
-            S::PipeAmpersand,
-            S::DoubleSemicolon,
-            S::SemicolonAmpersand,
-            S::Parenthesis,
-            S::InputRedirect,
-            S::AppendRedirect,
-            S::ClobberRedirect,
-            S::AmpersandRedirect,
-            S::ProcessSubstitution,
-            S::Brace,
-            S::Glob,
-            S::Comment,
-            S::UnquotedDollar,
-            S::Backquote,
-            S::DollarParen,
-            S::BracedParameter,
-            S::SpecialParameter,
-            S::NameBeforeNonAscii,
-            S::BackslashAfterNonAscii,
-            S::BareDollar,
-            S::LineContinuation,
-            S::BackslashAtEnd,
-            S::TildeForm,
-            S::TildeAssignment,
-            S::MultiDigitFd,
-            S::DupOperand,
-            S::RedirectDescriptor,
-            S::RedirectTarget,
-            S::LeadingSeparator,
-            S::MissingCommand,
-            S::RedirectOnly,
-            S::Assignment,
-            S::ReservedWord,
-            S::TooManyWords,
-        ];
-        let mut all = vec![
-            DecisionClass::Allow,
-            DecisionClass::AllowUserRow,
-            DecisionClass::AllowUserCodeRow,
-            DecisionClass::RuleHit,
-            DecisionClass::EmptyCommand,
-            DecisionClass::MalformedInput,
-            DecisionClass::LoadError,
-        ];
-        all.extend(unknown.map(DecisionClass::Unknown));
-        all.extend(refusals.map(DecisionClass::ParseRefusal));
-        for class in &all {
-            assert!(listed(*class), "{class:?}");
-        }
-        all
+        DecisionClass::all().collect()
     }
 
-    fn listed(class: DecisionClass) -> bool {
-        match class {
-            DecisionClass::Allow
-            | DecisionClass::AllowUserRow
-            | DecisionClass::AllowUserCodeRow
-            | DecisionClass::RuleHit
-            | DecisionClass::Unknown(_)
-            | DecisionClass::ParseRefusal(_)
-            | DecisionClass::EmptyCommand
-            | DecisionClass::MalformedInput
-            | DecisionClass::LoadError => true,
+    #[test]
+    fn the_class_list_has_one_entry_per_fixed_class_and_per_kind() {
+        let all = every_class();
+        assert_eq!(
+            all.len(),
+            FIXED.len() + UNKNOWN_KINDS.len() + UNSUPPORTED_KINDS.len()
+        );
+        let mut seen = Vec::new();
+        for class in &all {
+            assert!(!seen.contains(class), "{class:?} is listed twice");
+            seen.push(*class);
+        }
+    }
+
+    #[test]
+    fn every_listed_class_is_known_by_its_own_name_and_nothing_else_is() {
+        for class in every_class() {
+            assert!(DecisionClass::is_known(class.as_str()), "{class:?}");
+        }
+        for name in [
+            "",
+            "ALLOW",
+            "allow ",
+            "unknown:",
+            "unknown:from_the_future",
+            "parse_refusal:",
+            "export TOKEN=abc123",
+        ] {
+            assert!(!DecisionClass::is_known(name), "{name:?}");
         }
     }
 

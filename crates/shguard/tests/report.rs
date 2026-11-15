@@ -13,6 +13,7 @@ use std::process::{Command, Output};
 
 use common::{bash, spawn};
 use serde_json::Value;
+use shguard::decision_class::DecisionClass;
 
 const SENTINEL: &str = "echo report-fixture-sentinel-7f3a";
 
@@ -87,31 +88,96 @@ fn show_commands_adds_the_commands_under_their_class() {
 #[test]
 fn an_overlong_line_is_invalid_and_later_lines_are_counted() {
     let dir = ok(tempfile::tempdir());
-    let mut body = String::from("{\"class\":\"a\"}\n{\"class\":\"");
+    let mut body = String::from("{\"class\":\"allow\"}\n{\"class\":\"");
     body.push_str(&"x".repeat(3 * 1024 * 1024));
-    body.push_str("\"}\n{\"class\":\"a\"}\n");
+    body.push_str("\"}\n{\"class\":\"allow\"}\n");
     let log = fixture(dir.path(), body.as_bytes());
     let out = shguard(dir.path(), &["report", &log], b"");
     assert_eq!(out.status.code(), Some(0), "{out:?}");
-    assert_eq!(text(&out.stdout), "2\ta\n1\tinvalid\n3\ttotal\n");
+    assert_eq!(text(&out.stdout), "2\tallow\n1\tinvalid\n3\ttotal\n");
 }
 
 #[test]
 fn only_twenty_classes_are_listed_but_the_total_counts_all() {
     let dir = ok(tempfile::tempdir());
+    let mut names: Vec<&str> = DecisionClass::all()
+        .take(25)
+        .map(DecisionClass::as_str)
+        .collect();
+    assert_eq!(names.len(), 25);
     let mut body = String::new();
-    for i in 0..25 {
-        body.push_str(&format!("{{\"class\":\"c{i:02}\"}}\n"));
+    for name in &names {
+        body.push_str(&format!("{{\"class\":\"{name}\"}}\n"));
     }
+    names.sort_unstable();
     let log = fixture(dir.path(), body.as_bytes());
     let out = shguard(dir.path(), &["report", &log], b"");
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let stdout = text(&out.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 21, "{stdout}");
-    assert_eq!(lines[0], "1\tc00");
-    assert_eq!(lines[19], "1\tc19");
+    assert_eq!(lines[0], format!("1\t{}", names[0]));
+    assert_eq!(lines[19], format!("1\t{}", names[19]));
     assert_eq!(lines[20], "25\ttotal");
+}
+
+/// Reports a log with one line of the given `class` (command `SENT`) and one
+/// valid line, without and with `--show-commands`.
+fn forged_report(dir: &Path, class: &str) -> Vec<Output> {
+    let body = format!(
+        "{{\"class\":{},\"command\":\"SENT\"}}\n{{\"class\":\"allow\",\"command\":\"ls\"}}\n",
+        Value::from(class)
+    );
+    let log = fixture(dir, body.as_bytes());
+    let mut outs = Vec::new();
+    for flags in [&[][..], &["--show-commands"]] {
+        let mut args = vec!["report"];
+        args.extend_from_slice(flags);
+        args.push(&log);
+        outs.push(shguard(dir, &args, b""));
+    }
+    outs
+}
+
+#[test]
+fn a_command_text_in_the_class_field_is_invalid_and_never_printed() {
+    let dir = ok(tempfile::tempdir());
+    for out in forged_report(dir.path(), "export TOKEN=abc123") {
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let stdout = text(&out.stdout);
+        assert!(stdout.contains("1\tinvalid\n"), "{stdout}");
+        assert!(stdout.ends_with("2\ttotal\n"), "{stdout}");
+        for stream in [stdout, text(&out.stderr)] {
+            for word in ["SENT", "TOKEN", "abc123", "export"] {
+                assert!(!stream.contains(word), "{word}: {stream}");
+            }
+        }
+    }
+}
+
+#[test]
+fn an_escape_byte_in_the_class_field_is_invalid_and_never_printed() {
+    let dir = ok(tempfile::tempdir());
+    for out in forged_report(dir.path(), "allow\u{1b}[31m") {
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let stdout = text(&out.stdout);
+        assert!(stdout.contains("1\tinvalid\n"), "{stdout}");
+        assert!(!out.stdout.contains(&0x1b) && !out.stderr.contains(&0x1b));
+        assert!(!stdout.contains("[31m"), "{stdout}");
+        assert!(!stdout.contains("SENT"), "{stdout}");
+        assert!(!text(&out.stderr).contains("SENT"), "{out:?}");
+    }
+}
+
+#[test]
+fn a_plausible_class_this_version_does_not_know_is_invalid() {
+    let dir = ok(tempfile::tempdir());
+    for out in forged_report(dir.path(), "unknown:from_the_future") {
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let stdout = text(&out.stdout);
+        assert!(stdout.contains("1\tinvalid\n"), "{stdout}");
+        assert!(!stdout.contains("from_the_future"), "{stdout}");
+    }
 }
 
 #[test]
