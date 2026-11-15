@@ -2052,6 +2052,9 @@ fn the_bun_recipe_allows_tests_and_listed_scripts_only() {
         "bun test ../x.test.ts",
         "bun test /",
         "bun test ~/Downloads",
+        "bun test -t foo /",
+        "bun test a.test.ts ~",
+        "bun test //etc",
     ] {
         assert_ne!(decide(&l, cmd), Decision::Allow, "`{cmd}`");
     }
