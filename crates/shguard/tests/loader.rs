@@ -1925,6 +1925,10 @@ fn the_bun_recipe_allows_tests_and_listed_scripts_only() {
         "bun test -u",
         "bun test --update-snapshots",
         "bun test --preload x",
+        "cd sub && bun test",
+        "bun lint",
+        "bun run lint -- --fix",
+        "bun test ../x.test.ts",
     ] {
         assert_ne!(decide(&l, cmd), Decision::Allow, "`{cmd}`");
     }

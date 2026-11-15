@@ -180,10 +180,14 @@ to it is yours.
   (`github:o/r#x`), which is code from outside the repository.
 - `bun` is an inexpressible head, so these rows load with a warning (see
   above; leave out `runs_code`, or every command stays an Ask). `bun test` runs
-  the repository's own test files, and `bunfig.toml` can preload a script
-  before them. `bun run <script>` runs a `package.json` script, which is
-  arbitrary code, so the recipe gives each script its own row: list only
-  scripts you have read, and add one row per script. A script name with no row,
+  the test files under the paths it is given (the working directory by
+  default). A path can be absolute or start with `~`, and bun runs a file
+  named with `./` or `/` even when it is not a `*.test.*` file. `bunfig.toml`
+  can preload a script before them. `bun run <script>` runs a `package.json`
+  script, which is arbitrary code, and also runs `pre<script>`/`post<script>`
+  and any script it calls, so the recipe gives each script its own row: list
+  only scripts you have read, together with their `pre<script>`/`post<script>`
+  scripts and any script they call. A script name with no row,
   a file (`bun run x.ts`), `bun x.ts`, `bun -e` and `bunx` stay Ask, and so do
   extra arguments to a script (`bun run lint --fix`). `bun test` takes only
   file filters and `-t`/`--test-name-pattern`; `--preload`, `-u` and the rest
