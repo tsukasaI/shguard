@@ -140,8 +140,10 @@ position in it runs code" no longer holds there. It also blinds the embedded
 Block rules to a command wrapped by `env`, `sudo` or `xargs` under such a
 row, since the rules see the wrapper's words, not the wrapped command. The
 loader warns about such a row: `shguard check` and `shguard check --config`
-print each warning on its own line to stderr and still exit 0, and the hook
-prints none. `runs_code = true` keeps every command under the head an Ask.
+print each warning on its own line to stderr and still exit 0 (with
+`--deny-warnings` right after `check`, they exit 1 when any warning is
+printed, so CI or a pre-commit hook can fail on one), and the hook prints
+none. `runs_code = true` keeps every command under the head an Ask.
 An Allow that only a user `[[row]]` gives (the embedded catalog alone would
 not Allow the command) says so in the hook reason, "covered by the catalog
 through a user [[row]]; no rule hit", and so does its decision log line. An
@@ -245,7 +247,9 @@ cannot write (see [Decision log](#decision-log)) passes `check --config`
 and fails only when the hook writes the log.
 `shguard check <file.toml>...` checks standalone catalog files; write a path
 that starts with `-` as `./-name`. Both exit 0 when everything loads, 1 when
-something does not, and 2 on a usage error.
+something does not, and 2 on a usage error. `shguard check --deny-warnings`
+(in either form, written right after `check`) also exits 1 when the load
+succeeds with a warning.
 
 ### Decision log
 

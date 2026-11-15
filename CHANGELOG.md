@@ -12,6 +12,9 @@
   runs other code or has option syntax the grammar cannot express has its own
   hook reason and the class `allow_user_code_row`, so the risk shows in the
   hook and the log without running `shguard check` (#1270).
+- `shguard check --deny-warnings` (for catalog files, and with `--config`)
+  exits 1 when the load prints any warning, so CI or a pre-commit hook can
+  fail on a warned row; without the flag the exit codes are unchanged (#1271).
 
 ### Changed
 

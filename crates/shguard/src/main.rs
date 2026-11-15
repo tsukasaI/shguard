@@ -18,8 +18,10 @@ use shguard::{decision_log, init, report};
 
 const USAGE: &str = "\
 usage: shguard                          run as a Claude Code PreToolUse hook (JSON on stdin)
-       shguard check <catalog.toml>...  check catalog files
-       shguard check --config [<path>]  check a config as the hook loads it (default: the hook's path)
+       shguard check [--deny-warnings] <catalog.toml>...
+                                        check catalog files (--deny-warnings: exit 1 on any warning)
+       shguard check [--deny-warnings] --config [<path>]
+                                        check a config as the hook loads it (default: the hook's path)
        shguard init                     write a config and print the settings.json hook entry
        shguard report [--show-commands] <log>
                                         count a decision log by class (no command text unless asked)
@@ -38,31 +40,12 @@ fn main() -> ExitCode {
     let location = locate(std::env::var_os("SHGUARD_CONFIG"), std::env::var_os("HOME"));
     match args.split_first() {
         None => hook(location),
-        Some((cmd, rest)) if cmd == "check" && rest.first().is_some_and(|a| a == "--config") => {
-            match rest {
-                [_] => {
-                    let mut err = std::io::stderr().lock();
-                    note_embedded_only(&location, &mut err);
-                    check_config(location, &mut err)
-                }
-                [_, path] => check_config(
-                    Location::Explicit(PathBuf::from(path)),
-                    &mut std::io::stderr().lock(),
-                ),
-                _ => usage_error(),
-            }
-        }
-        Some((cmd, rest))
-            if cmd == "check"
-                && rest
-                    .first()
-                    .is_some_and(|a| a.to_string_lossy().starts_with('-')) =>
-        {
-            usage_error()
-        }
-        Some((cmd, rest)) if cmd == "check" && !rest.is_empty() => {
-            let paths: Vec<PathBuf> = rest.iter().map(PathBuf::from).collect();
-            check(&paths, &mut std::io::stderr().lock())
+        Some((cmd, rest)) if cmd == "check" => {
+            let (warnings, rest) = match rest.split_first() {
+                Some((flag, tail)) if flag == "--deny-warnings" => (Warnings::Deny, tail),
+                _ => (Warnings::Report, rest),
+            };
+            check_command(rest, warnings, location)
         }
         Some((cmd, [])) if cmd == "init" => init_config(location),
         Some((cmd, rest)) if cmd == "report" => match rest {
@@ -90,6 +73,44 @@ fn main() -> ExitCode {
 
 fn is_option(arg: &OsString) -> bool {
     arg.to_string_lossy().starts_with('-')
+}
+
+/// What `shguard check` does with a load that succeeded with warnings.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Warnings {
+    /// Print them and exit 0.
+    Report,
+    /// Print them and exit 1 (`--deny-warnings`).
+    Deny,
+}
+
+impl Warnings {
+    fn fails(self, printed: usize) -> bool {
+        self == Warnings::Deny && printed > 0
+    }
+}
+
+/// `shguard check` after the optional `--deny-warnings`: `rest` is either
+/// `--config [<path>]` or catalog files.
+fn check_command(rest: &[OsString], warnings: Warnings, location: Location) -> ExitCode {
+    match rest {
+        [flag] if flag == "--config" => {
+            let mut err = std::io::stderr().lock();
+            note_embedded_only(&location, &mut err);
+            check_config(location, warnings, &mut err)
+        }
+        [flag, path] if flag == "--config" => check_config(
+            Location::Explicit(PathBuf::from(path)),
+            warnings,
+            &mut std::io::stderr().lock(),
+        ),
+        [] => usage_error(),
+        [first, ..] if is_option(first) => usage_error(),
+        files => {
+            let paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+            check(&paths, warnings, &mut std::io::stderr().lock())
+        }
+    }
 }
 
 /// `shguard report`: counts the decision log at `path` by class on stdout.
@@ -341,13 +362,18 @@ fn note_embedded_only(location: &Location, err: &mut impl Write) {
 /// `shguard check --config`: loads the config as the hook does and prints each
 /// problem on its own line. `decision_log` is checked only for being absolute:
 /// a path the hook cannot write passes and fails only when the hook writes it.
-fn check_config(location: Location, err: &mut impl Write) -> ExitCode {
+/// Under [`Warnings::Deny`] a load with warnings exits 1.
+fn check_config(location: Location, warnings: Warnings, err: &mut impl Write) -> ExitCode {
     match load_settings(location) {
         Ok(s) => {
             for w in &s.warnings {
                 drop(writeln!(err, "warning: {w}"));
             }
-            ExitCode::SUCCESS
+            if warnings.fails(s.warnings.len()) {
+                ExitCode::FAILURE
+            } else {
+                ExitCode::SUCCESS
+            }
         }
         Err(failed) => {
             for e in failed.errors {
@@ -363,8 +389,9 @@ fn check_config(location: Location, err: &mut impl Write) -> ExitCode {
 
 /// Loads the catalog files and prints each problem on its own line. If a file
 /// cannot be read the catalog is not loaded, since the missing rows would
-/// only produce follow-on errors.
-fn check(files: &[PathBuf], err: &mut impl Write) -> ExitCode {
+/// only produce follow-on errors. Under [`Warnings::Deny`] a load with
+/// warnings exits 1.
+fn check(files: &[PathBuf], warnings: Warnings, err: &mut impl Write) -> ExitCode {
     let mut texts = Vec::new();
     let mut failed = false;
     for path in files {
@@ -391,6 +418,7 @@ fn check(files: &[PathBuf], err: &mut impl Write) -> ExitCode {
                 for w in &checked.warnings {
                     drop(writeln!(err, "warning: {w}"));
                 }
+                failed = warnings.fails(checked.warnings.len());
             }
             Err(load_failed) => {
                 for e in load_failed.errors {
