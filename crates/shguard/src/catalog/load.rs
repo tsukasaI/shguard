@@ -19,7 +19,8 @@ use super::{Failed, LoadError, LoadWarning};
 
 /// Command heads that the embedded catalog never gives a coverable row. A
 /// user row for one of them that does not set `runs_code` still loads, with a
-/// [`LoadWarning::CodeRunningHead`]; with `runs_code` it keeps every command
+/// [`LoadWarning::CodeRunningHead`]; an embedded row without `runs_code` is a
+/// [`LoadError::CodeRunningHead`]; with `runs_code` it keeps every command
 /// under it an Ask. Each head is here for one of these reasons:
 ///
 /// - its option syntax is outside the grammar: dash-less bundles (`tar xf`)
@@ -566,7 +567,7 @@ pub(crate) fn load_files(
     let mut hints: Vec<(Hint, Origin)> = Vec::new();
     for (name, origin, ParsedFile(file)) in files {
         for row in file.row {
-            entries.push(build_row(&name, row, &mut errs, &mut warnings));
+            entries.push(build_row(&name, origin, row, &mut errs, &mut warnings));
         }
         rule_dtos.extend(file.rule.into_iter().map(|r| (name.clone(), r)));
         // A user hint replaces an embedded hint with the same key; two
@@ -766,8 +767,12 @@ fn opt_name(file: &str, row: &str, dto: &OptDto, errs: &mut Vec<LoadError>) -> O
     }
 }
 
+/// Builds one row. A head that runs code (or has option syntax the grammar
+/// cannot express) without `runs_code` is a [`LoadError::CodeRunningHead`] in
+/// an embedded file and a [`LoadWarning::CodeRunningHead`] in a user file.
 fn build_row(
     file: &str,
+    origin: Origin,
     dto: RowDto,
     errs: &mut Vec<LoadError>,
     warnings: &mut Vec<LoadWarning>,
@@ -795,10 +800,17 @@ fn build_row(
         });
     }
     if key_valid && !dto.runs_code && key.first().is_some_and(|h| is_inexpressible(h)) {
-        warnings.push(LoadWarning::CodeRunningHead {
-            file: file.to_owned(),
-            row: label.escape_default().to_string(),
-        });
+        let row = label.escape_default().to_string();
+        match origin {
+            Origin::Embedded => errs.push(LoadError::CodeRunningHead {
+                file: file.to_owned(),
+                row,
+            }),
+            Origin::User => warnings.push(LoadWarning::CodeRunningHead {
+                file: file.to_owned(),
+                row,
+            }),
+        }
     }
     if key.first().is_some_and(|h| h.contains(&b'/')) {
         errs.push(LoadError::PathHead {

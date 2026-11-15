@@ -154,6 +154,19 @@ pub enum LoadError {
         /// the head prints in ASCII.
         head: String,
     },
+    /// A row in an embedded file has a head that runs other code or has option
+    /// syntax the grammar cannot express, and does not set `runs_code`. A user
+    /// file gets a [`LoadWarning::CodeRunningHead`] for the same row instead.
+    #[error(
+        "{file:?}: row \"{row}\": head runs other code or has option syntax the grammar cannot express, so an embedded row must set `runs_code = true`"
+    )]
+    CodeRunningHead {
+        /// Name of the file, as passed to the loader.
+        file: String,
+        /// Key of the row, segments joined with spaces, with every non-ASCII
+        /// character escaped.
+        row: String,
+    },
     /// A row key segment after the head holds a non-ASCII byte
     /// (`["git", "Clippſ"]`). The duplicate-row check folds ASCII case only, so
     /// a non-ASCII spelling would not collide with `clippy`, and a
