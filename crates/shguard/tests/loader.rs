@@ -1660,3 +1660,14 @@ fn a_user_source_named_embedded_still_replaces_the_embedded_hint() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].text.as_str(), "mine");
 }
+
+#[test]
+fn load_returns_the_warnings_beside_the_catalog() {
+    let Ok(checked) = load_one(&row("\"env\"", "")) else {
+        panic!("a code-running head without runs_code must still load");
+    };
+    assert!(matches!(
+        checked.warnings[..],
+        [shguard::catalog::LoadWarning::CodeRunningHead { .. }]
+    ));
+}
