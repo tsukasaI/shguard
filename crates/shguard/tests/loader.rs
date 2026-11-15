@@ -1876,3 +1876,56 @@ fn check_config_deny_warnings_uses_the_default_location() {
     let out = check(home.path());
     assert_eq!(out.status.code(), Some(1), "{out:?}");
 }
+
+/// The README block that holds the `bun` rows, loaded as a user file on top of
+/// the embedded catalog.
+fn readme_recipe_loaded() -> Loaded {
+    let readme = include_str!("../../../README.md");
+    let Some(block) = readme
+        .split("```toml")
+        .filter_map(|part| part.split("```").next())
+        .find(|text| text.contains("key = [\"bun\"]"))
+    else {
+        panic!("the README has no toml block with a bun row");
+    };
+    let mut sources = shguard::catalog::EMBEDDED.to_vec();
+    sources.push(Source {
+        origin: Origin::User,
+        name: "README.md",
+        text: block,
+    });
+    match load(&sources) {
+        Ok(checked) => checked.loaded,
+        Err(e) => panic!("the README recipe does not load: {e:?}"),
+    }
+}
+
+#[test]
+fn the_bun_recipe_allows_tests_and_listed_scripts_only() {
+    let l = readme_recipe_loaded();
+    for cmd in [
+        "bun test",
+        "bun test a.test.ts",
+        "bun test -t foo",
+        "bun run typecheck",
+        "bun run lint && bun test",
+    ] {
+        assert_eq!(decide(&l, cmd), Decision::Allow, "`{cmd}`");
+    }
+    for cmd in [
+        "bun x.ts",
+        "bun -e 1",
+        "bun run x.ts",
+        "bun run other",
+        "bun run lint --fix",
+        "bunx y",
+        "bun x y",
+        "bun install",
+        "bun add y",
+        "bun test -u",
+        "bun test --update-snapshots",
+        "bun test --preload x",
+    ] {
+        assert_ne!(decide(&l, cmd), Decision::Allow, "`{cmd}`");
+    }
+}
