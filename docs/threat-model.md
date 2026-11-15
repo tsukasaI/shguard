@@ -127,6 +127,15 @@ recorded, not hidden.
   the other gh rows, which `-R` cannot point elsewhere.
 - **Tilde words in option position.** `cd ~/x` and `ls ~/x` are Ask today
   (a fail-closed parse of the argv spec, #1038), at a usability cost.
+- **Warned code-running user rows.** A user `[[row]]` for a code-running
+  head (one that runs other code, or whose option syntax the grammar cannot
+  express) that does not set `runs_code` loads with only a warning, which
+  `shguard check` prints and the hook does not. Such a row can make shguard
+  Allow commands under that head where P2 does not hold, because the row's
+  grammar does not match what the tool really runs. The Allow carries its
+  own hook reason and the decision-log class `allow_user_code_row`. An
+  embedded catalog row of this kind is a load error instead (#1265). The
+  limit is recorded in #1266.
 
 ## The hook itself
 
