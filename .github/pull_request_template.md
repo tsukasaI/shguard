@@ -11,8 +11,9 @@
 ## P2 audit
 
 <!--
-Required when a catalog/*.toml row is added or changed (see CLAUDE.md,
-"Tests and catalog"). Goal: find a spelling the row Allows that the real tool
+Required when a catalog/*.toml row is added or changed, or when a change to
+how the loader or kernel reads a row's fields lands (crates/shguard/src/catalog,
+crates/shguard-kernel/src; see CLAUDE.md, "Tests and catalog"). Goal: find a spelling the row Allows that the real tool
 reads as a different or code-running option. One line per spelling tried:
 
   spelling tried -> what the tool does with it -> shguard decision -> evidence (doc/source/run)
@@ -21,4 +22,4 @@ The decision is what a build of shguard returns (hook JSON on stdin). Cover
 the spellings listed in CLAUDE.md, "Tests and catalog".
 -->
 
-N/A: no catalog row changes
+N/A: no catalog row or loader/kernel row-reading changes
