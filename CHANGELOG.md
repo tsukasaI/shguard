@@ -8,8 +8,8 @@
   (`["git", "Push\u{127}"]`), is now a load error (`NonAsciiRuleSegment`),
   as it is for row keys since 0.13.0 (#1207). Such a rule used to load and
   never fire. A 0.13.0 config with such a rule fails to load, so the hook
-  denies every Bash call until the key is spelled in ASCII; row load
-  messages now print the key escaped to ASCII (#1249).
+  denies every Bash call until the key is spelled in ASCII (#1249). Row
+  load messages now print the key escaped to ASCII (#1247).
 
 ## 0.13.0 - 2026-11-15
 
