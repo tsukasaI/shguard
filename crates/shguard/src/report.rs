@@ -37,7 +37,9 @@ pub const COMMANDS_PER_CLASS: usize = 5;
 pub enum CommandText {
     /// Counts only.
     Hide,
-    /// Also the most frequent distinct commands of each listed class.
+    /// Also the most frequent distinct commands of each listed class. The
+    /// tally holds every distinct command of every class in memory (memory
+    /// grows with the number of distinct commands), which is why it is opt-in.
     Show,
 }
 
