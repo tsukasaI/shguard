@@ -19,7 +19,8 @@ concurrency:
 jobs:
   # A tag on a main commit is not proof that `verify` passed on it, so this job
   # refuses any other commit, waits for `verify`'s push run on main for the
-  # tagged SHA to succeed (#1223, #1261), and re-checks what a mistagged commit
+  # tagged SHA to succeed with its `rust` and `proofs` jobs (#1223, #1261,
+  # #1279), and re-checks what a mistagged commit
   # would break.
   check:
     runs-on: ubuntu-latest
@@ -28,7 +29,7 @@ jobs:
     # the last poll.
     timeout-minutes: 150
     # A job-level `permissions` replaces the workflow-level set, so
-    # `contents: read` is repeated; `actions: read` is for the workflow-runs API.
+    # `contents: read` is repeated; `actions: read` is for the workflow-runs and jobs APIs.
     permissions:
       contents: read
       actions: read
@@ -59,14 +60,19 @@ jobs:
           command: check
       # Last, so a local failure is reported without waiting. Fail closed: only
       # `verify`'s push runs on main for this SHA count, so a pull_request run
-      # attached to the same commit cannot satisfy it. Every matching run must
-      # be `success`; a missing run is waited for 10 minutes and a queued or
-      # running one 120 minutes, both counted from the start of this step, then
-      # it fails. A completed run with any other conclusion fails
-      # at once, not waited on. A re-run keeps its run id and reports the
+      # attached to the same commit cannot satisfy it; the API filters are
+      # re-checked on every returned run, and a mismatch counts as an API
+      # failure. Every matching run must be `success`, and for each, the jobs
+      # `rust` and `proofs` of its latest attempt must exist and be `success`
+      # (a skipped job leaves the run green). A missing run is waited for 10
+      # minutes and a queued or running one 120 minutes, both counted from the
+      # start of this step, then it fails. Once a run was seen, it must be
+      # missing for 3 consecutive polls to fail (one empty page is not enough),
+      # still within the 120 minutes. A completed run with any other conclusion
+      # fails at once, not waited on. A re-run keeps its run id and reports the
       # latest attempt, so no newest-run selection is needed. Ten consecutive
-      # API failures also fail, so a permanent error is not mistaken for a
-      # missing run.
+      # API failures (a failed read, a failed filter check, a failed jobs read)
+      # also fail, so a permanent error is not mistaken for a missing run.
       - name: verify's push run on main succeeded on this commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -75,18 +81,27 @@ jobs:
           missing_deadline=$((SECONDS + 600))
           run_deadline=$((SECONDS + 7200))
           failures=0
+          seen=0
+          gone=0
+          api_failed() {
+            failures=$((failures + 1))
+            echo "::warning::$1 (attempt ${failures})"
+            test "${failures}" -lt 10 \
+              || { echo "::error::$1 failed ${failures} times in a row"; exit 1; }
+            sleep 30
+          }
           while :; do
             if ! runs=$(gh api --paginate \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/verify.yaml/runs?head_sha=${GITHUB_SHA}&event=push&branch=main&per_page=100" \
-              | jq -s '[.[].workflow_runs[]]'); then
-              failures=$((failures + 1))
-              echo "::warning::cannot read verify runs (attempt ${failures})"
-              test "${failures}" -lt 10 \
-                || { echo "::error::workflow-runs API failed ${failures} times in a row"; exit 1; }
-              sleep 30
+              | jq -s --arg sha "${GITHUB_SHA}" '
+                  [.[].workflow_runs[]]
+                  | if all(.[]; .head_sha == $sha and .event == "push" and .head_branch == "main")
+                    then .
+                    else error("verify runs do not match head_sha/push/main")
+                    end'); then
+              api_failed "cannot read or validate verify runs"
               continue
             fi
-            failures=0
             state=$(jq -r '
               def known: ["queued", "in_progress", "waiting", "pending", "requested"];
               def bad: select(.status != "completed" and (.status | IN(known[]) | not));
@@ -101,17 +116,52 @@ jobs:
               end' <<< "${runs}")
             echo "verify push run on main: ${state}"
             case "${state}" in
-              success) exit 0 ;;
+              success)
+                seen=1
+                gone=0
+                for id in $(jq -r '.[].id' <<< "${runs}"); do
+                  if ! jobs=$(gh api --paginate \
+                    "repos/${GITHUB_REPOSITORY}/actions/runs/${id}/jobs?filter=latest&per_page=100" \
+                    | jq -s '[.[].jobs[]]'); then
+                    api_failed "cannot read the jobs of verify run ${id}"
+                    continue 2
+                  fi
+                  problems=$(jq -r '
+                    def need($n):
+                      [.[] | select(.name == $n)] as $j
+                      | if ($j | length) == 0 then "\($n) is absent"
+                        elif all($j[]; .status == "completed" and .conclusion == "success") then empty
+                        else "\($n) is " + ([$j[] | "\(.status)/\(.conclusion)"] | join(","))
+                        end;
+                    need("rust"), need("proofs")' <<< "${jobs}")
+                  if test -n "${problems}"; then
+                    echo "::error::verify run ${id}: ${problems//$'\n'/; }; re-run that verify run (gh run rerun ${id}), then re-run this job"
+                    exit 1
+                  fi
+                done
+                exit 0
+                ;;
               missing)
-                test "${SECONDS}" -lt "${missing_deadline}" \
-                  || { echo "::error::no verify push run on main exists for this commit 10 minutes after this step started; if one appears later, re-run this job"; exit 1; }
+                if test "${seen}" -eq 1; then
+                  gone=$((gone + 1))
+                  test "${gone}" -lt 3 \
+                    || { echo "::error::verify's push run on main disappeared for 3 consecutive polls; re-run this job"; exit 1; }
+                  test "${SECONDS}" -lt "${run_deadline}" \
+                    || { echo "::error::verify's push run did not finish within 120 minutes of this step starting; re-run this job once that run has succeeded"; exit 1; }
+                else
+                  test "${SECONDS}" -lt "${missing_deadline}" \
+                    || { echo "::error::no verify push run on main exists for this commit 10 minutes after this step started; if one appears later, re-run this job"; exit 1; }
+                fi
                 ;;
               pending)
+                seen=1
+                gone=0
                 test "${SECONDS}" -lt "${run_deadline}" \
                   || { echo "::error::verify's push run did not finish within 120 minutes of this step starting; re-run this job once that run has succeeded"; exit 1; }
                 ;;
               *) echo "::error::verify push run on main is ${state}; re-run that verify run (gh run rerun <id>), then re-run this job"; exit 1 ;;
             esac
+            failures=0
             sleep 30
           done
 
