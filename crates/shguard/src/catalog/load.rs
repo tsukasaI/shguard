@@ -810,6 +810,7 @@ fn build_row(
     errs: &mut Vec<LoadError>,
     warnings: &mut Vec<LoadWarning>,
 ) -> Entry {
+    // escaped once here; messages print it as "{row}", not {row:?}
     let label = dto.key.join(" ").escape_default().to_string();
     let key = seg_bytes(&dto.key);
     let before = errs.len();

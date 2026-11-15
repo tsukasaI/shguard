@@ -18,8 +18,8 @@ pub enum LoadWarning {
     CodeRunningHead {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces, with every non-ASCII
-        /// character escaped.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
 }
@@ -47,7 +47,8 @@ pub struct Failed {
 }
 
 /// A problem found while loading catalog files. Every variant names the file
-/// and where in it: a row (its key joined with spaces) or a rule (its id).
+/// and where in it: a row (its key joined with spaces and escaped with
+/// `str::escape_default`) or a rule (its id).
 #[derive(Debug, Error)]
 pub enum LoadError {
     /// The file is not valid TOML, or does not match the schema (unknown
@@ -66,7 +67,8 @@ pub enum LoadError {
     MissingSource {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row key is empty or has an empty segment.
@@ -74,7 +76,8 @@ pub enum LoadError {
     BadRowKey {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// An option name is not a valid short or long name.
@@ -82,7 +85,8 @@ pub enum LoadError {
     BadOptName {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// The rejected option name, as written in the file.
         name: String,
@@ -92,7 +96,8 @@ pub enum LoadError {
     OptWithoutName {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// Two rows (possibly in different files) have the same key.
@@ -100,7 +105,8 @@ pub enum LoadError {
     DuplicateRow {
         /// Name of the file holding the later, duplicate row.
         file: String,
-        /// Key shared by both rows, segments joined with spaces.
+        /// Key shared by both rows, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// Name of the file holding the first row with this key.
         first_file: String,
@@ -110,7 +116,8 @@ pub enum LoadError {
     DuplicateOpt {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// The option name that occurs twice, spelled as on argv (`-x` or `--name`).
         name: String,
@@ -121,7 +128,8 @@ pub enum LoadError {
     OrphanRow {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row sets both `changes_cwd` and `cwd_sensitive`.
@@ -129,7 +137,8 @@ pub enum LoadError {
     ConflictingCwd {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row under a `cwd_sensitive` parent row does not set `cwd_sensitive`.
@@ -138,7 +147,7 @@ pub enum LoadError {
         /// Name of the file holding the child row.
         file: String,
         /// Key of the child row that lacks `cwd_sensitive`, segments joined
-        /// with spaces.
+        /// with spaces, escaped with `str::escape_default`.
         row: String,
     },
     /// A row head holds a `/` (`/bin/bash`, `/opt/homebrew/bin/fd`). The
@@ -148,7 +157,8 @@ pub enum LoadError {
     PathHead {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row head holds a non-ASCII byte (`baſh`). The head checks compare in
@@ -160,8 +170,8 @@ pub enum LoadError {
     NonAsciiHead {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces, with every non-ASCII
-        /// character escaped like `head`.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default` like `head`.
         row: String,
         /// The head with every non-ASCII character escaped (`ba\u{17f}h`), so
         /// the head prints in ASCII.
@@ -176,8 +186,8 @@ pub enum LoadError {
     CodeRunningHead {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces, with every non-ASCII
-        /// character escaped.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
     },
     /// A row key segment after the head holds a non-ASCII byte
@@ -192,8 +202,8 @@ pub enum LoadError {
     NonAsciiSegment {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces, with every non-ASCII
-        /// character escaped like `segment`.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default` like `segment`.
         row: String,
         /// The segment with every non-ASCII character escaped (`Clipp\u{17f}`),
         /// so it prints in ASCII.
@@ -208,7 +218,8 @@ pub enum LoadError {
     CodeOptionNotCode {
         /// Name of the file, as passed to the loader.
         file: String,
-        /// Key of the row, segments joined with spaces.
+        /// Key of the row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// The known code-running option the listed one spells in full or
         /// abbreviates, such as `-x`.
@@ -220,7 +231,8 @@ pub enum LoadError {
     ParentOptNotCode {
         /// Name of the file holding the parent row.
         file: String,
-        /// Key of the parent row, segments joined with spaces.
+        /// Key of the parent row, segments joined with spaces, escaped with
+        /// `str::escape_default`.
         row: String,
         /// The child's last key segment, which the parent's option spells.
         opt: String,

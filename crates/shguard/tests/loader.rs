@@ -614,7 +614,27 @@ fn every_row_load_message_is_ascii_for_a_non_ascii_key_segment() {
     let seg = "\"Clipp\u{17f}\"";
     let opt = "[[row.opt]]\nshort = \"a\"\n[[row.opt]]\nshort = \"a\"\n";
     let git = row("\"git\"", "");
-    let cases: [(&str, String); 5] = [
+    let cases: [(&str, String); 10] = [
+        ("OptionLikeKey", row(&format!("\"git\", {seg}, \"-x\""), "")),
+        ("BadRowKey", row(&format!("\"git\", \"\", {seg}"), "")),
+        (
+            "BadOptName",
+            row(&format!("\"git\", {seg}"), "[[row.opt]]\nshort = \"ab\"\n"),
+        ),
+        (
+            "OptWithoutName",
+            row(
+                &format!("\"git\", {seg}"),
+                "[[row.opt]]\nvalue = \"flag\"\n",
+            ),
+        ),
+        (
+            "CodeOptionNotCode",
+            row(
+                &format!("\"fd\", {seg}"),
+                "[[row.opt]]\nshort = \"x\"\nvalue = { takes = \"inert\" }\n",
+            ),
+        ),
         ("PathHead", row(&format!("\"/bin/git\", {seg}"), "")),
         ("OrphanRow", row(&format!("\"git\", {seg}"), "")),
         (
@@ -645,6 +665,7 @@ fn every_row_load_message_is_ascii_for_a_non_ascii_key_segment() {
         );
         for e in &errs {
             assert!(e.to_string().is_ascii(), "{name}: {e}");
+            assert!(!e.to_string().contains(r"\\"), "{name}: {e}");
         }
     }
 
@@ -658,6 +679,7 @@ fn every_row_load_message_is_ascii_for_a_non_ascii_key_segment() {
     );
     for e in &errs {
         assert!(e.to_string().is_ascii(), "{e}");
+        assert!(!e.to_string().contains(r"\\"), "{e}");
     }
 
     let warned = row(&format!("\"ps\", {seg}"), "");
@@ -668,6 +690,7 @@ fn every_row_load_message_is_ascii_for_a_non_ascii_key_segment() {
     assert!(!warnings.is_empty(), "no warning");
     for w in &warnings {
         assert!(w.to_string().is_ascii(), "{w}");
+        assert!(!w.to_string().contains(r"\\"), "{w}");
     }
 }
 
