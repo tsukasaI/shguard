@@ -887,7 +887,10 @@ fn dead_rule() {
 
 #[test]
 fn non_ascii_rule_key_segment_is_rejected_in_ascii() {
-    for key in ["\"git\", \"Push\u{127}\"", "\"g\u{127}it\", \"push\""] {
+    for (key, esc) in [
+        ("\"git\", \"Push\u{127}\"", "Push\\u{127}"),
+        ("\"g\u{127}it\", \"push\"", "g\\u{127}it"),
+    ] {
         let t = format!(
             "{}[[rule]]\nid = \"r\"\nkey = [{key}]\noutcome = \"ask\"\n",
             row("\"git\"", "")
@@ -900,6 +903,8 @@ fn non_ascii_rule_key_segment_is_rejected_in_ascii() {
         assert_eq!(msgs.len(), 1, "{key}");
         for msg in &msgs {
             assert!(msg.is_ascii(), "{msg}");
+            assert!(msg.contains(esc), "{msg}");
+            assert!(!msg.contains(r"\\"), "{msg}");
         }
     }
 }

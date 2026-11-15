@@ -288,9 +288,10 @@ pub enum LoadError {
         rule: String,
     },
     /// A rule key segment, the head included, holds a non-ASCII byte
-    /// (`["git", "Pushħ"]`). Rule keys are matched byte for byte against row
-    /// keys, so such a rule would silently never match `git push`; the loader
-    /// fails closed. One error is reported per offending segment.
+    /// (`["git", "Pushħ"]`). A rule key is matched byte for byte against the
+    /// command's words, so such a rule would silently never fire on
+    /// `git push`; the loader fails closed. One error is reported per
+    /// offending segment.
     #[error(
         "{file:?}: rule \"{rule}\": key segment \"{segment}\" has a non-ASCII byte; spell the key in ASCII"
     )]
