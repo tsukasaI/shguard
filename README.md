@@ -269,6 +269,15 @@ dashdash = "ends"
 rest = "path"
 opt = [{ short = "t", long = "test-name-pattern", value = { takes = "inert" } }]
 
+# An absolute or `~` path is asked: `bun test /` walks the whole filesystem for
+# test files and runs every one it finds.
+[[rule]]
+id = "bun-test-absolute-path"
+key = ["bun", "test"]
+targets = [{ pat = "/", kind = "prefix" }, { pat = "~", kind = "prefix" }]
+outcome = "ask"
+reason = "bun test is asked for absolute and `~` paths; use a path relative to the repository"
+
 # One row per script you have read; each script is arbitrary code.
 [[row]]
 key = ["bun", "run", "lint"]
