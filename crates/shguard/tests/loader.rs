@@ -81,6 +81,18 @@ fn read_error_is_not_in_the_source_chain() {
 }
 
 #[test]
+fn a_load_warning_is_not_an_error() {
+    trait AmbiguousIfError<A> {
+        fn check() {}
+    }
+    impl<T: ?Sized> AmbiguousIfError<()> for T {}
+    struct IsError;
+    impl<T: ?Sized + std::error::Error> AmbiguousIfError<IsError> for T {}
+    // not a runtime assert: the `_` below stops compiling (ambiguous impl) once LoadWarning is an Error (#1272)
+    <shguard::catalog::LoadWarning as AmbiguousIfError<_>>::check();
+}
+
+#[test]
 fn toml_error_in_one_file_does_not_hide_others() {
     let dup = row("\"ls\"", "");
     let both = format!("{dup}{dup}");

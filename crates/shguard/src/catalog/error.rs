@@ -1,11 +1,13 @@
 //! The loader's error and warning types.
 
+use std::fmt;
+
 use thiserror::Error;
 
 /// A finding that does not stop a catalog from loading. The loader returns
 /// warnings beside the catalog and prints nothing; `shguard check` prints
 /// them, and the hook never does.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadWarning {
     /// A user file's row has a head that runs other code (an interpreter,
     /// shell, wrapper or remote session) or has option syntax the grammar
@@ -13,9 +15,6 @@ pub enum LoadWarning {
     /// `runs_code`. An embedded row gets [`LoadError::CodeRunningHead`]
     /// instead. The row lets shguard Allow commands under that head that it
     /// covers, so the user owns what that Allow lets through.
-    #[error(
-        "{file:?}: row \"{row}\": head runs other code or has option syntax the grammar cannot express, and the row does not set `runs_code`, so shguard can Allow commands under it; set `runs_code = true` to keep them an Ask"
-    )]
     CodeRunningHead {
         /// Name of the file, as passed to the loader.
         file: String,
@@ -23,6 +22,19 @@ pub enum LoadWarning {
         /// character escaped.
         row: String,
     },
+}
+
+// not `thiserror::Error`: a warning is not a failure, and an `Error` impl would
+// let it flow through `?` or `Box<dyn Error>` as one (#1272)
+impl fmt::Display for LoadWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CodeRunningHead { file, row } => write!(
+                f,
+                "{file:?}: row \"{row}\": head runs other code or has option syntax the grammar cannot express, and the row does not set `runs_code`, so shguard can Allow commands under it; set `runs_code = true` to keep them an Ask"
+            ),
+        }
+    }
 }
 
 /// A load that found at least one error, with the warnings found beside them.
