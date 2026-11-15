@@ -86,6 +86,27 @@ fn show_commands_adds_the_commands_under_their_class() {
 }
 
 #[test]
+fn show_commands_escapes_control_and_bidi_characters() {
+    let dir = ok(tempfile::tempdir());
+    let command = "a\u{9b}b\u{7f}c\u{202e}d\u{2066}e";
+    let body = format!(
+        "{{\"class\":\"allow\",\"command\":{}}}\n",
+        Value::from(command)
+    );
+    let log = fixture(dir.path(), body.as_bytes());
+    let out = shguard(dir.path(), &["report", "--show-commands", &log], b"");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let stdout = text(&out.stdout);
+    for raw in ['\u{9b}', '\u{7f}', '\u{202e}', '\u{2066}'] {
+        assert!(!stdout.contains(raw), "raw {raw:?} in {stdout:?}");
+    }
+    assert!(
+        stdout.contains("\"a\\u{009B}b\\u{007F}c\\u{202E}d\\u{2066}e\""),
+        "{stdout:?}"
+    );
+}
+
+#[test]
 fn an_overlong_line_is_invalid_and_later_lines_are_counted() {
     let dir = ok(tempfile::tempdir());
     let mut body = String::from("{\"class\":\"allow\"}\n{\"class\":\"");
