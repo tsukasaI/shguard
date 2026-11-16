@@ -110,8 +110,9 @@ recorded, not hidden.
 - **git push remotes.** Pushes to `https:`, `http:`, `ssh:`, `git:`,
   `git+ssh:`, `ssh+git:`, `file:`, `ftp:` and `ftps:` URLs (the same schemes
   fetch asks, #1317) and to absolute or `~` paths, quoted or not (git expands
-  a leading `~` itself, #1318), are Ask, and force pushes are Block. Still Allow: the scp form (`git push git@host:o/r main`) and
-  other `<scheme>://` helper URLs (the #1098 known limit),
+  a leading `~` itself, #1318), are Ask, and force pushes are Block. Still
+  Allow: the scp form (`git push git@host:o/r main`) and other `<scheme>://`
+  helper URLs (the #1098 known limit),
   `<helper>::` remotes other than `ext::` (#1096), glob refspecs
   (`'refs/heads/*:refs/heads/*'`, #1095), `--follow-tags` (#1097), and
   relative local remotes (`git push sub/repo main`, #1100).

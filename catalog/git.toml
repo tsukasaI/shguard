@@ -1477,8 +1477,8 @@ targets = [
 # repository prints the file. The `literal_tilde` target is the quoted `~`
 # word (`git push '~/x'`), which the shell leaves alone and git expands as a
 # repository path; it also asks a quoted `~` pathspec that git does not
-# expand. A relative local remote (`git push sub/repo
-# main`, `git push . main:x`) is not: a target cannot tell it from a refspec.
+# expand. A relative local remote (`git push sub/repo main`,
+# `git push . main:x`) is not: a target cannot tell it from a refspec.
 [[rule]]
 id = "git-absolute-path"
 key = ["git"]

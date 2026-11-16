@@ -374,7 +374,9 @@ pub enum LoadError {
     },
     /// A target starts with `~` followed by something other than `/`
     /// (`~user`), which no command word can match.
-    #[error("{file:?}: rule {rule:?}: target {pat:?}: `~` must be followed by `/` or nothing")]
+    #[error(
+        "{file:?}: rule {rule:?}: target {pat:?}: `~` must be followed by `/` or nothing; set `literal_tilde = true` to match the quoted word"
+    )]
     TildeUserTarget {
         /// Name of the file, as passed to the loader.
         file: String,

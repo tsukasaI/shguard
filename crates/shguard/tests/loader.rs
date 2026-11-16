@@ -1081,8 +1081,8 @@ fn literal_tilde_target_asks_the_quoted_word_only() {
     assert_eq!(decide(&literal, "rm '~user/x'"), Decision::Block);
     assert_eq!(decide(&literal, "rm '~'"), Decision::Block);
     // The unquoted home word is not the literal target's business.
-    assert_ne!(decide(&plain, "rm ~/x"), Decision::Allow);
-    assert_ne!(decide(&literal, "rm ~/x"), Decision::Block);
+    assert_eq!(decide(&plain, "rm -- ~/x"), Decision::Block);
+    assert_eq!(decide(&literal, "rm -- ~/x"), Decision::Allow);
     for cmd in ["rm x~", "rm 'a/~/b'", "rm x"] {
         assert_eq!(decide(&literal, cmd), Decision::Allow, "{cmd}");
     }

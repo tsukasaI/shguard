@@ -4144,6 +4144,13 @@ fn p2_audit_git_rows_issue_1253() {
         "git fetch -- '~/x'",
         "git log -- '~/x'",
         "git add '~x'",
+        "git push ''~/x main",
+        "git fetch \"\"~/x",
+        "git push '~'/x main",
+        "git push \"~\"x main",
+        "git ls-files --exclude-from='~/x'",
+        "git ls-files -X'~/x'",
+        "git ls-files --exclude-from=~/x",
     ];
     for cmd in issue_1318_ask {
         let got = common::decide(&l, cmd);
