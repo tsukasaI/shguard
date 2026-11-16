@@ -4047,6 +4047,7 @@ fn p2_audit_git_rows_issue_1253() {
         "git stash list --form=%H",
         "git stash list --forma",
         "git stash list --format -- --output=x",
+        "git stash list -- --output=x",
     ];
     for cmd in issue_1322_ask {
         let got = common::decide(&l, cmd);

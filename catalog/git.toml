@@ -1229,6 +1229,10 @@ short = "m"
 long = "message"
 value = { takes = "inert" }
 
+# `positionals = []` must stay: `git stash list` drops `--` (list_stash in
+# builtin/stash.c has no PARSE_OPT_KEEP_DASHDASH), so a word after `--`
+# such as `--output=x` still reaches git log as an option. The header's
+# "`--` ends options" does not hold for this row.
 [[row]]
 key = ["git", "stash", "list"]
 source = "https://git-scm.com/docs/git-stash"
