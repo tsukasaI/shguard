@@ -3838,6 +3838,25 @@ fn p2_audit_git_rows_issue_1253() {
             ],
             Decision::Block,
         ),
+        (
+            &[
+                "git log --max-c=5",
+                "git status -z -x",
+                "git status --porcelain=v2 --bogus",
+                "git stash apply 1 2",
+                "git push --exec=evil origin main",
+            ],
+            Decision::Ask,
+        ),
+        // git refuses rsync remotes (transport_get dies), so these are no divergence.
+        (
+            &[
+                "git push rsync://h/r",
+                "git push 'Rsync://x'",
+                "git fetch rsync://h/x",
+            ],
+            Decision::Allow,
+        ),
     ];
     let l = common::embedded();
     let mut wrong: Vec<String> = Vec::new();
@@ -3870,10 +3889,10 @@ fn p2_audit_git_rows_issue_1253() {
             }
         }
     }
-    // P2 divergences, pinned as the current decision (Allow): each is a spelling
-    // that git reads as another remote or directory. The fix for the linked
-    // issue must flip it to Ask, and then move it into `singles`.
+    // P2 divergences, pinned as the current decision (Allow). The fix for each
+    // linked issue must flip its group to Ask and move it into `singles`.
     let divergences: &[&str] = &[
+        // #1317: push/fetch remote schemes (#1098 accepted scp and helper remotes as a known limit)
         "git push host:path main",
         "git push user@host:path main",
         "git push git@github.com:o/r.git main",
@@ -3892,8 +3911,6 @@ fn p2_audit_git_rows_issue_1253() {
         "git push 'Ftp://x'",
         "git push 'ftp:x'",
         "git push 'ftps://x'",
-        "git push rsync://h/r",
-        "git push 'Rsync://x'",
         "git fetch host:path",
         "git fetch user@host:path",
         "git fetch evil.example:repo",
@@ -3901,10 +3918,10 @@ fn p2_audit_git_rows_issue_1253() {
         "git fetch -- host:path",
         "git fetch --multiple host:path",
         "git fetch 'foo::bar'",
-        "git fetch rsync://h/x",
         "git remote prune host:path",
         "git remote prune git@evil:x",
         "git remote prune 'foo::bar'",
+        // #1100: accepted known limit, no fix planned
         "git push ./x main",
         "git push x/y main",
         "git push -n x/y main",
@@ -3914,6 +3931,7 @@ fn p2_audit_git_rows_issue_1253() {
         "git fetch -n ./x",
         "git remote prune ./x",
         "git remote prune x/y",
+        // #1318: quoted ~ remote
         "git push '~/x'",
         "git push '~user/x' main",
         "git push '~' main",
@@ -3924,6 +3942,10 @@ fn p2_audit_git_rows_issue_1253() {
         "git fetch --multiple '~/x'",
         "git remote prune '~/x'",
         "git remote prune '~user/x'",
+        // #1319: --no-index as an option value
+        "git diff -S --no-index a b",
+        "git diff -G --no-index a b",
+        "git diff --src-prefix --no-index a b",
     ];
     for cmd in divergences {
         let got = common::decide(&l, cmd);
