@@ -597,6 +597,9 @@ fn p2_audit_cargo_rows_issue_1250() {
     }
 
     let singles: &[&str] = &[
+        "cargo build --manifest-path /x",
+        "cargo clippy --manifest-path /x/Cargo.toml",
+        "cargo doc --manifest-path /x",
         // case variants of the head and the subcommand, and spellings of the head
         "Cargo build",
         "cargo Build",
