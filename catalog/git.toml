@@ -1366,6 +1366,8 @@ targets = [
   { pat = "git+ssh:", kind = "prefix" },
   { pat = "ssh+git:", kind = "prefix" },
   { pat = "file:", kind = "prefix" },
+  { pat = "ftp:", kind = "prefix" },
+  { pat = "ftps:", kind = "prefix" },
 ]
 outcome = "ask"
 reason = "the remote is a URL rather than a configured remote name"
