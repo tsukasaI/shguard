@@ -54,9 +54,12 @@ short = "E"
 
 # Left out because the meaning differs between BSD and GNU: -B -b -D -f -G -g
 # -I -o -T -U -v -w -X -Z. GNU long options do not exist on BSD.
+# `cwd_sensitive` (#1320): with no operand ls lists the working directory (and
+# -R recurses), so `cd /Users/me && ls -R` would list the home directory.
 [[row]]
 key = ["ls"]
 source = "https://www.gnu.org/software/coreutils/manual/html_node/ls-invocation.html https://man.freebsd.org/cgi/man.cgi?query=ls"
+cwd_sensitive = true
 order = "strict"
 dashdash = "ends"
 rest = "path"
@@ -332,9 +335,12 @@ short = "v"
 # like `/x`, `~` or `a/../b` is asked, and a file after -e is still checked.
 # Left out: -C (BSD takes an optional count, GNU a required one), -z -P -Z -d
 # -D -R -U -T and all long options.
+# `cwd_sensitive` (#1320): `grep -r -e x` with no operand searches the working
+# directory, so `cd /Users/me && grep -r -e x` would read the home directory.
 [[row]]
 key = ["grep"]
 source = "https://www.gnu.org/software/grep/manual/grep.html https://man.freebsd.org/cgi/man.cgi?query=grep"
+cwd_sensitive = true
 order = "strict"
 dashdash = "ends"
 plus_words = "operand"
@@ -400,9 +406,12 @@ value = { takes = "path" }
 # a path for the same reason as in the grep row. Left out: --pre --pre-glob -z
 # --search-zip --hostname-bin (they run a program), -r/--replace, -L/--follow,
 # -u and every config or colour-spec option that is not listed.
+# `cwd_sensitive` (#1320): rg with no operand searches the working directory
+# recursively, so `cd /Users/me && rg --hidden -e x` would read the home directory.
 [[row]]
 key = ["rg"]
 source = "https://github.com/BurntSushi/ripgrep/blob/master/GUIDE.md https://github.com/BurntSushi/ripgrep/blob/master/crates/core/flags/defs.rs"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 plus_words = "operand"
@@ -550,9 +559,12 @@ long = "ignore-file"
 value = { takes = "path" }
 
 # Left out: -i/--input (reads a stats file), -o/--output, --streaming, -v.
+# `cwd_sensitive` (#1320): tokei with no operand counts the working directory
+# recursively, so `cd /Users/me && tokei` would walk the home directory.
 [[row]]
 key = ["tokei"]
 source = "https://github.com/XAMPPRocky/tokei#readme https://github.com/XAMPPRocky/tokei/blob/master/src/cli.rs"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -756,9 +768,12 @@ value = { takes = "path" }
 # --color, --classify, --hyperlink, --absolute, --code, --loc): clap reads the
 # next word as that value, which the grammar cannot express; --stdin,
 # --color-scale (takes any number of values), -Z, -M, -O and -@.
+# `cwd_sensitive` (#1320): with no operand eza lists the working directory (and
+# -R/-T recurse), so `cd /Users/me && eza -R` would list the home directory.
 [[row]]
 key = ["eza"]
 source = "https://github.com/eza-community/eza#readme https://github.com/eza-community/eza/blob/main/src/options/parser.rs"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
@@ -897,9 +912,12 @@ long = "version"
 # a file), --fromfile and --fromtabfile (read paths from a file), --gitfile and
 # --infofile (read a named file), -H/-X and the HTML options, -T, -R,
 # --hyperlink, --opt-toggle.
+# `cwd_sensitive` (#1320): tree with no operand lists the working directory
+# recursively, so `cd /Users/me && tree` would list the home directory.
 [[row]]
 key = ["tree"]
 source = "https://oldmanprogrammer.net/source.php?dir=projects/tree https://github.com/Old-Man-Programmer/tree/blob/master/tree.c"
+cwd_sensitive = true
 order = "permute"
 dashdash = "ends"
 rest = "path"
