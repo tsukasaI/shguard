@@ -2330,6 +2330,10 @@ fn p2_audit_gh_rows_issue_1251() {
     for (rows, templates, want) in groups {
         for row in rows {
             for template in templates {
+                assert!(
+                    template.starts_with("{c}"),
+                    "template without {{c}}: {template}"
+                );
                 let cmd = template.replace("{c}", row);
                 let got = decide(&l, &cmd);
                 if got != want {
