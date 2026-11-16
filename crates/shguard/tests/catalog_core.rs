@@ -10310,6 +10310,10 @@ fn p2_audit_core_rows_issue_1252() {
     let l = embedded();
     let mut wrong: Vec<String> = Vec::new();
     for &(rows, templates, want) in groups {
+        assert!(
+            !rows.is_empty() && !templates.is_empty(),
+            "a group with no rows or no templates checks nothing"
+        );
         for row in rows {
             for template in templates {
                 assert!(
@@ -10325,11 +10329,21 @@ fn p2_audit_core_rows_issue_1252() {
         }
     }
     for &(cmds, want) in singles {
+        assert!(!cmds.is_empty(), "a singles group with no commands");
         for cmd in cmds {
+            assert!(!cmd.contains("{c}"), "single with a template marker: {cmd}");
             let got = decide(&l, cmd);
             if got != want {
                 wrong.push(format!("`{cmd}`: {got:?}, want {want:?}"));
             }
+        }
+    }
+    // P2 divergence (pinned as current decision; see issue linked in the PR body)
+    let divergences: &[&str] = &["rg -f=.env x", "rg -f=id_rsa x", "rg -f=.git-credentials x"];
+    for cmd in divergences {
+        let got = decide(&l, cmd);
+        if got != Decision::Allow {
+            wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
         }
     }
     assert!(
