@@ -91,7 +91,14 @@ recorded, not hidden.
   Ask; `grep -e .ssh docs/` is Allow. Reads and `git` operations on `.env.*`
   siblings such as `.env.example` are Ask. `git show <rev>:<path>` (for
   example `git show HEAD:.env`) is Allow, because `rev:path` is not a path
-  word, so no target sees it.
+  word, so no target sees it. A word that starts with `:` (`git show :.env`,
+  `:(icase).ENV`, `:(literal).env`, #1321) is Ask on every git row.
+- **Git blob reads and glob pathspecs (#1321).** `git show HEAD:.env`,
+  `git diff --cached HEAD:.env` and the other `<rev>:<path>` words are Allow:
+  the credential rule matches path components and `HEAD:.env` is one
+  component. A quoted glob pathspec is Allow too (`git log -p -- '.en*'`,
+  `'*.pem'`, `git add '.en*'`): git matches wildcards itself, and no target
+  can tell what a glob will match.
 - **Writes to `.env`.** Since #1113 the credential rule of `cp` covers every
   operand, so `cp x .env` and `cp .env.example .env` are Ask (they were
   Allow under #1090). Writes to relative credential-shaped directories

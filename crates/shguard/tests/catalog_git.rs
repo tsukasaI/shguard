@@ -3956,8 +3956,77 @@ fn p2_audit_git_rows_issue_1253() {
             }
         }
     }
+    // #1321: a `:`-leading word (index blob, magic pathspec, `:/` message
+    // search, exclude pathspec) is asked; a `:` inside a word or an inert
+    // option value is not.
+    let issue_1321_ask: &[&str] = &[
+        "git show :.env",
+        "git show ':.env'",
+        "git show :./.env",
+        "git show :0:.env",
+        "git show :1:.env",
+        "git show :2:.env",
+        "git show :3:.env",
+        "git show :0:path",
+        "git show :/msg",
+        "git show ':/fix'",
+        "git log :/fix",
+        "git log -p -- ':(icase).ENV'",
+        "git log -p -- ':(literal).env'",
+        "git log -p -- ':(glob).en?'",
+        "git log -p -- ':(top).env'",
+        "git log -p -- ':(exclude).env'",
+        "git log -p -- ':(top,icase).env'",
+        "git log -p -- ':(top, icase).env'",
+        "git log -p -- :.env",
+        "git log -p :.env",
+        "git log -- :!x",
+        "git log -- ':^x'",
+        "git diff -- :.env",
+        "git diff :.env",
+        "git diff :a :b",
+        "git diff --cached -- ':(icase).ENV'",
+        "git add :.env",
+        "git add -- :.env",
+        "git add ':/'",
+        "git add ':(glob)*.pem'",
+        "git blame -- :.env",
+        "git grep x -- :.env",
+        "git grep x -- ':(icase).ENV'",
+        "git ls-files -- :.env",
+        "git ls-files -- ':(top).env'",
+        "git fetch origin :x",
+        "git push origin :branch",
+    ];
+    for cmd in issue_1321_ask {
+        let got = common::decide(&l, cmd);
+        if got != Decision::Ask {
+            wrong.push(format!("`{cmd}`: {got:?}, want Ask"));
+        }
+    }
+    let issue_1321_allow: &[&str] = &[
+        "git show HEAD:README.md",
+        "git log --format=%H:%s",
+        "git log --pretty=format:%h",
+        "git log -S:x",
+        "git log --author=:x",
+        "git log --grep=:x",
+        "git log --since=12:00",
+        "git log --since 12:00",
+        "git log --format 'a:b'",
+        "git show 'HEAD^{tree}:src'",
+        "git show @:README.md",
+        "git show v1.0:README.md",
+    ];
+    for cmd in issue_1321_allow {
+        let got = common::decide(&l, cmd);
+        if got != Decision::Allow {
+            wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
+        }
+    }
     // P2 divergences, pinned as the current decision (Allow). The fix for each
-    // linked issue must flip its group to Ask and move it into `singles`.
+    // linked issue must flip its group to Ask and move it into `singles`,
+    // except the #1321 group, which stays Allow as a recorded known limit.
     let divergences: &[&str] = &[
         // #1317: push/fetch remote schemes (#1098 accepted scp and helper remotes as a known limit)
         "git push host:path main",
@@ -4013,14 +4082,15 @@ fn p2_audit_git_rows_issue_1253() {
         "git diff -S --no-index a b",
         "git diff -G --no-index a b",
         "git diff --src-prefix --no-index a b",
-        // #1321: credential blob paths and glob pathspecs
-        "git log -p -- ':(icase).ENV'",
-        "git log -p -- ':(literal).env'",
+        // #1321: recorded known limits (docs/threat-model.md), permanent Allow
+        // tripwires: `<rev>:<path>` blob reads and quoted glob pathspecs
         "git log -p -- '.[e]nv'",
         "git show HEAD:.aws/credentials",
         "git show HEAD:.env",
-        "git show :.env",
         "git show HEAD:.npmrc",
+        "git show 'HEAD:.env'",
+        "git show 'HEAD^{tree}:.env'",
+        "git show @:.env",
         "git diff --cached HEAD:.env",
         "git log -p -- '.en*'",
         "git log -p -- '*.pem'",
