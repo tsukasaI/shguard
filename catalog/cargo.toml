@@ -217,6 +217,12 @@ opt = [
 ]
 
 # The words after `--` go to rustfmt, e.g. `--check`.
+# `--config` and `--backup` stay Allowed (#1312): plain `cargo fmt` already
+# rewrites files in place, so `--config emit_mode=files` (even after
+# `--check`) and `--backup` / `--config make_backup=true` (which write
+# `<name>.tmp` and `<name>.bk` next to the sources) add nothing to it. The
+# rule below still asks `--emit`, `--print-config`, `--config-path` and
+# absolute, `~` and `^` paths; `..` paths are asked as `path` words.
 [[row]]
 key = ["cargo", "fmt"]
 source = "https://doc.rust-lang.org/cargo/commands/cargo-fmt.html https://github.com/rust-lang/rustfmt#running-rustfmt"
