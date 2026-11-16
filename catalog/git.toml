@@ -1476,3 +1476,19 @@ key = ["git"]
 targets = [{ pat = "/", kind = "prefix" }, { pat = "~", kind = "prefix" }]
 outcome = "ask"
 reason = "git is asked for absolute and `~` paths; use a path relative to the repository"
+
+# A word that starts with `:` is an index blob (`git show :.env`, `:0:.env`)
+# or a magic pathspec (`:(icase).ENV`, `:(literal).env`, `:(top).env`, `:!x`)
+# that the credential rule cannot read as a path. Key `["git"]`, like the two
+# rules above, so it applies wherever a git row reads a path-role word
+# (operands, `--` pathspecs, the ls-files `-X` value); not inert option values
+# or the `git stash show|pop|apply` operand. It also asks `:/msg`,
+# `git fetch origin :x` and exclude pathspecs. Not covered: a `<rev>:<path>`
+# word with the credential name right after the colon (`HEAD:.env`) and a
+# quoted glob pathspec (`.en*`).
+[[rule]]
+id = "git-colon-word"
+key = ["git"]
+targets = [{ pat = ":", kind = "prefix" }]
+outcome = "ask"
+reason = "a word that starts with `:` is an index blob, a `:/` search, a refspec or a magic pathspec, which the path rules cannot read"
