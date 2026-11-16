@@ -3962,7 +3962,7 @@ fn p2_audit_git_rows_issue_1253() {
     let issue_1321_ask: &[&str] = &[
         "git show :.env",
         "git show ':.env'",
-        "git show :./.env",
+        "git show :./x",
         "git show :0:.env",
         "git show :1:.env",
         "git show :2:.env",
@@ -3991,8 +3991,17 @@ fn p2_audit_git_rows_issue_1253() {
         "git add ':/'",
         "git add ':(glob)*.pem'",
         "git blame -- :.env",
-        "git grep x -- :.env",
-        "git grep x -- ':(icase).ENV'",
+        "git status -- :.env",
+        "git status -- ':(icase).ENV'",
+        "git ls-files -X :x",
+        "git ls-files --exclude-from=:x",
+        "git ls-files -X:x",
+        "git commit -m x -- ':(icase).ENV'",
+        "git rev-parse :.env",
+        "git switch :x",
+        "git remote prune :x",
+        "git show \":.env\"",
+        "git show \\:.env",
         "git ls-files -- :.env",
         "git ls-files -- ':(top).env'",
         "git fetch origin :x",
@@ -4005,6 +4014,7 @@ fn p2_audit_git_rows_issue_1253() {
         }
     }
     let issue_1321_allow: &[&str] = &[
+        "git stash show :x",
         "git show HEAD:README.md",
         "git log --format=%H:%s",
         "git log --pretty=format:%h",
