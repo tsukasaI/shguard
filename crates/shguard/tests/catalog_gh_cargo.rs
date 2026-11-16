@@ -718,6 +718,7 @@ fn p2_audit_cargo_rows_issue_1250() {
         "cargo doc --output-format json",
         "cargo doc --crate x",
         "cargo doc -- -Zx",
+        "cargo doc -- --x",
         "cargo doc --manifest-path ../x",
         // cargo test: the test binary's flags after `--`, and the same flags before it
         "cargo test -- --logfile x",
