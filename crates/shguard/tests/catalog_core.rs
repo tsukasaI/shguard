@@ -10339,7 +10339,18 @@ fn p2_audit_core_rows_issue_1252() {
         }
     }
     // P2 divergence (pinned as current decision; see issue linked in the PR body)
-    let divergences: &[&str] = &["rg -f=.env x", "rg -f=id_rsa x", "rg -f=.git-credentials x"];
+    let divergences: &[&str] = &[
+        "rg -f=.env x",
+        "rg -f=id_rsa x",
+        "rg -f=.git-credentials x",
+        // #1320: recursive readers after a cd to a broad root (pinned as current decision; the fix must flip it)
+        "cd /Users/me/.ssh && rg -e .",
+        "cd && rg --hidden -e x",
+        "cd /Users/me && grep -r -e x",
+        "cd / && ls -R",
+        "cd / && tree",
+        "cd / && eza -R",
+    ];
     for cmd in divergences {
         let got = decide(&l, cmd);
         if got != Decision::Allow {
