@@ -10339,20 +10339,112 @@ fn p2_audit_core_rows_issue_1252() {
         }
     }
     // P2 divergence (pinned as current decision; see issue linked in the PR body)
-    let divergences: &[&str] = &[
-        "rg -f=.env x",
-        "rg -f=id_rsa x",
-        "rg -f=.git-credentials x",
-        // #1320: recursive readers after a cd to a broad root
+    let divergences: &[&str] = &["rg -f=.env x", "rg -f=id_rsa x", "rg -f=.git-credentials x"];
+    for cmd in divergences {
+        let got = decide(&l, cmd);
+        if got != Decision::Allow {
+            wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
+        }
+    }
+    // #1320: ls, grep, rg, tokei, eza and tree are `cwd_sensitive`, so a cd
+    // before them is asked whatever their words; without a cd they stay Allow.
+    let issue_1320_ask: &[&str] = &[
         "cd /Users/me/.ssh && rg -e .",
         "cd && rg --hidden -e x",
         "cd /Users/me && grep -r -e x",
         "cd / && ls -R",
         "cd / && tree",
         "cd / && eza -R",
+        "cd / && tokei",
         "cd && rg --hidden -e 'PRIVATE KEY' -A 50",
+        "cd src && rg x",
+        "cd src && ls",
+        "cd src && ls src",
+        "cd src && grep -r -e x",
+        "cd src && tree",
+        "cd src && eza",
+        "cd src && tokei",
+        "cd .. && ls",
+        "cd .. && tokei",
+        "pushd / && tree",
+        "pushd / ; ls -R",
+        "popd && ls -R",
+        "builtin cd / && ls -R",
+        "command cd / && ls -R",
+        "cd -P / && tree",
+        "cd -L / && tree",
+        "cd -- / && tree",
+        "cd -- / && tokei",
+        "cd / ; ls -R",
+        "cd / || ls -R",
+        "cd / ; tokei",
+        "cd / || tokei",
+        "cd / && ls",
+        "cd / && eza",
+        "ls -R ; cd / ; ls",
+        "cd / | ls -R",
+        "tree | cd / ; tokei",
+        "cd / && echo x | tree",
+        "cd / && ls -R | wc -l",
+        "cd / && tokei -e x",
+        "cd / && tokei -- .",
+        "cd / && ls -R -- .",
+        "cd / && ls -- -R",
+        "cd / && rg -e x -- .",
+        "cd / && rg -- x",
+        "cd / && rg --files",
+        "cd / && grep -r -- x",
+        "cd / && tree -a -- .",
+        "cd / && ls -d",
+        "cd '' && ls",
+        "cd - && tree",
+        "cd ~ && tree",
+        "cd src && cd - && rg -e x",
+        "cd && cd - && tree",
+        "true && cd / && ls -R",
+        "cd / && true && ls -R",
+        "cd / && pwd && tree",
+        "cd . && ls -R",
+        "cd x/.. && tree",
+        "cd / && eza --tree",
+        "cd / && rg -uuu -e x",
+        "cd / && grep -R -e x",
+        "cd src && rg -e x",
+        "cd src && ls -R",
+        "cd .. && rg -e x",
+        "cd .. && eza -R",
+        "cd / && grep -r -e x",
+        "cd / ; tree",
+        "cd / && /bin/ls -R",
+        "cd / && LS -R",
+        "cd / && ./tree",
+        "pwd && cd / && ls -R",
+        "cd / && echo x && ls -R",
+        "cd / && rg --no-ignore --hidden -e x",
+        "cd / && grep -rn -e x",
+        "cd /\nls -R",
+        "cd / 2>/dev/null && ls -R",
+        "'cd' / && ls -R",
     ];
-    for cmd in divergences {
+    for cmd in issue_1320_ask {
+        let got = decide(&l, cmd);
+        if got != Decision::Ask {
+            wrong.push(format!("`{cmd}`: {got:?}, want Ask"));
+        }
+    }
+    let issue_1320_allow: &[&str] = &[
+        "rg -e .",
+        "rg --hidden -e x",
+        "grep -r -e x src",
+        "ls -R",
+        "tree",
+        "eza -R",
+        "tokei",
+        "rg --hidden -e 'PRIVATE KEY' -A 50",
+        "ls -R && cd /",
+        "tokei -e x src",
+    ];
+    for cmd in issue_1320_allow {
         let got = decide(&l, cmd);
         if got != Decision::Allow {
             wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
