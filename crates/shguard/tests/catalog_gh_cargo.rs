@@ -932,6 +932,26 @@ fn p2_audit_cargo_rows_issue_1250() {
         }
     }
     assert!(wrong.is_empty(), "not Ask:\n{}", wrong.join("\n"));
+
+    // #1312: rustfmt inline config after `fmt --` (pinned as current decision; the fix must flip it)
+    let divergences: &[&str] = &[
+        "cargo fmt -- --config emit_mode=files",
+        "cargo fmt --check -- --config emit_mode=files",
+        "cargo fmt -- --config make_backup=true",
+        "cargo fmt -- --backup",
+    ];
+    let mut moved: Vec<String> = Vec::new();
+    for cmd in divergences {
+        let got = decide(&l, cmd);
+        if got != Decision::Allow {
+            moved.push(format!("`{cmd}`: {got:?}, want Allow"));
+        }
+    }
+    assert!(
+        moved.is_empty(),
+        "unexpected decisions:\n{}",
+        moved.join("\n")
+    );
 }
 
 /// #1251: the P2 audit of `catalog/gh.toml`. Every spelling tried whose
