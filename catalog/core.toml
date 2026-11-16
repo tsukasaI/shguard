@@ -407,7 +407,8 @@ value = { takes = "path" }
 # --search-zip --hostname-bin (they run a program), -r/--replace, -L/--follow,
 # -u and every config or colour-spec option that is not listed.
 # `cwd_sensitive` (#1320): rg with no operand searches the working directory
-# recursively, so `cd /Users/me && rg --hidden -e x` would read the home directory.
+# recursively, so `cd /Users/me && rg --hidden -e x` would read the home
+# directory.
 [[row]]
 key = ["rg"]
 source = "https://github.com/BurntSushi/ripgrep/blob/master/GUIDE.md https://github.com/BurntSushi/ripgrep/blob/master/crates/core/flags/defs.rs"

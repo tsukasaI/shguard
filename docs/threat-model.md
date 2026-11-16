@@ -72,8 +72,10 @@ recorded, not hidden.
   repository the agent works in, that is P3.
 - **After a `cd`.** `cd` into another directory would make git, gh and
   cargo read *that* directory's config and code. Every git, gh and cargo row
-  is `cwd_sensitive`, so `cd /tmp/x && git status` is Ask. Only `cd` is
-  tracked; `pushd`, `popd` and `env -C` have no row and are Ask.
+  is `cwd_sensitive`, so `cd /tmp/x && git status` is Ask. So are the `fd`,
+  `ls`, `grep`, `rg`, `tokei`, `eza` and `tree` rows, because with no path
+  word they read or list the new directory (`cd /Users/me && rg -e x`).
+  Only `cd` is tracked; `pushd`, `popd` and `env -C` have no row and are Ask.
 - **Credential files.** `cat`, `head`, `tail`, `grep`, `rg`, `wc`, `sort`,
   `cp`, `uniq` and every `git` row are Ask on a path with a credential
   segment anywhere in it (`.ssh`, `.aws`, `.config/gh`, `.netrc`, `.env`,

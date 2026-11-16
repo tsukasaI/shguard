@@ -97,8 +97,10 @@ one, in the same command line:
   from the directory they run in (`.git/config`, the git remotes,
   `.cargo/config.toml`, `build.rs`): `cd /tmp/x && git status` is Ask,
   `git status` alone is Allow. The `fd`, `ls`, `grep`, `rg`, `tokei`, `eza`
-  and `tree` rows are marked too, because with no path operand they read the
-  working directory, recursively with `-R`/`-r`/`-T` (`cd /Users/me && fd -H`).
+  and `tree` rows are marked too, because with no path operand they read or
+  list the working directory (`fd`, `rg`, `tokei` and `tree` always
+  recursively; `ls -R`, `grep -r` and `eza -R`/`-T` on request)
+  (`cd /Users/me && fd -H`).
 
 A `cd` later in the line does not reach back: `git status; cd /tmp/x` is
 Allow.

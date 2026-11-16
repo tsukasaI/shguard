@@ -10409,6 +10409,22 @@ fn p2_audit_core_rows_issue_1252() {
         "cd / && eza --tree",
         "cd / && rg -uuu -e x",
         "cd / && grep -R -e x",
+        "cd src && rg -e x",
+        "cd src && ls -R",
+        "cd .. && rg -e x",
+        "cd .. && eza -R",
+        "cd / && grep -r -e x",
+        "cd / ; tree",
+        "cd / && /bin/ls -R",
+        "cd / && LS -R",
+        "cd / && ./tree",
+        "pwd && cd / && ls -R",
+        "cd / && echo x && ls -R",
+        "cd / && rg --no-ignore --hidden -e x",
+        "cd / && grep -rn -e x",
+        "cd /\nls -R",
+        "cd / 2>/dev/null && ls -R",
+        "'cd' / && ls -R",
     ];
     for cmd in issue_1320_ask {
         let got = decide(&l, cmd);
