@@ -1466,7 +1466,7 @@ targets = [
 id = "rg-ask-attached-equals"
 key = ["rg"]
 outcome = "ask"
-reason = "ripgrep drops one leading `=` from an attached short option value, so `-f=.env` reads `.env`, which the credential check cannot see; write `-f path` or `--file=path`"
+reason = "ripgrep drops one leading `=` from an attached short option value, so `-f=.env` reads `.env`, which the credential check cannot see; write `-f path` or `--file=path`; a pattern given without -e is compared as a path too, so pass a pattern that starts with `=` with -e"
 targets = [
   { pat = "=", kind = "prefix" },
 ]
