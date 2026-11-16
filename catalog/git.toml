@@ -1474,12 +1474,19 @@ targets = [
 
 # An absolute or `~` path (a local remote, a file outside the repository,
 # an `-X` exclude file) is asked: `git diff ~/.ssh/k /dev/null` outside a
-# repository prints the file. A relative local remote (`git push sub/repo
-# main`, `git push . main:x`) is not: a target cannot tell it from a refspec.
+# repository prints the file. The `literal_tilde` target is the quoted `~`
+# word (`git push '~/x'`), which the shell leaves alone and git expands as a
+# repository path; it also asks a quoted `~` pathspec that git does not
+# expand. A relative local remote (`git push sub/repo main`,
+# `git push . main:x`) is not: a target cannot tell it from a refspec.
 [[rule]]
 id = "git-absolute-path"
 key = ["git"]
-targets = [{ pat = "/", kind = "prefix" }, { pat = "~", kind = "prefix" }]
+targets = [
+  { pat = "/", kind = "prefix" },
+  { pat = "~", kind = "prefix" },
+  { pat = "~", kind = "prefix", literal_tilde = true },
+]
 outcome = "ask"
 reason = "git is asked for absolute and `~` paths; use a path relative to the repository"
 

@@ -144,6 +144,10 @@ pub(super) enum PatKindDto {
 pub(super) struct TargetDto {
     pub(super) pat: String,
     pub(super) kind: PatKindDto,
+    /// The pattern starts with a `~` the shell left alone (a quoted word), not
+    /// the home directory the shell expands.
+    #[serde(default)]
+    pub(super) literal_tilde: bool,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1094,7 +1094,10 @@ fn check_cwd_child(child: &Entry, entries: &[Entry], errs: &mut Vec<LoadError>) 
     }
 }
 
-fn target_parts(s: &str) -> Vec<Part> {
+fn target_parts(s: &str, literal_tilde: bool) -> Vec<Part> {
+    if literal_tilde {
+        return vec![Part::Lit(s.as_bytes().to_vec())];
+    }
     if let Some(rest) = s.strip_prefix('~') {
         let mut parts = vec![Part::Opaque(Opaque::Tilde)];
         if !rest.is_empty() {
@@ -1116,11 +1119,21 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
         });
         return None;
     }
-    // The lexer accepts `~` only before `/` or at the end of a word, so a
-    // `~user` target could never match.
-    if t.pat
-        .strip_prefix('~')
-        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
+    if t.literal_tilde && !t.pat.starts_with('~') {
+        errs.push(LoadError::LiteralTildeWithoutTilde {
+            file: file.to_owned(),
+            rule: rule.to_owned(),
+            pat: t.pat.clone(),
+        });
+        return None;
+    }
+    // The lexer accepts an unquoted `~` only before `/` or at the end of a
+    // word, so a `~user` target could never match; a literal one matches the
+    // quoted spelling and has no such limit.
+    if !t.literal_tilde
+        && t.pat
+            .strip_prefix('~')
+            .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'))
     {
         errs.push(LoadError::TildeUserTarget {
             file: file.to_owned(),
@@ -1165,8 +1178,8 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
         return None;
     }
     let (head, body) = match t.pat.strip_prefix('~') {
-        Some(rest) => ("~", rest),
-        None => ("", t.pat.as_str()),
+        Some(rest) if !t.literal_tilde => ("~", rest),
+        Some(_) | None => ("", t.pat.as_str()),
     };
     let normal = normalize_path(body.as_bytes());
     let full = format!("{head}{}", String::from_utf8_lossy(&normal));
@@ -1210,7 +1223,7 @@ fn build_target(file: &str, rule: &str, t: &TargetDto, errs: &mut Vec<LoadError>
         });
         return None;
     }
-    let pat = Pat::new(target_parts(&t.pat), kind);
+    let pat = Pat::new(target_parts(&t.pat, t.literal_tilde), kind);
     if pat.is_none() {
         errs.push(LoadError::EmptyTarget {
             file: file.to_owned(),
