@@ -934,7 +934,8 @@ fn p2_audit_cargo_rows_issue_1250() {
     }
     assert!(wrong.is_empty(), "not Ask:\n{}", wrong.join("\n"));
 
-    // #1312: rustfmt inline config after `fmt --` (pinned as current decision; the fix must flip it)
+    // #1312: rustfmt inline config after `fmt --` stays Allow by decision;
+    // these are permanent Allow pins, not a tripwire to flip.
     let divergences: &[&str] = &[
         "cargo fmt -- --config emit_mode=files",
         "cargo fmt --check -- --config emit_mode=files",
