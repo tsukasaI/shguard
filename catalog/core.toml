@@ -1459,6 +1459,18 @@ targets = [
   { pat = ".env_", kind = "component_prefix" },
 ]
 
+# ripgrep reads options with lexopt, which strips one `=` from an attached short
+# value, so `rg -f=.env x` reads `.env` while the credential targets above see
+# `=.env` (#1315). Not on the grep row: `grep -f=x` names the file `=x`.
+[[rule]]
+id = "rg-ask-attached-equals"
+key = ["rg"]
+outcome = "ask"
+reason = "ripgrep drops one leading `=` from an attached short option value, so `-f=.env` reads `.env`, which the credential check cannot see; write `-f path` or `--file=path`"
+targets = [
+  { pat = "=", kind = "prefix" },
+]
+
 [[rule]]
 id = "wc-ask-credential-dirs"
 key = ["wc"]

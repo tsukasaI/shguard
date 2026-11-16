@@ -10338,14 +10338,6 @@ fn p2_audit_core_rows_issue_1252() {
             }
         }
     }
-    // P2 divergence (pinned as current decision; see issue linked in the PR body)
-    let divergences: &[&str] = &["rg -f=.env x", "rg -f=id_rsa x", "rg -f=.git-credentials x"];
-    for cmd in divergences {
-        let got = decide(&l, cmd);
-        if got != Decision::Allow {
-            wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
-        }
-    }
     // #1320: ls, grep, rg, tokei, eza and tree are `cwd_sensitive`, so a cd
     // before them is asked whatever their words; without a cd they stay Allow.
     let issue_1320_ask: &[&str] = &[
@@ -10445,6 +10437,59 @@ fn p2_audit_core_rows_issue_1252() {
         "tokei -e x src",
     ];
     for cmd in issue_1320_allow {
+        let got = decide(&l, cmd);
+        if got != Decision::Allow {
+            wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
+        }
+    }
+    // #1315: lexopt drops one `=` from an attached short value, so `rg -f=.env x`
+    // reads `.env`; an `=`-leading word is asked on the rg row only.
+    let issue_1315_ask: &[&str] = &[
+        "rg -f=.env x",
+        "rg -f=id_rsa x",
+        "rg -f=.git-credentials x",
+        "rg -f=x y",
+        "rg -f==x y",
+        "rg -f= y",
+        "rg -f '=x' y",
+        "rg --file==x y",
+        "rg --ignore-file==x y",
+        "rg -if=.env x",
+        "rg -f=src/.env x",
+        "rg -f=./.env x",
+        "rg x =file",
+        "rg -e x =.env",
+        "rg =foo src",
+    ];
+    for cmd in issue_1315_ask {
+        let got = decide(&l, cmd);
+        if got != Decision::Ask {
+            wrong.push(format!("`{cmd}`: {got:?}, want Ask"));
+        }
+    }
+    let issue_1315_allow: &[&str] = &[
+        "rg -f src/x x",
+        "rg --file=src/x x",
+        "grep -f=x y",
+        "rg -e x",
+        "rg -e x=y src",
+        "rg x src",
+        "rg -g '*=x' src",
+        "rg -e=x",
+        "rg -e =x",
+        "rg -g=x",
+        "rg -ef=x",
+        "rg -- -f=.env",
+        "rg -A=1 x",
+        "rg -B=1 x",
+        "rg -C=1 x",
+        "rg -t=rust x",
+        "rg -T=rust x",
+        "rg -m=1 x",
+        "rg -d=1 x",
+        "rg -j=1 x",
+    ];
+    for cmd in issue_1315_allow {
         let got = decide(&l, cmd);
         if got != Decision::Allow {
             wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
