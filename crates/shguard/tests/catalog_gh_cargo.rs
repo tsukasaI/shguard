@@ -597,9 +597,6 @@ fn p2_audit_cargo_rows_issue_1250() {
     }
 
     let singles: &[&str] = &[
-        "cargo build --manifest-path /x",
-        "cargo clippy --manifest-path /x/Cargo.toml",
-        "cargo doc --manifest-path /x",
         // case variants of the head and the subcommand, and spellings of the head
         "Cargo build",
         "cargo Build",
@@ -787,6 +784,12 @@ fn p2_audit_cargo_rows_issue_1250() {
         "cargo test --manifest-path ~/x",
         "cargo test --manifest-path ^x",
         "cargo test --manifest-path ../x",
+        "cargo build --manifest-path /x",
+        "cargo clippy --manifest-path /x/Cargo.toml",
+        "cargo clippy --manifest-path ~/x",
+        "cargo clippy --manifest-path ^x",
+        "cargo clippy --manifest-path ../x",
+        "cargo doc --manifest-path /x",
         // cargo clippy: a literal `--fix` and every way to put one in reach of cargo-clippy
         "cargo clippy --fix=x",
         "cargo clippy --fi",
@@ -879,6 +882,7 @@ fn p2_audit_cargo_rows_issue_1250() {
         "cargo clippy -- --TARGET x",
         "cargo clippy -- --Fix",
         "cargo clippy -- /x",
+        "cargo clippy -- ~/x",
         "cargo clippy -- ^x",
         "cargo clippy -- ../x",
         // cargo fmt: its own options, rustfmt's flags after `--`, and operands

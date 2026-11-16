@@ -3835,6 +3835,9 @@ fn p2_audit_git_rows_issue_1253() {
                 "git push origin +:x",
                 "git push origin -- +main",
                 "git push origin main --force",
+                "git push -f origin main",
+                "git push -uf origin main",
+                "git push origin +main",
             ],
             Decision::Block,
         ),
@@ -3847,14 +3850,6 @@ fn p2_audit_git_rows_issue_1253() {
                 "git push --exec=evil origin main",
             ],
             Decision::Ask,
-        ),
-        (
-            &[
-                "git push -f origin main",
-                "git push -uf origin main",
-                "git push origin +main",
-            ],
-            Decision::Block,
         ),
         (
             &[
@@ -3902,6 +3897,13 @@ fn p2_audit_git_rows_issue_1253() {
                 "git stash -a",
                 "git stash push",
                 "git stash pop 1 2",
+                "git push --force-with-lease=x origin main",
+                "git push -ox origin main",
+                "git push --push-option=x origin main",
+                "git push --signed=if-asked origin main",
+                "git push --no-verify origin main",
+                "git push --verify origin main",
+                "git remote set-url origin u",
             ],
             Decision::Ask,
         ),
