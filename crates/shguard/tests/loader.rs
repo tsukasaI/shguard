@@ -1063,6 +1063,92 @@ fn targets_must_be_in_normal_form() {
 }
 
 #[test]
+fn literal_tilde_target_asks_the_quoted_word_only() {
+    let rm = row("\"rm\"", "rest = \"path\"");
+    let with = |extra: &str, kind: &str| {
+        format!(
+            "{rm}{}",
+            rule(&format!(
+                "targets = [{{ pat = \"~\", kind = \"{kind}\"{extra} }}]"
+            ))
+        )
+    };
+    let plain = loaded(&with("", "prefix"));
+    let literal = loaded(&with(", literal_tilde = true", "prefix"));
+    // Without the field `~` is the shell-expanded home; with it, the byte.
+    assert_eq!(decide(&plain, "rm '~/x'"), Decision::Allow);
+    assert_eq!(decide(&literal, "rm '~/x'"), Decision::Block);
+    assert_eq!(decide(&literal, "rm '~user/x'"), Decision::Block);
+    assert_eq!(decide(&literal, "rm '~'"), Decision::Block);
+    // The unquoted home word is not the literal target's business.
+    assert_ne!(decide(&plain, "rm ~/x"), Decision::Allow);
+    assert_ne!(decide(&literal, "rm ~/x"), Decision::Block);
+    for cmd in ["rm x~", "rm 'a/~/b'", "rm x"] {
+        assert_eq!(decide(&literal, cmd), Decision::Allow, "{cmd}");
+    }
+    // `~user` is loadable only as a literal; the plain form stays rejected.
+    let user = with(", literal_tilde = true", "prefix").replace("pat = \"~\"", "pat = \"~user\"");
+    assert_eq!(decide(&loaded(&user), "rm '~user/x'"), Decision::Block);
+    let plain_user = with("", "prefix").replace("pat = \"~\"", "pat = \"~user\"");
+    assert!(
+        errors(&plain_user)
+            .iter()
+            .any(|e| matches!(e, LoadError::TildeUserTarget { .. }))
+    );
+}
+
+#[test]
+fn literal_tilde_target_rejects_bad_input() {
+    let rm = row("\"rm\"", "rest = \"path\"");
+    let target = |pat: &str, kind: &str| {
+        format!(
+            "{rm}{}",
+            rule(&format!(
+                "targets = [{{ pat = \"{pat}\", kind = \"{kind}\", literal_tilde = true }}]"
+            ))
+        )
+    };
+    for pat in ["/etc", "x", "a/~"] {
+        let errs = errors(&target(pat, "prefix"));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, LoadError::LiteralTildeWithoutTilde { .. })),
+            "{pat}: {errs:?}"
+        );
+    }
+    let errs = errors(&target("~/.ssh", "component"));
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::AnchoredComponentTarget { .. })),
+        "{errs:?}"
+    );
+    let errs = errors(&target("~/./x", "exact"));
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::TargetNotNormal { .. })),
+        "{errs:?}"
+    );
+    let errs = errors(&target("~/", "prefix"));
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::PrefixEndsInSlash { .. })),
+        "{errs:?}"
+    );
+    let errs = errors(&target("~$HOME", "prefix"));
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, LoadError::TargetHasDollar { .. })),
+        "{errs:?}"
+    );
+    // A non-boolean value is a TOML error like any other field's.
+    let t = format!(
+        "{rm}{}",
+        rule("targets = [{ pat = \"~\", kind = \"prefix\", literal_tilde = \"yes\" }]")
+    );
+    assert!(load_one(&t).is_err());
+}
+
+#[test]
 fn component_target_decisions() {
     let rm = row("\"rm\"", "rest = \"path\"");
     let l = loaded(&format!(

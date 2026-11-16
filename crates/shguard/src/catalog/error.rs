@@ -383,6 +383,18 @@ pub enum LoadError {
         /// The rejected target pattern, as written in the file.
         pat: String,
     },
+    /// A target sets `literal_tilde` but its pattern does not start with `~`.
+    #[error(
+        "{file:?}: rule {rule:?}: target {pat:?}: `literal_tilde` needs a pattern that starts with `~`"
+    )]
+    LiteralTildeWithoutTilde {
+        /// Name of the file, as passed to the loader.
+        file: String,
+        /// `id` of the rule.
+        rule: String,
+        /// The rejected target pattern, as written in the file.
+        pat: String,
+    },
     /// A `component` or `component_prefix` target starts with `~` or `/`.
     #[error(
         "{file:?}: rule {rule:?}: component target {pat:?} starts with `~` or `/`; name the segments only (`.ssh`), or use `prefix`/`under`"

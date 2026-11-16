@@ -4119,6 +4119,54 @@ fn p2_audit_git_rows_issue_1253() {
             wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
         }
     }
+    // #1318: a quoted word that starts with `~` is asked: the shell leaves it
+    // alone, but git expands a leading `~` or `~user` in a repository path.
+    // A `~` that is not the first byte stays Allow.
+    let issue_1318_ask: &[&str] = &[
+        "git push '~/x'",
+        "git push '~user/x' main",
+        "git push '~' main",
+        "git fetch '~/x'",
+        "git fetch '~x'",
+        "git fetch '~user/x'",
+        "git fetch '~/x' main",
+        "git fetch --multiple '~/x'",
+        "git remote prune '~/x'",
+        "git remote prune '~user/x'",
+        "git push '~user'",
+        "git push \"~/x\" main",
+        "git push \\~/x main",
+        "git push ~/x main",
+        "git push -- '~/x'",
+        "git push --repo='~/x'",
+        "git push --repo '~/x'",
+        "git push origin '~x'",
+        "git fetch -- '~/x'",
+        "git log -- '~/x'",
+        "git add '~x'",
+    ];
+    for cmd in issue_1318_ask {
+        let got = common::decide(&l, cmd);
+        if got != Decision::Ask {
+            wrong.push(format!("`{cmd}`: {got:?}, want Ask"));
+        }
+    }
+    let issue_1318_allow: &[&str] = &[
+        "git push origin main",
+        "git push x~ main",
+        "git push 'a/~/b' main",
+        "git push 'x~/y' main",
+        "git fetch x~",
+        "git commit -m '~x'",
+        "git log --grep '~x'",
+        "git commit -m '~/x'",
+    ];
+    for cmd in issue_1318_allow {
+        let got = common::decide(&l, cmd);
+        if got != Decision::Allow {
+            wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
+        }
+    }
     // P2 divergences, pinned as the current decision (Allow). The fix for each
     // linked issue must flip its group to Ask and move it into its own Ask
     // block, except the #1098, #1100 and #1321 groups, which stay Allow as
@@ -4159,17 +4207,6 @@ fn p2_audit_git_rows_issue_1253() {
         "git fetch -n ./x",
         "git remote prune ./x",
         "git remote prune x/y",
-        // #1318: quoted ~ remote
-        "git push '~/x'",
-        "git push '~user/x' main",
-        "git push '~' main",
-        "git fetch '~/x'",
-        "git fetch '~x'",
-        "git fetch '~user/x'",
-        "git fetch '~/x' main",
-        "git fetch --multiple '~/x'",
-        "git remote prune '~/x'",
-        "git remote prune '~user/x'",
         // #1319: --no-index as an option value
         "git diff -S --no-index a b",
         "git diff -G --no-index a b",
