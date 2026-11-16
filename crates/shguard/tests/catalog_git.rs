@@ -4005,7 +4005,11 @@ fn p2_audit_git_rows_issue_1253() {
         "git diff -S --no-index a b",
         "git diff -G --no-index a b",
         "git diff --src-prefix --no-index a b",
-        // #1321: credential files named by blob path or glob pathspec (pinned as current decision; the fix must flip it)
+        // #1321: credential blob paths and glob pathspecs
+        "git log -p -- ':(icase).ENV'",
+        "git log -p -- ':(literal).env'",
+        "git log -p -- '.[e]nv'",
+        "git show HEAD:.aws/credentials",
         "git show HEAD:.env",
         "git show :.env",
         "git show HEAD:.npmrc",
@@ -4015,8 +4019,9 @@ fn p2_audit_git_rows_issue_1253() {
         "git diff -- '.en*'",
         "git add '.en*'",
         "git add '*.pem'",
-        // #1322: stash list with a detached --format (pinned as current decision; the fix must flip it)
+        // #1322: stash list with a detached --format
         "git stash list --format --output=x",
+        "git stash list --format --output=/tmp/x",
         "git stash list --format --output=Cargo.toml",
     ];
     for cmd in divergences {
