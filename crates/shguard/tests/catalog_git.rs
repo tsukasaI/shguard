@@ -4090,6 +4090,7 @@ fn p2_audit_git_rows_issue_1253() {
         "git push -u ftp://x main",
         "git push --dry-run ftp://x",
         "git push origin ftp://x",
+        "git push origin ftp:main",
         "git push -- ftp://x",
         "git push ftps://x main",
         "git fetch ftp://h/r",
@@ -4119,11 +4120,11 @@ fn p2_audit_git_rows_issue_1253() {
         }
     }
     // P2 divergences, pinned as the current decision (Allow). The fix for each
-    // linked issue must flip its group to Ask and move it into `singles`,
-    // except the #1321 group, which stays Allow as a recorded known limit.
+    // linked issue must flip its group to Ask and move it into its own Ask
+    // block, except the #1098, #1100 and #1321 groups, which stay Allow as
+    // recorded known limits.
     let divergences: &[&str] = &[
-        // #1317: the #1098 known limit that stays (the ftp/ftps schemes are Ask,
-        // see issue_1317_ask): scp-like and `<helper>::` remotes stay Allow
+        // #1098: accepted known limit (scp-like and <helper>:: remotes), no fix planned
         "git push host:path main",
         "git push user@host:path main",
         "git push git@github.com:o/r.git main",
