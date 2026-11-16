@@ -108,9 +108,10 @@ recorded, not hidden.
   (`./.ssh`, `./.aws`) by `mkdir` and `rm` are Allow; the home copies are
   protected (#1092).
 - **git push remotes.** Pushes to `https:`, `http:`, `ssh:`, `git:`,
-  `git+ssh:`, `ssh+git:`, `file:` URLs and to absolute or `~` paths are Ask,
-  and force pushes are Block. Still Allow: the scp form
-  (`git push git@host:o/r main`) and other `<scheme>://` helper URLs (#1098),
+  `git+ssh:`, `ssh+git:`, `file:`, `ftp:` and `ftps:` URLs (the same schemes
+  fetch asks, #1317) and to absolute or `~` paths are Ask, and force pushes
+  are Block. Still Allow, the #1098 known limit: the scp form
+  (`git push git@host:o/r main`) and other `<scheme>://` helper URLs,
   `<helper>::` remotes other than `ext::` (#1096), glob refspecs
   (`'refs/heads/*:refs/heads/*'`, #1095), `--follow-tags` (#1097), and
   relative local remotes (`git push sub/repo main`, #1100).

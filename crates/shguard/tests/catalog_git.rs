@@ -4075,11 +4075,55 @@ fn p2_audit_git_rows_issue_1253() {
             wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
         }
     }
+    // #1317: git push asks the ftp and ftps URL schemes like git fetch; a
+    // remote named `ftp`, other schemes and rsync (git refuses it) stay Allow.
+    let issue_1317_ask: &[&str] = &[
+        "git push ftp://h/r",
+        "git push 'Ftp://x'",
+        "git push 'ftp:x'",
+        "git push 'ftps://x'",
+        "git push 'FTP://x'",
+        "git push ftp:/x",
+        "git push 'ftp://h/r'",
+        "git push --repo=ftp://x",
+        "git push --repo ftp://x",
+        "git push -u ftp://x main",
+        "git push --dry-run ftp://x",
+        "git push origin ftp://x",
+        "git push -- ftp://x",
+        "git push ftps://x main",
+        "git fetch ftp://h/r",
+        "git fetch 'ftp:x'",
+        "git fetch 'ftps://x'",
+    ];
+    for cmd in issue_1317_ask {
+        let got = common::decide(&l, cmd);
+        if got != Decision::Ask {
+            wrong.push(format!("`{cmd}`: {got:?}, want Ask"));
+        }
+    }
+    let issue_1317_allow: &[&str] = &[
+        "git push ftp main",
+        "git push ftp",
+        "git push ftpx://x",
+        "git push ftp+ssh://x",
+        "git fetch ftp+ssh://x",
+        "git push rsync://h/r",
+        "git push host:path main",
+        "git push user@host:path main",
+    ];
+    for cmd in issue_1317_allow {
+        let got = common::decide(&l, cmd);
+        if got != Decision::Allow {
+            wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
+        }
+    }
     // P2 divergences, pinned as the current decision (Allow). The fix for each
     // linked issue must flip its group to Ask and move it into `singles`,
     // except the #1321 group, which stays Allow as a recorded known limit.
     let divergences: &[&str] = &[
-        // #1317: push/fetch remote schemes (#1098 accepted scp and helper remotes as a known limit)
+        // #1317: the #1098 known limit that stays (the ftp/ftps schemes are Ask,
+        // see issue_1317_ask): scp-like and `<helper>::` remotes stay Allow
         "git push host:path main",
         "git push user@host:path main",
         "git push git@github.com:o/r.git main",
@@ -4094,10 +4138,6 @@ fn p2_audit_git_rows_issue_1253() {
         "git push host:path",
         "git push 'foo::bar' main",
         "git push 'ext:sh'",
-        "git push ftp://h/r",
-        "git push 'Ftp://x'",
-        "git push 'ftp:x'",
-        "git push 'ftps://x'",
         "git fetch host:path",
         "git fetch user@host:path",
         "git fetch evil.example:repo",
