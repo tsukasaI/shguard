@@ -1745,11 +1745,7 @@ fn p2_audit_git_rows_issue_1253() {
             ],
             Decision::Ask,
         ),
-        (
-            &["git branch", "git stash list"],
-            &["{c} --format"],
-            Decision::Ask,
-        ),
+        (&["git branch"], &["{c} --format"], Decision::Ask),
         (
             &["git commit"],
             &[
@@ -4034,6 +4030,50 @@ fn p2_audit_git_rows_issue_1253() {
             wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
         }
     }
+    // #1322: a bare `--format` takes no value, so the next word is read as an
+    // option (git log matches only `--format=`).
+    let issue_1322_ask: &[&str] = &[
+        "git stash list --format --output=x",
+        "git stash list --format --output=/tmp/x",
+        "git stash list --format --output=Cargo.toml",
+        "git stash list --format %H",
+        "git stash list --format -p",
+        "git stash list --format --output x",
+        "git stash list --pretty --output=x",
+        "git stash list --format=%H --output=x",
+        "git stash list --output=x --format=%H",
+        "git stash list --format= --output=x",
+        "git stash list --output=x --format=",
+        "git stash list --form=%H",
+        "git stash list --forma",
+        "git stash list --format -- --output=x",
+    ];
+    for cmd in issue_1322_ask {
+        let got = common::decide(&l, cmd);
+        if got != Decision::Ask {
+            wrong.push(format!("`{cmd}`: {got:?}, want Ask"));
+        }
+    }
+    let issue_1322_allow: &[&str] = &[
+        "git stash list --format=%H",
+        "git stash list --format",
+        "git stash list --format=",
+        "git stash list --format --oneline",
+        "git stash list --format=--output=x",
+        "git stash list --pretty=format:%h",
+        "git stash list --pretty",
+        "git stash list --oneline --format=%H",
+        "git stash list -n 3 --format=%H",
+        "git stash list --max-count --output=x",
+        "git stash list --max-count=--output=x",
+        "git stash list -n --output=x",
+    ];
+    for cmd in issue_1322_allow {
+        let got = common::decide(&l, cmd);
+        if got != Decision::Allow {
+            wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
+        }
+    }
     // P2 divergences, pinned as the current decision (Allow). The fix for each
     // linked issue must flip its group to Ask and move it into `singles`,
     // except the #1321 group, which stays Allow as a recorded known limit.
@@ -4107,10 +4147,6 @@ fn p2_audit_git_rows_issue_1253() {
         "git diff -- '.en*'",
         "git add '.en*'",
         "git add '*.pem'",
-        // #1322: stash list with a detached --format
-        "git stash list --format --output=x",
-        "git stash list --format --output=/tmp/x",
-        "git stash list --format --output=Cargo.toml",
     ];
     for cmd in divergences {
         let got = common::decide(&l, cmd);

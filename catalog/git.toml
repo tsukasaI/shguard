@@ -1242,7 +1242,7 @@ long = "oneline"
 long = "stat"
 [[row.opt]]
 long = "format"
-value = { takes = "inert" }
+value = { optional = "inert" }
 [[row.opt]]
 long = "pretty"
 value = { optional = "inert" }
