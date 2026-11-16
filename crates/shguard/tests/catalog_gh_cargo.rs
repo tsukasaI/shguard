@@ -936,23 +936,23 @@ fn p2_audit_cargo_rows_issue_1250() {
 
     // #1312: rustfmt inline config after `fmt --` stays Allow by decision;
     // these are permanent Allow pins, not a tripwire to flip.
-    let divergences: &[&str] = &[
+    let allow_pins: &[&str] = &[
         "cargo fmt -- --config emit_mode=files",
         "cargo fmt --check -- --config emit_mode=files",
         "cargo fmt -- --config make_backup=true",
         "cargo fmt -- --backup",
     ];
-    let mut moved: Vec<String> = Vec::new();
-    for cmd in divergences {
+    let mut wrong_allow: Vec<String> = Vec::new();
+    for cmd in allow_pins {
         let got = decide(&l, cmd);
         if got != Decision::Allow {
-            moved.push(format!("`{cmd}`: {got:?}, want Allow"));
+            wrong_allow.push(format!("`{cmd}`: {got:?}, want Allow"));
         }
     }
     assert!(
-        moved.is_empty(),
-        "unexpected decisions:\n{}",
-        moved.join("\n")
+        wrong_allow.is_empty(),
+        "not Allow (#1312 decision B):\n{}",
+        wrong_allow.join("\n")
     );
 }
 
