@@ -4215,7 +4215,8 @@ fn p2_audit_git_rows_issue_1253() {
         "git remote prune ./x",
         "git remote prune x/y",
         // #1319: recorded known limit (docs/threat-model.md), permanent Allow
-        // tripwires: git pre-scans argv for --no-index
+        // tripwires: git pre-scans argv for `--no-index`, which shguard reads
+        // as an inert option's value
         "git diff --word-diff-regex --no-index a b",
         "git diff --diff-algorithm --no-index a b",
         "git diff --src-prefix --no-index a b",
