@@ -1,9 +1,31 @@
 # Changelog
 
-## Unreleased
+## 0.14.0 - 2026-11-18
+
+### Added
+
+- A rule target can set `literal_tilde = true` to match a leading `~` as
+  the literal byte a quoted `'~'` word keeps, instead of the shell-expanded
+  home directory. The pattern must start with `~` (#1318).
 
 ### Changed
 
+- `rg`, `grep`, `ls`, `tree`, `eza` and `tokei` are `cwd_sensitive`, as `fd`
+  is: after any `cd` they are Ask, so `cd / && ls -R` and
+  `cd && rg --hidden -e x` no longer read a broad root without a path
+  operand. `cd src && ls` is Ask too (#1320).
+- An `rg` word that starts with `=` is Ask, since rg reads `-f=.env` as the
+  file `.env` while shguard saw the path `=.env` (#1315).
+- A `git` word that starts with `:` is Ask, so index blobs (`git show :.env`)
+  and magic pathspecs (`:(icase).ENV`) no longer bypass the credential rules
+  (#1321).
+- `git stash list --format` takes an optional glued value, as on `git log`,
+  so `git stash list --format --output=x` is Ask: git opens `--output` for
+  writing (#1322).
+- `git push` to an `ftp:` or `ftps:` URL is Ask, as `git fetch` already was
+  (#1317).
+- A quoted leading `~` in a `git` remote or path (`git push '~/x' main`) is
+  Ask, since git expands it itself (#1318).
 - The decision log classes `parse_refusal:empty_command` and
   `parse_refusal:malformed_input` are now `empty_command` and
   `malformed_input`, so the `parse_refusal:` prefix always carries a parser

@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "shguard"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "libc",
  "serde",
@@ -858,14 +858,14 @@ dependencies = [
 
 [[package]]
 name = "shguard-kernel"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "creusot-std",
 ]
 
 [[package]]
 name = "shguard-syntax"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "brush-parser",
  "proptest",
