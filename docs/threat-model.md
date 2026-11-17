@@ -106,10 +106,11 @@ recorded, not hidden.
   `--no-index` word before it parses options, so `git diff -S --no-index a b`
   is a file-to-file diff, while the row reads `--no-index` as the value of
   `-S` and answers Allow. The same holds for `-G`, `--src-prefix`,
-  `--dst-prefix`, `--word-diff-regex`, `--diff-algorithm`, `--diff-filter`
-  and `--inter-hunk-context`. `a` and `b` still go through the relative
-  path, `..`, absolute and credential rules; the difference is that an
-  ignored or untracked file can be shown.
+  `--dst-prefix` and `--word-diff-regex`; with `--diff-algorithm`,
+  `--diff-filter` and `--inter-hunk-context` git rejects `--no-index` as the
+  value and exits. `a` and `b` still go through the relative path, `..`,
+  absolute and credential rules; the difference is that an ignored or
+  untracked file can be shown.
 - **Writes to `.env`.** Since #1113 the credential rule of `cp` covers every
   operand, so `cp x .env` and `cp .env.example .env` are Ask (they were
   Allow under #1090). Writes to relative credential-shaped directories
