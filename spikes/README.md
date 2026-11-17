@@ -222,8 +222,25 @@ also keeps the parser's output flat:
 
 - Store `Script { nodes: Vec<Node>, root }`, where each compound node holds
   `first/len` ranges into later indices.
-- `wf` lives in an `Invariant` on the arena, so consumers get it for free, as
-  in (d).
+- Decision #1008: keep contiguous child ranges, as in (c'). The children of
+  a compound node are `nodes[first .. first + len]`, all at strictly later
+  indices. So the v2 parser must lay nodes out so that each compound node's
+  children form one contiguous block, which is a breadth-first (level by
+  level) layout. A recursive-descent parser emits pre-order, where a node's
+  children are separated by their own descendants. It therefore has to
+  build the tree first and lay it out breadth-first afterwards, or emit the
+  children level by level.
+- Rejected in #1008: a side table (`children: Vec<usize>`, with
+  `{ first, len }` indexing it). It removes the contiguity constraint, at
+  the cost of one more array and an indirection per child.
+- `wf` should live in an `Invariant` on the arena, so consumers get it for
+  free, as in (d). The spike does not exercise this yet: it passes `wf` as
+  `#[requires]`. The first v2 consumer must prove through `impl Invariant`
+  for the tree, as (d) did for `Witness`.
+- `wf` admits shared children (two nodes whose ranges overlap) and nodes
+  that no range reaches. `ok_at(s, 0)` is still well-defined and `check`
+  still returns it. Tighten `wf` only if a consumer needs each node to have
+  exactly one parent.
 - Evaluate bottom-up with a `Vec<Decision>` scratch buffer, built with
   `push` (terminates) rather than `vec![x; n]` (not terminates).
   Alternatively, take a caller-provided `&mut [Decision]` to keep
