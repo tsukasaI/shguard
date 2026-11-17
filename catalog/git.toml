@@ -316,6 +316,8 @@ long = "no-decorate"
 # --ext-diff and --textconv (run configured programs), -O<orderfile>,
 # --relative, -C (copy detection; clashes with the global -C in a reader's
 # eye), the abbreviated long options and `--end-of-options`.
+# Not modelled: git pre-scans argv for a `--no-index` word, so `-S --no-index
+# a b` is a file diff while this row reads it as -S's value (#1319).
 [[row]]
 key = ["git", "diff"]
 source = "https://git-scm.com/docs/git-diff https://git-scm.com/docs/diff-options"
