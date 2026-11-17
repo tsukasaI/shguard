@@ -4174,28 +4174,10 @@ fn p2_audit_git_rows_issue_1253() {
             wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
         }
     }
-    // #1319: recorded known limit (docs/threat-model.md): git pre-scans argv
-    // for `--no-index`, shguard reads it as an inert option's value
-    let issue_1319_allow: &[&str] = &[
-        "git diff --word-diff-regex --no-index a b",
-        "git diff --diff-algorithm --no-index a b",
-        "git diff --src-prefix --no-index a b",
-        "git diff --dst-prefix --no-index a b",
-        "git diff --diff-filter --no-index a b",
-        "git diff -G --no-index a b",
-        "git diff -S --no-index a b",
-        "git diff --inter-hunk-context --no-index a b",
-    ];
-    for cmd in issue_1319_allow {
-        let got = common::decide(&l, cmd);
-        if got != Decision::Allow {
-            wrong.push(format!("`{cmd}`: {got:?}, want Allow"));
-        }
-    }
     // P2 divergences, pinned as the current decision (Allow). The fix for each
     // linked issue must flip its group to Ask and move it into its own Ask
-    // block, except the #1098, #1100 and #1321 groups, which stay Allow as
-    // recorded known limits.
+    // block, except the #1098, #1100, #1319 and #1321 groups, which stay Allow
+    // as recorded known limits.
     let divergences: &[&str] = &[
         // #1098: accepted known limit (scp-like and <helper>:: remotes), no fix planned
         "git push host:path main",
@@ -4232,6 +4214,17 @@ fn p2_audit_git_rows_issue_1253() {
         "git fetch -n ./x",
         "git remote prune ./x",
         "git remote prune x/y",
+        // #1319: recorded known limit (docs/threat-model.md), permanent Allow
+        // tripwires: git pre-scans argv for `--no-index`, which shguard reads
+        // as an inert option's value
+        "git diff --word-diff-regex --no-index a b",
+        "git diff --diff-algorithm --no-index a b",
+        "git diff --src-prefix --no-index a b",
+        "git diff --dst-prefix --no-index a b",
+        "git diff --diff-filter --no-index a b",
+        "git diff -G --no-index a b",
+        "git diff -S --no-index a b",
+        "git diff --inter-hunk-context --no-index a b",
         // #1321: recorded known limits (docs/threat-model.md), permanent Allow
         // tripwires: `<rev>:<path>` blob reads and quoted glob pathspecs
         "git log -p -- '.[e]nv'",
