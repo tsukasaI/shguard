@@ -103,7 +103,7 @@ jobs:
       # install-nix.sh falls back to it), so leaving that input empty changes
       # nothing. The token is this job's read-only one on a public repo, and it
       # grants nothing beyond a higher rate limit (#1016).
-      - uses: cachix/install-nix-action@a49548c11d9846ad46ecc0115273879b045f001c # v31.10.7
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
       # The Creusot overlay (creusot-rustc, why3, the solvers) has no binary
       # cache and takes about 70 minutes to build from source, so /nix is kept
       # in the Actions cache keyed by the flake (#1014). Runs restore an exact
